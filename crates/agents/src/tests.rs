@@ -8,6 +8,7 @@ use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::military::{move_required, Movement, Unit};
 use archipelago_sim::observation::Observation;
 use archipelago_sim::scenario;
+use archipelago_sim::world::Station;
 
 use crate::HeuristicAgent;
 
@@ -36,7 +37,7 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
     let region3_units: Vec<UnitId> = world
         .units
         .iter()
-        .filter(|u| u.owner == faction && u.location == region)
+        .filter(|u| u.owner == faction && u.station == Station::Region(region))
         .map(|u| u.id)
         .collect();
     assert_eq!(region3_units.len(), 2, "expected two faction-0 units at the capital");
@@ -46,11 +47,12 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
     let link = world.link_between(region, target).unwrap();
     let required = move_required(link.kind, world.region(target).terrain, true);
     world.units[moving_unit_id.index()].movement = Some(Movement {
-        from: region,
-        to: target,
+        from: Station::Region(region),
+        to: Station::Region(target),
         progress: required * 0.5,
         required,
         retreat: false,
+        strait_zone: None,
     });
 
     // Add a third faction-0 unit at region 3, idle, so there are three
@@ -63,7 +65,7 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
         id: reserve_unit_id,
         owner: faction,
         name: "Test Reserve Corps".to_string(),
-        location: region,
+        station: Station::Region(region),
         movement: None,
         manpower: UNIT_MANPOWER,
         equipment: UNIT_EQUIPMENT,
@@ -72,7 +74,7 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
         supply: 1.0,
         arms_delivery: 1.0,
         arms_budget: 0.0,
-        arms_delivery_region: region,
+        arms_delivery_station: Station::Region(region),
         experience: 0.0,
         alive: true,
     });
@@ -81,13 +83,14 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
     let obs = Observation { faction, world: &world };
     let actions = agent.decide(&obs);
 
-    let move_actions: Vec<(UnitId, RegionId)> = actions
+    let move_actions: Vec<(UnitId, Station)> = actions
         .iter()
         .filter_map(|a| match a {
             Action::MoveUnit { unit, to } => Some((*unit, *to)),
             _ => None,
         })
         .collect();
+    let target = Station::Region(target);
 
     assert!(
         !move_actions.contains(&(moving_unit_id, target)),

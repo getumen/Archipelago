@@ -6,7 +6,7 @@
 use archipelago_sim::event::Event;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::sim::Outcome;
-use archipelago_sim::world::World;
+use archipelago_sim::world::{Domain, Station, World};
 
 /// Terminal columns count double-width for non-ASCII (CJK) characters, so a
 /// plain `.len()`-based pad leaves Japanese names looking ragged; this
@@ -41,14 +41,30 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
                 casualties
             )
         }
-        Event::UnitDestroyed { unit, region, owner } => {
+        Event::NavalBattle { zone, factions, casualties } => {
+            let zone_name = &world.sea_zone(*zone).name;
+            let names: Vec<&str> = factions.iter().map(|f| world.faction(*f).name.as_str()).collect();
             format!(
+                "海戦: {} で {} が交戦 (損耗 {:.2}万人)",
+                zone_name,
+                names.join(" vs "),
+                casualties
+            )
+        }
+        Event::UnitDestroyed { unit, station, owner } => match station {
+            Station::Region(region) => format!(
                 "部隊壊滅: {} 軍 部隊#{} が {} で失われた",
                 world.faction(*owner).name,
                 unit.0,
                 world.region(*region).name
-            )
-        }
+            ),
+            Station::Sea(zone) => format!(
+                "艦隊撃沈: {} 軍 部隊#{} が {} で撃沈された",
+                world.faction(*owner).name,
+                unit.0,
+                world.sea_zone(*zone).name
+            ),
+        },
         Event::RegionCaptured { region, from, to } => {
             format!(
                 "占領: {} を {} が {} から奪取",
@@ -68,18 +84,28 @@ pub fn print_faction_table(world: &World) {
     println!();
     println!("--- 勢力サマリ (day {}) ---", world.day);
     println!(
-        "{}  領土  部隊   人的資源  補給率  安定度  戦意  不足率  配給率",
+        "{}  領土  部隊  艦隊   人的資源  補給率  安定度  戦意  不足率  配給率",
         pad_right("勢力", 10)
     );
     for faction in &world.factions {
         let status = if faction.alive { "" } else { "(脱落)" };
         let regions = world.region_count(faction.id);
-        let units = world.units.iter().filter(|u| u.alive && u.owner == faction.id).count();
+        let units = world
+            .units
+            .iter()
+            .filter(|u| u.alive && u.owner == faction.id && u.station.domain() == Domain::Land)
+            .count();
+        let fleets = world
+            .units
+            .iter()
+            .filter(|u| u.alive && u.owner == faction.id && u.station.domain() == Domain::Sea)
+            .count();
         println!(
-            "{}  {:4}  {:4}  {:8.2}  {:6.1}%  {:6.1}  {:5.1}  {:5.1}%  {:5.1}%{status}",
+            "{}  {:4}  {:4}  {:4}  {:8.2}  {:6.1}%  {:6.1}  {:5.1}  {:5.1}%  {:5.1}%{status}",
             pad_right(&faction.name, 10),
             regions,
             units,
+            fleets,
             faction.manpower,
             faction.supply_ratio * 100.0,
             faction.stability,
@@ -115,6 +141,33 @@ pub fn print_faction_table(world: &World) {
     }
 }
 
+/// Stage 2D (docs/phase2-spec.md "海域の表(制海権と艦隊数)"): sea control per
+/// faction and fleet counts per zone.
+pub fn print_sea_zone_table(world: &World) {
+    println!();
+    println!("--- 海域 (day {}) ---", world.day);
+    let header: Vec<String> = world.factions.iter().map(|f| format!("{}制海権", f.name)).collect();
+    println!(
+        "{}  {}  艦隊数",
+        pad_right("海域", 10),
+        header.join("  "),
+    );
+    for zone in &world.sea_zones {
+        let control_line: Vec<String> = zone.control.iter().map(|c| format!("{:5.1}%", c * 100.0)).collect();
+        let fleets = world
+            .units
+            .iter()
+            .filter(|u| u.alive && u.station == Station::Sea(zone.id))
+            .count();
+        println!(
+            "{}  {}  {:4}",
+            pad_right(&zone.name, 10),
+            control_line.join("  "),
+            fleets,
+        );
+    }
+}
+
 pub fn print_final_board(world: &World) {
     println!();
     println!("=== 最終盤面 (day {}) ===", world.day);
@@ -135,6 +188,7 @@ pub fn print_final_board(world: &World) {
             region.node_throughput(),
         );
     }
+    print_sea_zone_table(world);
 }
 
 pub fn print_outcome(world: &World, outcome: Outcome) {

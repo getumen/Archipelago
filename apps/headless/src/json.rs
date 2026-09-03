@@ -6,7 +6,7 @@
 use archipelago_sim::construction::{Construction, Project};
 use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::sim::Outcome;
-use archipelago_sim::world::World;
+use archipelago_sim::world::{Domain, Station, World};
 
 /// Renders a `[f32; GOOD_COUNT]`-shaped array as a JSON object keyed by
 /// `Good::key()`, e.g. `{"food":1.0,"energy":2.0,...}`.
@@ -76,7 +76,8 @@ pub fn serialize_state(world: &World, seed: u64, outcome: Outcome) -> String {
     out.push_str(&format!("\"day\":{},", world.day));
     out.push_str(&format!("\"outcome\":{},", serialize_outcome(world, outcome)));
     out.push_str(&format!("\"factions\":{},", serialize_factions(world)));
-    out.push_str(&format!("\"regions\":{}", serialize_regions(world)));
+    out.push_str(&format!("\"regions\":{},", serialize_regions(world)));
+    out.push_str(&format!("\"sea_zones\":{}", serialize_sea_zones(world)));
     out.push('}');
     out
 }
@@ -98,14 +99,24 @@ fn serialize_factions(world: &World) -> String {
         .factions
         .iter()
         .map(|f| {
-            let units = world.units.iter().filter(|u| u.alive && u.owner == f.id).count();
+            let units = world
+                .units
+                .iter()
+                .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Land)
+                .count();
+            let fleets = world
+                .units
+                .iter()
+                .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Sea)
+                .count();
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
                 world.region_count(f.id),
                 units,
+                fleets,
                 number(f.manpower),
                 good_object(&f.stock),
                 number(f.conscription),
@@ -149,6 +160,33 @@ fn serialize_regions(world: &World) -> String {
                 construction_object(&r.construction),
                 number(r.import_flow),
                 number(r.node_throughput()),
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Stage 2D (docs/phase2-spec.md "海域の表(制海権と艦隊数)"): sea control per
+/// faction and the fleet count present, per sea zone.
+fn serialize_sea_zones(world: &World) -> String {
+    let items: Vec<String> = world
+        .sea_zones
+        .iter()
+        .map(|z| {
+            let control: Vec<String> = z.control.iter().map(|&c| number(c)).collect();
+            let fleets = world
+                .units
+                .iter()
+                .filter(|u| u.alive && u.station == Station::Sea(z.id))
+                .count();
+            format!(
+                "{{\"id\":{},\"name\":{},\"coast\":{},\"adjacent\":{},\"control\":[{}],\"fleets\":{}}}",
+                z.id.0,
+                string(&z.name),
+                format!("[{}]", z.coast.iter().map(|r| r.0.to_string()).collect::<Vec<_>>().join(",")),
+                format!("[{}]", z.adjacent.iter().map(|zz| zz.0.to_string()).collect::<Vec<_>>().join(",")),
+                control.join(","),
+                fleets,
             )
         })
         .collect();

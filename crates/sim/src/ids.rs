@@ -20,3 +20,4 @@ macro_rules! def_id {
 def_id!(RegionId);
 def_id!(FactionId);
 def_id!(UnitId);
+def_id!(SeaZoneId);

@@ -8,6 +8,7 @@ use crate::event::Event;
 use crate::ids::FactionId;
 use crate::logistics;
 use crate::military;
+use crate::naval;
 use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
@@ -47,11 +48,19 @@ impl Simulation {
     }
 
     /// Advances the simulation by one day, in the fixed tick order from the
-    /// spec: imports, economy, construction, supply, movement, combat,
-    /// recovery, occupation, politics, devastation recovery, then survival
-    /// bookkeeping.
+    /// spec: sea control, imports, economy, construction, supply, movement,
+    /// combat (land, then naval), recovery, occupation, politics,
+    /// devastation recovery, then survival bookkeeping.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
+
+        // Stage 2D: sea control is recomputed first, from fleet positions
+        // as they stood at the end of the previous tick's movement — the
+        // same "snapshot before this tick's changes" convention `contested`
+        // (recompute_supply, tick_imports) already follows for land. Both
+        // blockade effects below (import capacity, strait throughput) read
+        // this snapshot.
+        naval::tick_sea_control(&mut self.world);
 
         // Imports land before production's civilian ration is served, so a
         // faction that can't feed itself domestically is actually helped by
@@ -67,10 +76,29 @@ impl Simulation {
         logistics::recompute_supply(&mut self.world);
         logistics::distribute_supply(&mut self.world);
         military::tick_movement(&mut self.world);
-        let report = military::tick_combat(&mut self.world, &mut self.rng, &mut events);
-        military::tick_recovery(&mut self.world, &report.fought, &mut events);
+
+        let land_report = military::tick_combat(&mut self.world, &mut self.rng, &mut events);
+        let naval_report = naval::tick_naval_combat(&mut self.world, &mut self.rng, &mut events);
+        // Stage 2D: land and naval combat resolve independently (different
+        // topologies, `Station::Region` vs `Station::Sea` units never
+        // share a battle) but feed the *same* single recovery/politics pass
+        // below — a fleet that broke in naval combat routs or sinks through
+        // exactly the mechanism a broken land unit does, and a faction's
+        // war support must see both domains' casualties, not just land's.
+        let mut fought = land_report.fought;
+        for (i, &f) in naval_report.fought.iter().enumerate() {
+            if f {
+                fought[i] = true;
+            }
+        }
+        let mut casualties = land_report.casualties;
+        for (i, &c) in naval_report.casualties.iter().enumerate() {
+            casualties[i] += c;
+        }
+
+        military::tick_recovery(&mut self.world, &fought, &mut events);
         military::tick_occupation(&mut self.world, &mut events);
-        politics::tick_politics(&mut self.world, &report.casualties);
+        politics::tick_politics(&mut self.world, &casualties);
         // Runs after politics so it sees today's freshly computed
         // unrest/stability, per the Stage 2B recovery formula.
         construction::tick_devastation_recovery(&mut self.world);

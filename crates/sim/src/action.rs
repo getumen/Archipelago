@@ -9,14 +9,23 @@ use crate::construction::{required_points, Construction, Project};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::logistics;
-use crate::military::{move_required, Movement, Unit};
-use crate::world::World;
+use crate::military::{fleet_move_required, move_required, Movement, Unit};
+use crate::naval;
+use crate::world::{Domain, Station, World};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
-    MoveUnit { unit: UnitId, to: RegionId },
+    /// A land unit's `to` must be `Station::Region`; a fleet's must be
+    /// `Station::Sea` — `apply_move` validates the destination matches the
+    /// moving unit's own domain and rejects it otherwise
+    /// (`ActionError::NotAdjacent`).
+    MoveUnit { unit: UnitId, to: Station },
     HoldUnit { unit: UnitId },
-    RecruitUnit { region: RegionId },
+    /// Stage 2D (docs/phase2-spec.md "艦隊"): `domain` picks land or sea.
+    /// A fleet can only be built in an owned, uncontested region that has a
+    /// port (`region.port > 0.0`); it launches into that port's lowest-id
+    /// facing sea zone (`naval::home_zone`).
+    RecruitUnit { region: RegionId, domain: Domain },
     ReinforceUnit { unit: UnitId },
     SetConscription(f32),
     SetIndustryPriority { good: Good, weight: f32 },
@@ -49,6 +58,9 @@ pub enum ActionError {
     AlreadyBuilding,
     /// `Action::CancelBuild` on a region with no project in progress.
     NoConstruction,
+    /// Stage 2D: `Action::RecruitUnit { domain: Domain::Sea, .. }` against a
+    /// region with no port (or, in principle, no facing sea zone at all).
+    NoPort,
 }
 
 pub fn apply_action(
@@ -59,7 +71,7 @@ pub fn apply_action(
     match action {
         Action::MoveUnit { unit, to } => apply_move(world, faction, unit, to),
         Action::HoldUnit { unit } => apply_hold(world, faction, unit),
-        Action::RecruitUnit { region } => apply_recruit(world, faction, region),
+        Action::RecruitUnit { region, domain } => apply_recruit(world, faction, region, domain),
         Action::ReinforceUnit { unit } => apply_reinforce(world, faction, unit),
         Action::SetConscription(value) => apply_set_conscription(world, faction, value),
         Action::SetIndustryPriority { good, weight } => {
@@ -94,17 +106,51 @@ fn apply_move(
     world: &mut World,
     faction: FactionId,
     unit_id: UnitId,
-    to: RegionId,
+    to: Station,
 ) -> Result<(), ActionError> {
     let unit = owned_unit(world, faction, unit_id)?;
-    let from = unit.location;
-    if world.has_enemy_units(from, faction) {
+    let from = unit.station;
+
+    let pinned = match from {
+        Station::Region(r) => world.has_enemy_units(r, faction),
+        Station::Sea(z) => world.has_enemy_fleets(z, faction),
+    };
+    if pinned {
         return Err(ActionError::Pinned);
     }
-    let link = world.link_between(from, to).ok_or(ActionError::NotAdjacent)?;
-    let dest = world.region(to);
-    let hostile = dest.owner != faction;
-    let required = move_required(link.kind, dest.terrain, hostile);
+
+    let (required, strait_zone) = match (from, to) {
+        (Station::Region(from_r), Station::Region(to_r)) => {
+            let link = world.link_between(from_r, to_r).ok_or(ActionError::NotAdjacent)?;
+            let dest = world.region(to_r);
+            let hostile = dest.owner != faction;
+            let required = move_required(link.kind, dest.terrain, hostile);
+            // External code review fix (Stage 2D): a Strait link's crossing
+            // time is throttled the same way its supply throughput is — by
+            // the highest sea control any other faction holds in the zone
+            // it passes through — but sea control is recomputed every tick,
+            // so that factor must NOT be sampled once and baked into
+            // `required` here (docs/phase2-spec.md "1. 海峡リンクの遮断":
+            // "移動もこの係数で遅くなる" means the crossing tracks *current*
+            // control throughout, not the control at the moment it was
+            // ordered). `required` stays the control-independent travel
+            // cost; `tick_movement` applies the live factor to progress
+            // every tick via `strait_zone`.
+            (required, link.strait_zone)
+        }
+        (Station::Sea(from_z), Station::Sea(to_z)) => {
+            if !world.sea_zone(from_z).adjacent.contains(&to_z) {
+                return Err(ActionError::NotAdjacent);
+            }
+            let enemy_control = world.sea_zone(to_z).enemy_control_max(faction);
+            let hostile = enemy_control > world.sea_zone(to_z).control[faction.index()];
+            (fleet_move_required(hostile), None)
+        }
+        // A land unit can never be ordered into a sea zone, nor a fleet
+        // into a region — `fleet_cannot_enter_land` and its converse are
+        // exactly this branch.
+        _ => return Err(ActionError::NotAdjacent),
+    };
 
     world.unit_mut(unit_id).movement = Some(Movement {
         from,
@@ -112,6 +158,7 @@ fn apply_move(
         progress: 0.0,
         required,
         retreat: false,
+        strait_zone,
     });
     Ok(())
 }
@@ -126,6 +173,7 @@ fn apply_recruit(
     world: &mut World,
     faction: FactionId,
     region_id: RegionId,
+    domain: Domain,
 ) -> Result<(), ActionError> {
     let region = world
         .regions
@@ -137,6 +185,21 @@ fn apply_recruit(
     if world.has_enemy_units(region_id, faction) {
         return Err(ActionError::RegionContested);
     }
+
+    // Stage 2D (docs/phase2-spec.md "艦隊": "艦隊は港のある自領地域でのみ建造
+    // できる"): a fleet needs a port to launch from; a land unit doesn't
+    // care about `region.port` at all.
+    let station = match domain {
+        Domain::Land => Station::Region(region_id),
+        Domain::Sea => {
+            if region.port <= 0.0 {
+                return Err(ActionError::NoPort);
+            }
+            let zone = naval::home_zone(world, region_id).ok_or(ActionError::NoPort)?;
+            Station::Sea(zone)
+        }
+    };
+
     let f = world.faction(faction);
     if f.manpower < UNIT_MANPOWER {
         return Err(ActionError::InsufficientManpower);
@@ -149,12 +212,16 @@ fn apply_recruit(
     world.faction_mut(faction).stock[Good::Arms.index()] -= UNIT_EQUIPMENT;
 
     let id = UnitId(world.units.len() as u32);
-    let name = format!("{} Corps {}", world.faction(faction).name, id.0);
+    let kind = match domain {
+        Domain::Land => "Corps",
+        Domain::Sea => "Fleet",
+    };
+    let name = format!("{} {} {}", world.faction(faction).name, kind, id.0);
     world.units.push(Unit {
         id,
         owner: faction,
         name,
-        location: region_id,
+        station,
         movement: None,
         manpower: UNIT_MANPOWER,
         equipment: UNIT_EQUIPMENT,
@@ -163,7 +230,7 @@ fn apply_recruit(
         supply: 1.0,
         arms_delivery: 1.0,
         arms_budget: 0.0,
-        arms_delivery_region: region_id,
+        arms_delivery_station: station,
         experience: 0.0,
         alive: true,
     });
@@ -176,30 +243,39 @@ fn apply_reinforce(
     unit_id: UnitId,
 ) -> Result<(), ActionError> {
     let unit = owned_unit(world, faction, unit_id)?;
-    if world.has_enemy_units(unit.location, faction) {
+    let pinned = match unit.station {
+        Station::Region(r) => world.has_enemy_units(r, faction),
+        Station::Sea(z) => world.has_enemy_fleets(z, faction),
+    };
+    if pinned {
         return Err(ActionError::RegionContested);
     }
 
-    // External code review fix (Stage 2C): `arms_delivery`/`arms_budget`
-    // are stamped by `logistics::distribute_supply`, which runs once a
-    // tick *before* movement. If this unit has moved since that stamp
-    // (`arms_delivery_region != location`), the cached numbers describe a
-    // region it has already left - trust them and a unit could finish
-    // marching out of a well-supplied region into a cut-off one and still
-    // reinforce at the old, high ratio. Recompute fresh for the *current*
-    // region on the spot instead of trying to invalidate/track the cache
-    // from `military::tick_movement` (deriving on demand here is the
-    // simpler thing to reason about: one call site, no extra bookkeeping
-    // needed anywhere movement happens), then stamp the refreshed numbers
-    // back onto the unit so a second `ReinforceUnit` against it later in
-    // this same batch sees the already-fresh, already-being-spent budget
-    // rather than recomputing - and re-granting - it again.
-    if unit.arms_delivery_region != unit.location {
-        let (ratio, budget) = logistics::instantaneous_arms_delivery(world, unit_id);
+    // External code review fix (Stage 2C; Stage 2D extends it to fleets):
+    // `arms_delivery`/`arms_budget` are stamped by
+    // `logistics::distribute_supply`, which runs once a tick *before*
+    // movement. If this unit has moved since that stamp
+    // (`arms_delivery_station != station`), the cached numbers describe a
+    // place it has already left - trust them and a unit could finish
+    // marching (or sailing) out of a well-supplied place into a cut-off one
+    // and still reinforce at the old, high ratio. Recompute fresh for the
+    // *current* station on the spot instead of trying to invalidate/track
+    // the cache from `military::tick_movement` (deriving on demand here is
+    // the simpler thing to reason about: one call site, no extra
+    // bookkeeping needed anywhere movement happens), then stamp the
+    // refreshed numbers back onto the unit so a second `ReinforceUnit`
+    // against it later in this same batch sees the already-fresh,
+    // already-being-spent budget rather than recomputing - and
+    // re-granting - it again.
+    if unit.arms_delivery_station != unit.station {
+        let (ratio, budget) = match unit.station.domain() {
+            Domain::Land => logistics::instantaneous_arms_delivery(world, unit_id),
+            Domain::Sea => naval::instantaneous_fleet_arms_delivery(world, unit_id),
+        };
         let unit = world.unit_mut(unit_id);
         unit.arms_delivery = ratio;
         unit.arms_budget = budget;
-        unit.arms_delivery_region = unit.location;
+        unit.arms_delivery_station = unit.station;
     }
 
     let unit = world.unit(unit_id);

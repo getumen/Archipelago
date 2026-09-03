@@ -9,14 +9,16 @@ use crate::balance::{
 use crate::construction::{self, Construction, Project};
 use crate::economy;
 use crate::good::{Good, GOOD_COUNT};
-use crate::ids::{FactionId, RegionId};
+use crate::ids::{FactionId, RegionId, SeaZoneId};
 use crate::logistics;
 use crate::military;
+use crate::naval;
 use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
 use crate::sim::Simulation;
 use crate::trade;
+use crate::world::{Domain, Station};
 
 #[test]
 fn supply_corridor_cut() {
@@ -45,7 +47,7 @@ fn combat_reduces_organization() {
         .iter()
         .position(|u| u.owner == FactionId(1))
         .unwrap();
-    world.units[intruder].location = RegionId(3);
+    world.units[intruder].station = Station::Region(RegionId(3));
     world.units[intruder].movement = None;
 
     let org_before: Vec<f32> = world.units.iter().map(|u| u.organization).collect();
@@ -60,7 +62,7 @@ fn combat_reduces_organization() {
     let defender = world
         .units
         .iter()
-        .find(|u| u.owner == FactionId(0) && u.location == RegionId(3))
+        .find(|u| u.owner == FactionId(0) && u.station == Station::Region(RegionId(3)))
         .unwrap();
     assert!(defender.organization < org_before[defender.id.index()]);
 }
@@ -75,7 +77,7 @@ fn occupation_flips_owner() {
         .iter()
         .position(|u| u.owner == FactionId(0))
         .unwrap();
-    world.units[mover].location = RegionId(8);
+    world.units[mover].station = Station::Region(RegionId(8));
     world.units[mover].movement = None;
 
     let mut events = Vec::new();
@@ -120,7 +122,7 @@ fn invalid_action_rejected() {
         .find(|u| u.owner == FactionId(0))
         .unwrap()
         .id;
-    let before_location = sim.world.unit(unit_id).location;
+    let before_station = sim.world.unit(unit_id).station;
     let before_movement = sim.world.unit(unit_id).movement;
 
     // Region 9 (Kyushu) is nowhere near faction 0's units.
@@ -128,12 +130,12 @@ fn invalid_action_rejected() {
         FactionId(0),
         &[Action::MoveUnit {
             unit: unit_id,
-            to: RegionId(9),
+            to: Station::Region(RegionId(9)),
         }],
     );
 
     assert_eq!(errors, vec![ActionError::NotAdjacent]);
-    assert_eq!(sim.world.unit(unit_id).location, before_location);
+    assert_eq!(sim.world.unit(unit_id).station, before_station);
     assert_eq!(sim.world.unit(unit_id).movement, before_movement);
 }
 
@@ -170,7 +172,7 @@ fn occupation_resets_on_occupier_change() {
         .iter()
         .position(|u| u.owner == FactionId(0))
         .unwrap();
-    world.units[mover0].location = region_id;
+    world.units[mover0].station = Station::Region(region_id);
     world.units[mover0].movement = None;
 
     let mut events = Vec::new();
@@ -181,13 +183,13 @@ fn occupation_resets_on_occupier_change() {
     // Faction 0's unit leaves and a faction-1 unit takes its place: the
     // occupier changes, so the progress faction 0 earned must be discarded
     // rather than letting faction 1 finish the capture with a head start.
-    world.units[mover0].location = RegionId(0);
+    world.units[mover0].station = Station::Region(RegionId(0));
     let mover1 = world
         .units
         .iter()
         .position(|u| u.owner == FactionId(1))
         .unwrap();
-    world.units[mover1].location = region_id;
+    world.units[mover1].station = Station::Region(region_id);
     world.units[mover1].movement = None;
 
     military::tick_occupation(&mut world, &mut events);
@@ -209,7 +211,7 @@ fn depleted_unit_is_destroyed_not_retreating() {
         .iter()
         .position(|u| u.owner == FactionId(0))
         .unwrap();
-    world.units[unit_idx].location = region_id;
+    world.units[unit_idx].station = Station::Region(region_id);
     world.units[unit_idx].movement = None;
     world.units[unit_idx].organization = 0.0;
     world.units[unit_idx].manpower = UNIT_DEATH_MANPOWER;
@@ -222,7 +224,7 @@ fn depleted_unit_is_destroyed_not_retreating() {
         .iter()
         .position(|u| u.owner == FactionId(1))
         .unwrap();
-    world.units[enemy_idx].location = region_id;
+    world.units[enemy_idx].station = Station::Region(region_id);
     world.units[enemy_idx].movement = None;
 
     let fought = vec![false; world.units.len()];
@@ -361,7 +363,7 @@ fn casualties_accumulate_from_combat() {
         .iter()
         .position(|u| u.owner == FactionId(1))
         .unwrap();
-    sim.world.units[intruder].location = region_id;
+    sim.world.units[intruder].station = Station::Region(region_id);
     sim.world.units[intruder].movement = None;
 
     assert_eq!(sim.world.faction(FactionId(0)).casualties, 0.0);
@@ -672,7 +674,7 @@ fn combat_devastates_region() {
         .iter()
         .position(|u| u.owner == FactionId(1))
         .unwrap();
-    world.units[intruder].location = RegionId(3);
+    world.units[intruder].station = Station::Region(RegionId(3));
     world.units[intruder].movement = None;
 
     let devastation_before = world.region(RegionId(3)).devastation;
@@ -712,7 +714,7 @@ fn captured_region_produces_less() {
         .iter()
         .position(|u| u.owner == FactionId(0))
         .unwrap();
-    world.units[mover].location = region_id;
+    world.units[mover].station = Station::Region(region_id);
     world.units[mover].movement = None;
 
     let mut events = Vec::new();
@@ -901,7 +903,7 @@ fn build_rejected_when_contested() {
         .iter()
         .position(|u| u.owner == FactionId(1))
         .unwrap();
-    world.units[intruder].location = capital;
+    world.units[intruder].station = Station::Region(capital);
     world.units[intruder].movement = None;
 
     let result = action::apply_action(
@@ -1083,7 +1085,7 @@ fn devastation_slows_organisation_recovery() {
 
     for &(id, region) in &[(intact_unit, intact_region), (devastated_unit, devastated_region)] {
         let unit = world.unit_mut(id);
-        unit.location = region;
+        unit.station = Station::Region(region);
         unit.movement = None;
         unit.organization = 0.0;
         unit.supply = 1.0;
@@ -1287,7 +1289,7 @@ fn contested_port_does_not_import() {
     // Put an enemy (faction 0) unit at 東海 (region 5), one of faction 1's
     // own ports, contesting it without taking it.
     let intruder = world.units.iter().position(|u| u.owner == FactionId(0)).unwrap();
-    world.units[intruder].location = RegionId(5);
+    world.units[intruder].station = Station::Region(RegionId(5));
     world.units[intruder].movement = None;
 
     trade::tick_imports(&mut world);
@@ -1374,7 +1376,7 @@ fn logistics_priority_splits_delivery() {
                 id,
                 owner: faction,
                 name: format!("Test Corps {i}"),
-                location: region,
+                station: Station::Region(region),
                 movement: None,
                 manpower: 1.0,
                 equipment: 5.0, // large gap vs UNIT_EQUIPMENT (20.0)
@@ -1383,7 +1385,7 @@ fn logistics_priority_splits_delivery() {
                 supply: 1.0,
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
-                arms_delivery_region: region,
+                arms_delivery_station: Station::Region(region),
                 experience: 0.0,
                 alive: true,
             });
@@ -1438,12 +1440,12 @@ fn arms_delivery_limits_reinforcement() {
         // down a real per-tick `arms_budget` (`gap * arms_delivery`, as
         // `logistics::distribute_supply` would have just set it) instead of
         // re-applying `arms_delivery` to the gap at call time - stamp both
-        // fields the way a real tick would, matching `arms_delivery_region`
-        // (still the unit's own, unchanged, `location`) to `location` so
+        // fields the way a real tick would, matching `arms_delivery_station`
+        // (still the unit's own, unchanged, `station`) to `station` so
         // `apply_reinforce` trusts the stamped budget rather than treating
         // it as stale and recomputing from `world.supply` instead.
         unit.arms_budget = (UNIT_EQUIPMENT - unit.equipment) * unit.arms_delivery;
-        unit.arms_delivery_region = unit.location;
+        unit.arms_delivery_station = unit.station;
     }
     world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
 
@@ -1486,7 +1488,7 @@ fn repeated_reinforce_cannot_exceed_daily_delivery() {
         unit.equipment = 5.0; // gap of 15.0 against UNIT_EQUIPMENT (20.0)
         unit.arms_delivery = 0.1;
         unit.arms_budget = (UNIT_EQUIPMENT - unit.equipment) * unit.arms_delivery; // 1.5
-        unit.arms_delivery_region = unit.location;
+        unit.arms_delivery_station = unit.station;
     }
     world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
 
@@ -1524,7 +1526,7 @@ fn reinforcement_uses_current_region_supply() {
     let mut world = scenario::build_world();
     let faction = FactionId(0);
     let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
-    let old_region = world.unit(unit_id).location;
+    let old_region = world.unit(unit_id).station.region().unwrap();
     let dest = RegionId(1);
     assert_eq!(world.region(dest).owner, faction, "test setup requires an owned, uncontested destination");
 
@@ -1538,18 +1540,18 @@ fn reinforcement_uses_current_region_supply() {
 
     // Simulate the unit having just finished a same-day move into the
     // now-cut-off region 1, before `distribute_supply` has run again for
-    // its new location: `arms_delivery`/`arms_budget`/`arms_delivery_region`
+    // its new station: `arms_delivery`/`arms_budget`/`arms_delivery_station`
     // are left exactly as they were at `old_region` (healthy, well
     // connected) - precisely the state `military::tick_movement` would
     // leave a freshly-arrived unit in.
     {
         let unit = world.unit_mut(unit_id);
-        unit.location = dest;
+        unit.station = Station::Region(dest);
         unit.movement = None;
         unit.equipment = 5.0; // gap of 15.0 against UNIT_EQUIPMENT (20.0)
         unit.arms_delivery = 1.0;
         unit.arms_budget = UNIT_EQUIPMENT - unit.equipment; // as if fully deliverable back at old_region
-        unit.arms_delivery_region = old_region;
+        unit.arms_delivery_station = Station::Region(old_region);
     }
     assert_ne!(old_region, dest, "test setup requires an actual region change");
     world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
@@ -1568,3 +1570,412 @@ fn reinforcement_uses_current_region_supply() {
     );
 }
 
+
+// ===== Stage 2D — 海軍・制海権・海上封鎖 (docs/phase2-spec.md "Stage 2D") =====
+
+/// Stage 2D acceptance test: a port whose facing sea zone is dominated by an
+/// enemy faction (>= `BLOCKADE_CONTROL_THRESHOLD`) must import nothing, even
+/// with a real import plan, ample Machinery to pay for it, and the port
+/// itself neither devastated nor land-contested.
+#[test]
+fn blockade_stops_import() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1); // owns 信越・北陸(4), 東海(5), 近畿(6)
+    {
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 1_000_000.0;
+        f.import_plan[Good::Food.index()] = 1_000.0; // saturate capacity
+    }
+
+    // Faction 0 holds full control of every sea zone touching 東海 (region
+    // 5) - well past the blockade threshold - without a single enemy land
+    // unit ever setting foot there.
+    for zone in world.zones_touching(RegionId(5)) {
+        world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+    }
+    assert!(naval::is_port_blockaded(&world, RegionId(5)));
+
+    trade::tick_imports(&mut world);
+
+    assert_eq!(
+        world.region(RegionId(5)).import_flow,
+        0.0,
+        "a blockaded port must not import, despite plan/Machinery/no land contest"
+    );
+}
+
+/// Stage 2D acceptance test: blockade is judged per port - blockading one of
+/// a faction's ports must not touch another, unblockaded port's imports.
+#[test]
+fn blockade_is_per_port() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1); // owns 信越・北陸(4), 東海(5), 近畿(6)
+    {
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 1_000_000.0;
+        f.import_plan[Good::Food.index()] = 1_000.0;
+    }
+
+    // Blockade 東海 (region 5) only - 信越・北陸 (region 4, facing 日本海,
+    // zone 3) shares no sea zone with 東海 (太平洋南, zone 2), so it must
+    // stay untouched.
+    assert!(
+        world.zones_touching(RegionId(5)).iter().all(|z| !world.zones_touching(RegionId(4)).contains(z)),
+        "test setup requires 東海 and 信越・北陸 to face disjoint sea zones"
+    );
+    for zone in world.zones_touching(RegionId(5)) {
+        world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+    }
+
+    trade::tick_imports(&mut world);
+
+    assert_eq!(world.region(RegionId(5)).import_flow, 0.0, "東海 is blockaded and must not import");
+    assert!(
+        world.region(RegionId(4)).import_flow > 0.0,
+        "信越・北陸 shares no sea zone with the blockaded port and must keep importing: {}",
+        world.region(RegionId(4)).import_flow
+    );
+}
+
+/// Stage 2D acceptance test: the 中国—九州 `Tunnel` link is deliberately
+/// exempt from sea control - it must relay full throughput even when every
+/// sea zone touching either end is fully enemy-controlled, unlike a real
+/// `Strait` link which would be throttled to nothing under the same
+/// control (see `sea_control_throttles_strait`).
+#[test]
+fn kanmon_tunnel_survives_blockade() {
+    let build = |blockade: bool| {
+        let mut world = scenario::build_world();
+        // 中国 (region 7) is boosted into a saturated source so the Tunnel
+        // link to 九州 (region 9) is the binding constraint, not upstream
+        // production; 九州's own base is zeroed (capacity and port) so
+        // `recompute_supply`'s cap there is driven purely by what the
+        // Tunnel relays from region 7, not by its own (also blockade-
+        // sensitive) `supply_source`.
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(RegionId(7)).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(RegionId(7)).infrastructure = 1.0;
+        world.region_mut(RegionId(9)).port = 0.0;
+        world.region_mut(RegionId(9)).capacity = [0.0; GOOD_COUNT];
+
+        if blockade {
+            // 中国(7)/九州(9) are 西方同盟's (faction 2); faction 0 (東方連合)
+            // is the enemy holding full control here.
+            for zone in world
+                .zones_touching(RegionId(7))
+                .into_iter()
+                .chain(world.zones_touching(RegionId(9)))
+            {
+                world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+            }
+        }
+        logistics::recompute_supply(&mut world);
+        world.supply[RegionId(9).index()]
+    };
+
+    let normal = build(false);
+    let blockaded = build(true);
+
+    assert!(normal > 0.0, "sanity: the tunnel route should relay something: {normal}");
+    assert!(
+        (blockaded - normal).abs() < 0.01,
+        "the 中国—九州 Tunnel must be unaffected by sea control: normal={normal}, blockaded={blockaded}"
+    );
+}
+
+/// Stage 2D acceptance test: a real `Strait` link's throughput must fall
+/// once the sea zone it crosses is dominated by an enemy faction — the
+/// contrast case for `kanmon_tunnel_survives_blockade`.
+#[test]
+fn sea_control_throttles_strait() {
+    let build = |enemy_control: f32| {
+        let mut world = scenario::build_world();
+        // 北東北 (region 1) also reaches faction 0's industrial heartland
+        // via 南東北/関東 (region 2/3, Rail) - zero that route out so the
+        // 北海道—北東北 Strait link (crossing 北方海域, zone 0) is the *only*
+        // high-value path into region 1, isolating the strait's own
+        // throttle instead of measuring a route that bypasses it entirely.
+        for &r in &[RegionId(2), RegionId(3)] {
+            world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+            world.region_mut(r).port = 0.0;
+        }
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(RegionId(0)).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(RegionId(0)).infrastructure = 1.0;
+        world.region_mut(RegionId(1)).infrastructure = 1.0;
+        // Region 0/1 are both faction 0's; the enemy here is faction 1.
+        world.sea_zone_mut(SeaZoneId(0)).control = vec![0.0, enemy_control, 0.0];
+
+        logistics::recompute_supply(&mut world);
+        world.supply[RegionId(1).index()]
+    };
+
+    let open = build(0.0);
+    let contested = build(0.9);
+
+    assert!(open > 0.0, "sanity: the strait route should relay something when uncontested: {open}");
+    assert!(
+        contested < open * 0.3,
+        "heavy enemy sea control should throttle the strait's throughput sharply: \
+         open={open}, contested={contested}"
+    );
+}
+
+/// External code review fix (Stage 2D): a `Strait` crossing must track
+/// *current* sea control, not whatever the zone looked like the instant the
+/// order was issued. A unit part-way across an open strait should make
+/// visibly slower per-tick progress once the enemy establishes a blockade
+/// there - the pre-fix code baked the control factor into `Movement::required`
+/// only once, at order time, so a blockade raised afterward had no effect at
+/// all on a crossing already under way.
+#[test]
+fn strait_crossing_slows_when_blockade_established() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let zone = SeaZoneId(0); // 北方海域, the 北海道—北東北 Strait link's zone
+
+    // Region 0/1 are both faction 0's, so this crossing is never
+    // hostile-destination-slowed - any slowdown measured below can only
+    // come from sea control.
+    world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+
+    let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    world.unit_mut(unit_id).station = Station::Region(RegionId(0));
+    world.unit_mut(unit_id).movement = None;
+
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Region(RegionId(1)) },
+    )
+    .unwrap();
+
+    // One tick while the strait is open.
+    military::tick_movement(&mut world);
+    let open_step = world.unit(unit_id).movement.unwrap().progress;
+    assert!(open_step > 0.0, "sanity: an open crossing should make progress");
+
+    // Faction 1 now holds the zone almost completely.
+    world.sea_zone_mut(zone).control = vec![0.05, 0.95, 0.0];
+
+    let progress_before = world.unit(unit_id).movement.unwrap().progress;
+    military::tick_movement(&mut world);
+    let blockaded_step = world.unit(unit_id).movement.unwrap().progress - progress_before;
+
+    assert!(
+        blockaded_step < open_step * 0.3,
+        "a crossing under a freshly-established blockade should make much \
+         slower progress than the same crossing did while open: \
+         open_step={open_step}, blockaded_step={blockaded_step}"
+    );
+}
+
+/// External code review fix (Stage 2D): a `Strait` crossing ordered while
+/// the enemy holds near-total sea control must still complete in a
+/// reasonable number of ticks once that control is lost - not be stuck
+/// forever. The pre-fix code divided `Movement::required` by the control
+/// factor sampled at order time, so an order placed under a near-total
+/// blockade produced an effectively infinite `required` that no later
+/// change in sea control could ever undo.
+#[test]
+fn strait_crossing_recovers_when_blockade_lifted() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let zone = SeaZoneId(0);
+
+    // Order the crossing while faction 1 holds the zone almost completely.
+    world.sea_zone_mut(zone).control = vec![0.02, 0.98, 0.0];
+
+    let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    world.unit_mut(unit_id).station = Station::Region(RegionId(0));
+    world.unit_mut(unit_id).movement = None;
+
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Region(RegionId(1)) },
+    )
+    .unwrap();
+
+    let required = world.unit(unit_id).movement.unwrap().required;
+    assert!(
+        required < 20.0,
+        "required must stay the control-independent travel cost, not balloon \
+         toward infinity under a near-total blockade sampled at order time: \
+         required={required}"
+    );
+
+    // The blockade lifts.
+    world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+
+    let mut arrived = false;
+    for _ in 0..30 {
+        military::tick_movement(&mut world);
+        if world.unit(unit_id).movement.is_none() {
+            arrived = true;
+            break;
+        }
+    }
+
+    assert!(
+        arrived,
+        "a crossing ordered under a heavy blockade must complete in a \
+         reasonable number of ticks once control is lost, not stay stuck forever"
+    );
+    assert_eq!(world.unit(unit_id).station, Station::Region(RegionId(1)));
+}
+
+/// Stage 2D acceptance test: a broken fleet with no adjacent sea zone free
+/// of enemy fleets to fall back into is sunk outright - the sea-domain
+/// analogue of `depleted_unit_is_destroyed_not_retreating`.
+#[test]
+fn naval_combat_sinks_fleet() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(2); // 西方同盟
+    let zone = SeaZoneId(0); // 北方海域, adjacent to zones 1 and 3
+
+    let fleet_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    {
+        let fleet = world.unit_mut(fleet_id);
+        fleet.station = Station::Sea(zone);
+        fleet.movement = None;
+        fleet.organization = 0.0;
+        fleet.manpower = 1.0; // well above UNIT_DEATH_MANPOWER - this must go through the org/retreat path, not the manpower-death one
+        fleet.supply = 1.0;
+    }
+
+    // Enemy (faction 0) fleets in the target zone *and* in both zones it
+    // could otherwise retreat into, so nowhere is safe.
+    let enemy_ids: Vec<_> = world
+        .units
+        .iter()
+        .filter(|u| u.owner == FactionId(0))
+        .map(|u| u.id)
+        .take(3)
+        .collect();
+    assert_eq!(enemy_ids.len(), 3, "test setup requires 3 of faction 0's starting units");
+    for (&id, z) in enemy_ids.iter().zip([SeaZoneId(0), SeaZoneId(1), SeaZoneId(3)]) {
+        let unit = world.unit_mut(id);
+        unit.station = Station::Sea(z);
+        unit.movement = None;
+    }
+
+    // The fleet "fought" this tick (organization already driven to 0 by
+    // naval combat just before `tick_recovery` runs in the real pipeline) -
+    // without this, the regen pass below would raise organization back
+    // above 0 before the retreat/destroy check ever sees it.
+    let mut fought = vec![false; world.units.len()];
+    fought[fleet_id.index()] = true;
+    let mut events = Vec::new();
+    military::tick_recovery(&mut world, &fought, &mut events);
+
+    assert!(
+        !world.unit(fleet_id).alive,
+        "a broken fleet with no safe sea zone to retreat into must be sunk"
+    );
+}
+
+/// Stage 2D acceptance test: `Action::MoveUnit` must reject a land unit
+/// ordered into a sea zone, and a fleet ordered into a region.
+#[test]
+fn fleet_cannot_enter_land() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let land_unit = world
+        .units
+        .iter()
+        .find(|u| u.owner == faction && u.station.domain() == Domain::Land)
+        .unwrap()
+        .id;
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: land_unit, to: Station::Sea(SeaZoneId(0)) },
+    );
+    assert_eq!(result, Err(ActionError::NotAdjacent));
+
+    let port_region = world.faction(faction).capital; // 関東 (region 3), port > 0
+    assert!(world.region(port_region).port > 0.0, "test setup requires a port at the capital");
+    world.faction_mut(faction).manpower = 100.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000.0;
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::RecruitUnit { region: port_region, domain: Domain::Sea },
+    )
+    .unwrap();
+    let fleet_id = world.units.last().unwrap().id;
+    assert_eq!(world.unit(fleet_id).station.domain(), Domain::Sea);
+
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: fleet_id, to: Station::Region(RegionId(0)) },
+    );
+    assert_eq!(result, Err(ActionError::NotAdjacent));
+}
+
+/// Stage 2D acceptance test - the regression guard for design.md §2's core
+/// causal claim (docs/phase2-spec.md Stage 2D's own framing: "企画書 §2 の
+/// 「港湾を封鎖することで物資輸入が停止する」を成立させる"): a faction whose
+/// food supply structurally depends on imports must see its `shortage`
+/// worsen once its ports are blockaded, even with an identical import plan
+/// and identical Machinery to pay for it. Reshapes faction 1 into the same
+/// Stage 2A structural-famine case `imports_feed_food_poor_faction` uses.
+#[test]
+fn blockaded_faction_starves() {
+    let build = |blockaded: bool| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(1);
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Machinery.index()] = 500.0; // ample surplus to pay for imports with
+            f.stability = 100.0;
+            f.import_plan[Good::Food.index()] = 20.0; // more than port capacity can serve
+        }
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 2000.0;
+                region.capacity[Good::Food.index()] = 0.3;
+            }
+        }
+
+        let mut shortage = 0.0;
+        for _ in 0..30 {
+            if blockaded {
+                // Faction 0 holds full control of every sea zone in the map
+                // - nothing here calls `naval::tick_sea_control` to keep a
+                // fleet-derived value fresh, so it's reasserted every tick
+                // the same way `trade`'s own `contested` snapshot is
+                // recomputed every tick from current unit positions.
+                for zone in world.sea_zones.iter_mut() {
+                    zone.control = vec![1.0, 0.0, 0.0];
+                }
+            }
+            trade::tick_imports(&mut world);
+            economy::tick_economy(&mut world);
+            shortage = world.faction(faction).shortage;
+        }
+        shortage
+    };
+
+    let shortage_open = build(false);
+    let shortage_blockaded = build(true);
+
+    assert!(
+        shortage_open < 0.3,
+        "sanity: an unblockaded import plan should lift the faction out of famine: {shortage_open}"
+    );
+    assert!(
+        shortage_blockaded > shortage_open + 0.3,
+        "blockading every one of faction 1's ports must worsen its shortage despite an \
+         identical import plan and identical Machinery to pay for it: \
+         open={shortage_open}, blockaded={shortage_blockaded}"
+    );
+}

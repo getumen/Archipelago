@@ -5,9 +5,9 @@
 //! Kanto/Tokai are the nation's Machinery hub and losing them chokes Arms.
 
 use crate::good::GOOD_COUNT;
-use crate::ids::{FactionId, RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::military::Unit;
-use crate::world::{Faction, Link, LinkKind, Region, Terrain, World};
+use crate::world::{Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, World};
 
 struct RegionSpec {
     name: &'static str,
@@ -52,6 +52,34 @@ const LINK_SPECS: [(u32, u32, LinkKind); 12] = [
     (6, 8, LinkKind::Strait),
     (7, 8, LinkKind::Strait),
     (7, 9, LinkKind::Tunnel),
+];
+
+/// Stage 2D (docs/phase2-spec.md "海域"): the 5 sea zones of the MVP map.
+/// `coast`/`adjacent` are region/zone indices, resolved into `RegionId`/
+/// `SeaZoneId` in `build_world`.
+struct SeaZoneSpec {
+    name: &'static str,
+    coast: &'static [u32],
+    adjacent: &'static [u32],
+}
+
+const SEA_ZONE_SPECS: [SeaZoneSpec; 5] = [
+    SeaZoneSpec { name: "北方海域", coast: &[0, 1], adjacent: &[1, 3] },
+    SeaZoneSpec { name: "太平洋北", coast: &[1, 2, 3], adjacent: &[0, 2] },
+    SeaZoneSpec { name: "太平洋南", coast: &[3, 5, 6, 8], adjacent: &[1, 4] },
+    SeaZoneSpec { name: "日本海", coast: &[0, 1, 2, 4, 7], adjacent: &[0, 4] },
+    SeaZoneSpec { name: "西方海域", coast: &[6, 7, 8, 9], adjacent: &[2, 3] },
+];
+
+/// Stage 2D (docs/phase2-spec.md "海峡リンクとの対応"): which sea zone each
+/// `Strait` link physically passes through, resolved into `Link::strait_zone`
+/// in `build_world`. The 中国—九州 `Tunnel` (7, 9) is deliberately absent —
+/// it stays open under any blockade, per the spec's "関門トンネルが封鎖の影響
+/// を受けないのは意図的である".
+const STRAIT_ZONE_SPECS: [(u32, u32, u32); 3] = [
+    (0, 1, 0), // 北海道—北東北 -> 北方海域
+    (6, 8, 2), // 近畿—四国 -> 太平洋南
+    (7, 8, 4), // 中国—四国 -> 西方海域
 ];
 
 const FACTION_SPECS: [FactionSpec; 3] = [
@@ -120,10 +148,30 @@ pub fn build_world() -> World {
         })
         .collect();
 
+    let strait_zone_of = |a: u32, b: u32| -> Option<SeaZoneId> {
+        STRAIT_ZONE_SPECS
+            .iter()
+            .find(|&&(sa, sb, _)| (sa, sb) == (a, b) || (sa, sb) == (b, a))
+            .map(|&(_, _, zone)| SeaZoneId(zone))
+    };
+
     for &(a, b, kind) in &LINK_SPECS {
-        regions[a as usize].links.push(Link { to: RegionId(b), kind });
-        regions[b as usize].links.push(Link { to: RegionId(a), kind });
+        let strait_zone = strait_zone_of(a, b);
+        regions[a as usize].links.push(Link { to: RegionId(b), kind, strait_zone });
+        regions[b as usize].links.push(Link { to: RegionId(a), kind, strait_zone });
     }
+
+    let sea_zones: Vec<SeaZone> = SEA_ZONE_SPECS
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| SeaZone {
+            id: SeaZoneId(i as u32),
+            name: spec.name.to_string(),
+            coast: spec.coast.iter().map(|&r| RegionId(r)).collect(),
+            adjacent: spec.adjacent.iter().map(|&z| SeaZoneId(z)).collect(),
+            control: vec![0.0; FACTION_SPECS.len()],
+        })
+        .collect();
 
     let factions: Vec<Faction> = FACTION_SPECS
         .iter()
@@ -168,12 +216,13 @@ pub fn build_world() -> World {
 
         for i in 0..UNITS_PER_FACTION {
             let location = locations[i % locations.len()];
+            let station = Station::Region(location);
             let id = UnitId(units.len() as u32);
             units.push(Unit {
                 id,
                 owner: faction_id,
                 name: format!("{} Corps {}", spec.name, i + 1),
-                location,
+                station,
                 movement: None,
                 manpower: crate::balance::UNIT_MANPOWER,
                 equipment: crate::balance::UNIT_EQUIPMENT,
@@ -182,7 +231,7 @@ pub fn build_world() -> World {
                 supply: 1.0,
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
-                arms_delivery_region: location,
+                arms_delivery_station: station,
                 experience: 0.0,
                 alive: true,
             });
@@ -194,9 +243,14 @@ pub fn build_world() -> World {
         factions,
         units,
         supply,
+        sea_zones,
         day: 0,
     }
 }
 
 /// Number of regions in the fixed MVP map — used by `observation::ENCODING_LEN`.
 pub const REGION_COUNT: usize = REGION_SPECS.len();
+
+/// Number of sea zones in the fixed MVP map — used by
+/// `observation::ENCODING_LEN` (Stage 2D).
+pub const SEA_ZONE_COUNT: usize = SEA_ZONE_SPECS.len();

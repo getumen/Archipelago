@@ -28,6 +28,7 @@
 
 use crate::balance::{IMPORT_COST_MACHINERY_PER_GOOD, IMPORT_PER_PORT};
 use crate::good::Good;
+use crate::naval;
 use crate::world::World;
 
 pub fn tick_imports(world: &mut World) {
@@ -50,7 +51,11 @@ pub fn tick_imports(world: &mut World) {
     let mut port_capacity = vec![0.0f32; n_regions];
     let mut total_capacity = vec![0.0f32; n_factions];
     for i in 0..n_regions {
-        if contested[i] {
+        // Stage 2D (docs/phase2-spec.md "2. 港の封鎖"): a blockaded port
+        // imports nothing, independent of (and in addition to) land contest
+        // — judged per port, so a blockade of one port never touches
+        // another's `import_flow`.
+        if contested[i] || naval::is_port_blockaded(world, world.regions[i].id) {
             continue;
         }
         let region = &world.regions[i];

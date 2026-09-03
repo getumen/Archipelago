@@ -4,22 +4,42 @@
 use crate::balance::{
     ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
     CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE, DEVASTATION_PER_COMBAT_DAMAGE,
-    EQUIPMENT_LOSS_PER_DAMAGE, MANPOWER_LOSS_PER_DAMAGE, MORALE_REGEN, OCCUPATION_DECAY,
-    OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN, ORG_REGEN, UNIT_DEATH_MANPOWER,
-    UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN, WAR_SUPPORT_LOSS_PENALTY,
+    EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, FLEET_MOVE_DAYS, MANPOWER_LOSS_PER_DAMAGE,
+    MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN, OCCUPATION_DECAY, OCCUPATION_RATE, ORG_DAMAGE_MULT,
+    ORG_MARCH_DRAIN, ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
+    UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN, WAR_SUPPORT_LOSS_PENALTY,
 };
 use crate::event::Event;
-use crate::ids::{FactionId, RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::naval;
 use crate::rng::Rng;
-use crate::world::{Region, Terrain, World};
+use crate::world::{Region, Station, Terrain, World};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Movement {
-    pub from: RegionId,
-    pub to: RegionId,
+    pub from: Station,
+    pub to: Station,
     pub progress: f32,
+    /// Control-independent travel cost only — link travel days × terrain ×
+    /// the hostile-destination multiplier for a land move, or
+    /// `fleet_move_required`'s equivalent for a fleet. Must never bake in a
+    /// sea-control factor: control is recomputed every tick and is applied
+    /// fresh each tick to the movement *progress* instead (see
+    /// `strait_zone` and `tick_movement`) — External code review fix (Stage
+    /// 2D): a `required` baked from a one-time control sample either let an
+    /// order issued during an open strait ignore a blockade established
+    /// afterwards, or, issued under near-total enemy control, produced an
+    /// effectively infinite `required` that could never recover even once
+    /// the blockade lifted.
     pub required: f32,
     pub retreat: bool,
+    /// The `Strait` link's sea zone this crossing passes through, if any
+    /// (`action::apply_move`'s land branch and `tick_recovery`'s retreat
+    /// branch both set this from `Link::strait_zone`). `tick_movement`
+    /// reads *current* sea control here every tick via
+    /// `naval::strait_factor`, rather than trusting a value sampled once
+    /// when the order was issued.
+    pub strait_zone: Option<SeaZoneId>,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +47,11 @@ pub struct Unit {
     pub id: UnitId,
     pub owner: FactionId,
     pub name: String,
-    pub location: RegionId,
+    /// Stage 2D (docs/phase2-spec.md "艦隊"): replaces the Phase 1/2A-2C
+    /// `location: RegionId`. A land unit is always `Station::Region`, a
+    /// fleet always `Station::Sea` — see `Station`'s own doc for why every
+    /// region-scoped system keeps working unmodified against this.
+    pub station: Station,
     pub movement: Option<Movement>,
     pub manpower: f32,
     pub equipment: f32,
@@ -51,14 +75,15 @@ pub struct Unit {
     /// to the shrinking remainder each call (the pre-fix behaviour) let a
     /// large enough N fill almost the whole gap regardless of the ratio.
     pub arms_budget: f32,
-    /// The region `arms_delivery`/`arms_budget` were last computed for
-    /// (stamped from `location` by `distribute_supply`, which runs before
+    /// The station `arms_delivery`/`arms_budget` were last computed for
+    /// (stamped from `station` by `distribute_supply`, which runs before
     /// movement each tick). `apply_reinforce` compares this against the
-    /// unit's *current* `location` to detect a same-day move that has left
-    /// the cached ratio describing a region the unit already left, and
+    /// unit's *current* `station` to detect a same-day move that has left
+    /// the cached ratio describing a place the unit already left, and
     /// recomputes on the spot rather than trusting it - see
-    /// `logistics::instantaneous_arms_delivery`.
-    pub arms_delivery_region: RegionId,
+    /// `logistics::instantaneous_arms_delivery` (land) and
+    /// `naval::instantaneous_fleet_arms_delivery` (sea).
+    pub arms_delivery_station: Station,
     pub experience: f32,
     pub alive: bool,
 }
@@ -93,13 +118,36 @@ impl Unit {
 }
 
 /// Days required to traverse `link` into `dest`, `hostile` being true when
-/// the destination is not friendly-owned (slows movement down).
+/// the destination is not friendly-owned (slows movement down). Land only —
+/// see `fleet_move_required` for the sea-domain counterpart.
 pub fn move_required(link_kind: crate::world::LinkKind, dest_terrain: Terrain, hostile: bool) -> f32 {
     link_kind.travel_days() * dest_terrain.move_cost() * if hostile { 1.5 } else { 1.0 }
 }
 
+/// Days required for a fleet to cross into an adjacent sea zone
+/// (docs/phase2-spec.md Stage 2D doesn't spell out a travel-time formula for
+/// sea-zone movement the way it does for land links — sea zones carry no
+/// `LinkKind`/`Terrain` to derive one from — so this mirrors `move_required`'s
+/// shape at the flat `FLEET_MOVE_DAYS` base instead: `hostile` (entering
+/// waters some other faction currently holds more control of than this
+/// faction does) applies the same 1.5x slowdown land crossings into
+/// unfriendly territory get.
+pub fn fleet_move_required(hostile: bool) -> f32 {
+    FLEET_MOVE_DAYS * if hostile { 1.5 } else { 1.0 }
+}
+
+fn is_pinned(world: &World, unit: &Unit) -> bool {
+    match unit.station {
+        Station::Region(r) => world.has_enemy_units(r, unit.owner),
+        Station::Sea(z) => world.has_enemy_fleets(z, unit.owner),
+    }
+}
+
 /// Advances in-progress movement, resolving arrivals. Units whose current
-/// region holds enemy forces are pinned and make no progress unless retreating.
+/// station holds enemy forces are pinned and make no progress unless
+/// retreating. Handles both land units and fleets identically — `Movement`
+/// and `Unit::station` are both `Station`-typed, so arrival is just
+/// `unit.station = to` regardless of domain.
 pub fn tick_movement(world: &mut World) {
     struct Progress {
         id: UnitId,
@@ -113,11 +161,23 @@ pub fn tick_movement(world: &mut World) {
             continue;
         }
         let Some(mv) = unit.movement else { continue };
-        let pinned = !mv.retreat && world.has_enemy_units(unit.location, unit.owner);
+        let pinned = !mv.retreat && is_pinned(world, unit);
         if pinned {
             continue;
         }
-        let step = 0.5 + 0.5 * unit.supply;
+        let mut step = 0.5 + 0.5 * unit.supply;
+        // External code review fix (Stage 2D): the CURRENT sea-control
+        // factor for this crossing's strait, resampled every tick rather
+        // than baked into `required` once at order time — see `Movement`'s
+        // doc. Floored (`STRAIT_CROSSING_FACTOR_FLOOR`) so a total blockade
+        // still lets progress creep forward instead of hard-freezing at
+        // exactly zero, and so a lifted blockade always resumes normal
+        // speed rather than the crossing having been left needing an
+        // effectively infinite `required` to ever finish.
+        if let Some(zone) = mv.strait_zone {
+            let factor = naval::strait_factor(world, zone, unit.owner).max(STRAIT_CROSSING_FACTOR_FLOOR);
+            step *= factor;
+        }
         let new_progress = mv.progress + step;
         updates.push(Progress {
             id: unit.id,
@@ -131,7 +191,7 @@ pub fn tick_movement(world: &mut World) {
         unit.organization = (unit.organization - ORG_MARCH_DRAIN).max(0.0);
         if update.arrived {
             let to = unit.movement.unwrap().to;
-            unit.location = to;
+            unit.station = to;
             unit.movement = None;
         } else {
             unit.movement.as_mut().unwrap().progress = update.new_progress;
@@ -225,8 +285,8 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                 let manpower_loss = (dmg * MANPOWER_LOSS_PER_DAMAGE * broken).min(unit.manpower);
                 unit.manpower -= manpower_loss;
                 unit.equipment = (unit.equipment - dmg * EQUIPMENT_LOSS_PER_DAMAGE * broken).max(0.0);
-                unit.morale = (unit.morale - 0.01 * broken).max(0.0);
-                unit.experience = (unit.experience + 0.0015).min(1.0);
+                unit.morale = (unit.morale - MORALE_LOSS_PER_BROKEN_HIT * broken).max(0.0);
+                unit.experience = (unit.experience + EXPERIENCE_GAIN_PER_HIT).min(1.0);
 
                 casualties[side_faction.index()] += manpower_loss;
                 battle_casualties += manpower_loss;
@@ -287,7 +347,15 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
         let mut manpower = unit.manpower;
 
         if !is_fighting && !marching {
-            let infra = world.region(unit.location).effective_infrastructure();
+            // A fleet at sea has no region infrastructure to draw on; ships
+            // maintain themselves at the same baseline a fully-developed
+            // land region's infrastructure factor (1.0) would give a unit,
+            // rather than getting a land-specific bonus/penalty they have no
+            // way to earn or suffer.
+            let infra = match unit.station {
+                Station::Region(r) => world.region(r).effective_infrastructure(),
+                Station::Sea(_) => 1.0,
+            };
             organization += ORG_REGEN * (0.3 + 0.7 * unit.supply) * (0.6 + 0.4 * infra);
         }
         if !is_fighting {
@@ -319,7 +387,11 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
     }
 
     enum Outcome {
-        Retreat { to: RegionId, required: f32 },
+        Retreat {
+            to: Station,
+            required: f32,
+            strait_zone: Option<SeaZoneId>,
+        },
         Destroyed,
     }
 
@@ -333,21 +405,38 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
             // a phantom retreater that still blocks occupation and counts
             // in presence checks for one extra tick.
             outcomes.push((unit.id, Outcome::Destroyed));
-        } else if unit.organization <= 0.0
-            && unit.movement.is_none()
-            && world.has_enemy_units(unit.location, unit.owner)
-        {
-            let mut candidates: Vec<RegionId> = world
-                .neighbors(unit.location)
-                .filter(|&r| {
-                    world.region(r).owner == unit.owner && !world.has_enemy_units(r, unit.owner)
-                })
-                .collect();
-            candidates.sort_by_key(|r| r.0);
-            if let Some(&dest) = candidates.first() {
-                let link = world.link_between(unit.location, dest).unwrap();
-                let required = move_required(link.kind, world.region(dest).terrain, false) * 0.5;
-                outcomes.push((unit.id, Outcome::Retreat { to: dest, required }));
+        } else if unit.organization <= 0.0 && unit.movement.is_none() && is_pinned(world, unit) {
+            // Stage 2D: a broken fleet with no sea zone left to fall back
+            // into is sunk here exactly the way a broken land unit with no
+            // region to retreat into is destroyed - the same mechanism, not
+            // a special case, which is what "艦隊は退却先の海域がなければ撃沈
+            // される" (docs/phase2-spec.md Stage 2D) falls out of.
+            if let Some(dest) = retreat_candidate(world, unit) {
+                // Mirrors `action::apply_move`'s land branch: `required`
+                // holds only the control-independent travel cost, and a
+                // retreat across a `Strait` link's zone carries that zone
+                // through as `strait_zone` so `tick_movement` throttles its
+                // *progress* by the current sea-control factor each tick,
+                // the same as an ordered move does.
+                let (required, strait_zone) = match (unit.station, dest) {
+                    (Station::Region(from), Station::Region(to)) => {
+                        let link = world.link_between(from, to).unwrap();
+                        (
+                            move_required(link.kind, world.region(to).terrain, false) * 0.5,
+                            link.strait_zone,
+                        )
+                    }
+                    (Station::Sea(_), Station::Sea(_)) => (fleet_move_required(false) * 0.5, None),
+                    _ => unreachable!("a unit's retreat candidates are always its own domain"),
+                };
+                outcomes.push((
+                    unit.id,
+                    Outcome::Retreat {
+                        to: dest,
+                        required,
+                        strait_zone,
+                    },
+                ));
             } else {
                 outcomes.push((unit.id, Outcome::Destroyed));
             }
@@ -356,29 +445,64 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
 
     for (id, outcome) in outcomes {
         match outcome {
-            Outcome::Retreat { to, required } => {
+            Outcome::Retreat {
+                to,
+                required,
+                strait_zone,
+            } => {
                 let unit = world.unit_mut(id);
                 unit.movement = Some(Movement {
-                    from: unit.location,
+                    from: unit.station,
                     to,
                     progress: 0.0,
                     required,
                     retreat: true,
+                    strait_zone,
                 });
             }
             Outcome::Destroyed => {
                 let unit = world.unit_mut(id);
-                let (region, owner, residual_manpower) = (unit.location, unit.owner, unit.manpower);
+                let (station, owner, residual_manpower) = (unit.station, unit.owner, unit.manpower);
                 unit.alive = false;
                 if residual_manpower > 0.0 {
                     world.faction_mut(owner).casualties += residual_manpower;
                 }
                 events.push(Event::UnitDestroyed {
                     unit: id,
-                    region,
+                    station,
                     owner,
                 });
             }
+        }
+    }
+}
+
+/// The nearest (lowest-id) safe fallback station for a broken unit, if any:
+/// for a land unit, an owned neighboring region with no enemy present; for a
+/// fleet, an adjacent sea zone with no enemy fleet present (sea zones have
+/// no owner, so "safe" for a fleet means simply uncontested).
+fn retreat_candidate(world: &World, unit: &Unit) -> Option<Station> {
+    match unit.station {
+        Station::Region(from) => {
+            let mut candidates: Vec<RegionId> = world
+                .neighbors(from)
+                .filter(|&r| {
+                    world.region(r).owner == unit.owner && !world.has_enemy_units(r, unit.owner)
+                })
+                .collect();
+            candidates.sort_by_key(|r| r.0);
+            candidates.first().map(|&r| Station::Region(r))
+        }
+        Station::Sea(from) => {
+            let mut candidates: Vec<crate::ids::SeaZoneId> = world
+                .sea_zone(from)
+                .adjacent
+                .iter()
+                .copied()
+                .filter(|&z| !world.has_enemy_fleets(z, unit.owner))
+                .collect();
+            candidates.sort_by_key(|z| z.0);
+            candidates.first().map(|&z| Station::Sea(z))
         }
     }
 }

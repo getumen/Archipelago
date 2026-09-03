@@ -4,8 +4,52 @@
 use crate::balance::{INFRA_DAMAGE_SHARE, NODE_BASE, NODE_INFRA, NODE_PORT, WORKFORCE_SHARE};
 use crate::construction::Construction;
 use crate::good::{Good, GOOD_COUNT};
-use crate::ids::{FactionId, RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::military::Unit;
+
+/// Stage 2D (docs/phase2-spec.md "Stage 2D — 海軍・制海権・海上封鎖"): the two
+/// kinds of terrain a `Unit` can occupy. A land unit is always
+/// `Station::Region`; a fleet is always `Station::Sea` — the two never mix,
+/// which is what lets every region-scoped system (`units_in`,
+/// `has_enemy_units`, land `tick_combat`/`tick_occupation`) keep working
+/// unmodified: `Station::Sea` can never match a `Station::Region` filter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Domain {
+    Land,
+    Sea,
+}
+
+/// Where a `Unit` currently is: a land region or a sea zone. Replaces the
+/// Phase 1/2A-2C `Unit::location: RegionId` (docs/phase2-spec.md Stage 2D:
+/// "Unit の location: RegionId を station: Station に置き換える").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Station {
+    Region(RegionId),
+    Sea(SeaZoneId),
+}
+
+impl Station {
+    pub fn domain(self) -> Domain {
+        match self {
+            Station::Region(_) => Domain::Land,
+            Station::Sea(_) => Domain::Sea,
+        }
+    }
+
+    pub fn region(self) -> Option<RegionId> {
+        match self {
+            Station::Region(r) => Some(r),
+            Station::Sea(_) => None,
+        }
+    }
+
+    pub fn sea_zone(self) -> Option<SeaZoneId> {
+        match self {
+            Station::Region(_) => None,
+            Station::Sea(z) => Some(z),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Terrain {
@@ -80,6 +124,13 @@ impl LinkKind {
 pub struct Link {
     pub to: RegionId,
     pub kind: LinkKind,
+    /// Stage 2D (docs/phase2-spec.md "海峡リンクとの対応"): the sea zone a
+    /// `Strait` link physically passes through, if any — sea control there
+    /// throttles this link's throughput and movement speed. `None` for every
+    /// non-`Strait` link and for the 中国—九州 `Tunnel` deliberately: a
+    /// tunnel is unaffected by who controls the sea above it, which is the
+    /// whole point of it staying open under blockade.
+    pub strait_zone: Option<SeaZoneId>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +202,18 @@ impl Region {
     }
 
     pub fn supply_source(&self) -> f32 {
-        self.industry_total() * 0.5 + self.port * 4.0
+        self.supply_source_blockaded(false)
+    }
+
+    /// `supply_source`, but with the port contribution zeroed when Stage 2D
+    /// sea blockade (docs/phase2-spec.md "2. 港の封鎖": "supply_source の
+    /// 港湾寄与も 0 にする") has cut this region's port off — the port
+    /// itself still physically exists, but nothing can move through it, so
+    /// it stops contributing to the region's own supply-network base.
+    /// `industry_total`'s contribution is untouched: a blockaded port can
+    /// still relay what its own hinterland produces.
+    pub fn supply_source_blockaded(&self, blockaded: bool) -> f32 {
+        self.industry_total() * 0.5 + if blockaded { 0.0 } else { self.port * 4.0 }
     }
 
     /// Stage 2C node-side throughput cap (docs/phase2-spec.md "2. 港湾・
@@ -173,6 +235,44 @@ impl Region {
     /// Rough strategic value of this region, used by AI agents to weigh targets.
     pub fn value(&self) -> f32 {
         self.industry_total() * 1.5 + self.population * 0.05 + self.port * 3.0
+    }
+}
+
+/// Stage 2D (docs/phase2-spec.md "海域"): a body of water, separate from the
+/// region graph, that fleets occupy and fight over. `control` is
+/// recomputed every tick by `naval::tick_sea_control` from the
+/// `combat_power` of every faction's fleets currently in the zone; a `Vec`
+/// sized to `World::factions.len()` rather than a fixed-size array, matching
+/// the rest of the codebase's convention of deriving faction-indexed
+/// collections from `factions.len()` at runtime (`economy`, `politics`,
+/// `trade`, `military::tick_combat` all do the same) instead of a hardcoded
+/// faction count.
+#[derive(Clone, Debug)]
+pub struct SeaZone {
+    pub id: SeaZoneId,
+    pub name: String,
+    /// Regions this zone's coastline touches — a port here can trade
+    /// through, and be blockaded via, this zone. Not every coastal region
+    /// need have a port.
+    pub coast: Vec<RegionId>,
+    /// Sea zones a fleet can sail directly into from this one.
+    pub adjacent: Vec<SeaZoneId>,
+    /// Sea control per faction, `power[f] / sum(power[*])`, `0.0` for every
+    /// faction when no fleet is present anywhere in the zone.
+    pub control: Vec<f32>,
+}
+
+impl SeaZone {
+    /// The highest `control` held by any faction other than `faction` — the
+    /// "敵の制海権の最大値" the strait-throttle and port-blockade effects
+    /// (docs/phase2-spec.md Stage 2D, effects 1 and 2) both key off.
+    pub fn enemy_control_max(&self, faction: FactionId) -> f32 {
+        self.control
+            .iter()
+            .enumerate()
+            .filter(|&(f, _)| f != faction.index())
+            .map(|(_, &c)| c)
+            .fold(0.0f32, f32::max)
     }
 }
 
@@ -241,6 +341,9 @@ pub struct World {
     pub units: Vec<Unit>,
     /// Supply throughput available at each region, indexed by `RegionId`.
     pub supply: Vec<f32>,
+    /// Stage 2D (docs/phase2-spec.md "海域"): the map's sea zones, separate
+    /// from the region graph.
+    pub sea_zones: Vec<SeaZone>,
     pub day: u32,
 }
 
@@ -273,10 +376,14 @@ impl World {
             .find(|link| link.to == to)
     }
 
+    /// Alive land units currently at `region`. `Station::Sea` can never
+    /// equal `Station::Region(region)`, so this — and every land system
+    /// built on it (`has_enemy_units`, `region_power`, land `tick_combat`/
+    /// `tick_occupation`) — only ever sees land units; fleets never leak in.
     pub fn units_in(&self, region: RegionId) -> impl Iterator<Item = &Unit> {
         self.units
             .iter()
-            .filter(move |unit| unit.alive && unit.location == region)
+            .filter(move |unit| unit.alive && unit.station == Station::Region(region))
     }
 
     pub fn has_enemy_units(&self, region: RegionId, faction: FactionId) -> bool {
@@ -289,6 +396,45 @@ impl World {
             .filter(|unit| unit.owner == faction)
             .map(Unit::combat_power)
             .fold(0.0, |acc, p| acc + p)
+    }
+
+    /// Alive fleets currently in `zone` — the sea-domain counterpart of
+    /// `units_in` (see its doc for why the two never overlap).
+    pub fn fleets_in(&self, zone: SeaZoneId) -> impl Iterator<Item = &Unit> {
+        self.units
+            .iter()
+            .filter(move |unit| unit.alive && unit.station == Station::Sea(zone))
+    }
+
+    pub fn has_enemy_fleets(&self, zone: SeaZoneId, faction: FactionId) -> bool {
+        self.fleets_in(zone).any(|unit| unit.owner != faction)
+    }
+
+    /// Sum of `combat_power` for a faction's alive fleets present in `zone`.
+    pub fn zone_power(&self, zone: SeaZoneId, faction: FactionId) -> f32 {
+        self.fleets_in(zone)
+            .filter(|unit| unit.owner == faction)
+            .map(Unit::combat_power)
+            .fold(0.0, |acc, p| acc + p)
+    }
+
+    pub fn sea_zone(&self, id: SeaZoneId) -> &SeaZone {
+        &self.sea_zones[id.index()]
+    }
+
+    pub fn sea_zone_mut(&mut self, id: SeaZoneId) -> &mut SeaZone {
+        &mut self.sea_zones[id.index()]
+    }
+
+    /// Sea zones whose coastline includes `region`, in ascending
+    /// `SeaZoneId` order (fixed iteration order for determinism) — every
+    /// zone a port at `region` can trade through or be blockaded from.
+    pub fn zones_touching(&self, region: RegionId) -> Vec<SeaZoneId> {
+        self.sea_zones
+            .iter()
+            .filter(|z| z.coast.contains(&region))
+            .map(|z| z.id)
+            .collect()
     }
 
     pub fn regions_of(&self, faction: FactionId) -> Vec<RegionId> {

@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 
 use crate::good::GOOD_COUNT;
-use crate::ids::{FactionId, RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::world::World;
 
 /// Per-region field count in `Observation::encode()`: `[owned, population,
@@ -14,13 +14,19 @@ use crate::world::World;
 /// node_throughput]` (Stage 2C, 2 fixed fields).
 pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2 + 2;
 
+/// Per-sea-zone field count in `Observation::encode()` (Stage 2D):
+/// `[own_control, enemy_control_max, own_power, enemy_power]`.
+pub const SEA_ZONE_FIELD_COUNT: usize = 4;
+
 /// Faction-scalar field count in `Observation::encode()`: `manpower`,
 /// `stock[GOOD_COUNT]`, `war_support`, `stability`, `unit_count`.
 pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT;
 
 /// Fixed total length of `Observation::encode()`'s output for the MVP map
-/// (`scenario::REGION_COUNT` regions).
-pub const ENCODING_LEN: usize = crate::scenario::REGION_COUNT * REGION_FIELD_COUNT + FACTION_FIELD_COUNT;
+/// (`scenario::REGION_COUNT` regions, `scenario::SEA_ZONE_COUNT` sea zones).
+pub const ENCODING_LEN: usize = crate::scenario::REGION_COUNT * REGION_FIELD_COUNT
+    + crate::scenario::SEA_ZONE_COUNT * SEA_ZONE_FIELD_COUNT
+    + FACTION_FIELD_COUNT;
 
 pub struct Observation<'a> {
     pub faction: FactionId,
@@ -65,6 +71,19 @@ impl<'a> Observation<'a> {
         self.world.region_power(region, self.faction)
     }
 
+    /// Stage 2D sea-domain counterparts of `enemy_power`/`own_power`.
+    pub fn enemy_zone_power(&self, zone: SeaZoneId) -> f32 {
+        self.world
+            .factions
+            .iter()
+            .filter(|f| f.id != self.faction)
+            .fold(0.0, |acc, f| acc + self.world.zone_power(zone, f.id))
+    }
+
+    pub fn own_zone_power(&self, zone: SeaZoneId) -> f32 {
+        self.world.zone_power(zone, self.faction)
+    }
+
     /// Next hop on a breadth-first path from `from` to `to`, staying within
     /// this faction's own territory (the destination itself is always
     /// allowed even if not owned). Returns `None` if unreachable.
@@ -107,14 +126,16 @@ impl<'a> Observation<'a> {
     }
 
     /// Fixed length `ENCODING_LEN` (`regions.len() * REGION_FIELD_COUNT +
-    /// FACTION_FIELD_COUNT`): per-region `[owned, population,
-    /// infrastructure, supply, unrest, own_power, enemy_power,
-    /// capacity[GOOD_COUNT]..., devastation, construction_progress,
-    /// import_flow, node_throughput]`, then faction scalars `[manpower,
-    /// stock[GOOD_COUNT]..., war_support, stability, unit_count]`.
-    /// `construction_progress` is `invested / required` in `0..=1`, or `0.0`
-    /// when no project is in progress. `import_flow`/`node_throughput` are
-    /// Stage 2C's per-port import volume and per-node supply throughput cap
+    /// sea_zones.len() * SEA_ZONE_FIELD_COUNT + FACTION_FIELD_COUNT`):
+    /// per-region `[owned, population, infrastructure, supply, unrest,
+    /// own_power, enemy_power, capacity[GOOD_COUNT]..., devastation,
+    /// construction_progress, import_flow, node_throughput]`, then
+    /// per-sea-zone (Stage 2D) `[own_control, enemy_control_max, own_power,
+    /// enemy_power]`, then faction scalars `[manpower, stock[GOOD_COUNT]...,
+    /// war_support, stability, unit_count]`. `construction_progress` is
+    /// `invested / required` in `0..=1`, or `0.0` when no project is in
+    /// progress. `import_flow`/`node_throughput` are Stage 2C's per-port
+    /// import volume and per-node supply throughput cap
     /// (`trade::tick_imports`, `Region::node_throughput`).
     pub fn encode(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(ENCODING_LEN);
@@ -137,6 +158,13 @@ impl<'a> Observation<'a> {
             out.push(progress);
             out.push(region.import_flow);
             out.push(region.node_throughput());
+        }
+        for zone in &self.world.sea_zones {
+            let own_control = zone.control.get(self.faction.index()).copied().unwrap_or(0.0);
+            out.push(own_control);
+            out.push(zone.enemy_control_max(self.faction));
+            out.push(self.own_zone_power(zone.id));
+            out.push(self.enemy_zone_power(zone.id));
         }
         let faction = self.world.faction(self.faction);
         out.push(faction.manpower);

@@ -7,6 +7,7 @@ use crate::balance::{
     UNIT_EQUIPMENT,
 };
 use crate::good::Good;
+use crate::naval;
 use crate::world::World;
 
 /// Recomputes `world.supply`: the maximum throughput each region can draw
@@ -29,9 +30,21 @@ pub fn recompute_supply(world: &mut World) {
             world.has_enemy_units(region.id, region.owner)
         })
         .collect();
+    // Stage 2D (docs/phase2-spec.md "2. 港の封鎖"): a blockaded port's own
+    // contribution to its region's supply base is zeroed here, independent
+    // of `contested` — a region can be blockaded without a single enemy
+    // land unit ever setting foot on it.
+    let blockaded: Vec<bool> = (0..n)
+        .map(|i| naval::is_port_blockaded(world, world.regions[i].id))
+        .collect();
     let node_throughput: Vec<f32> = world.regions.iter().map(|r| r.node_throughput()).collect();
 
-    let mut cap: Vec<f32> = world.regions.iter().map(|r| r.supply_source()).collect();
+    let mut cap: Vec<f32> = world
+        .regions
+        .iter()
+        .enumerate()
+        .map(|(i, r)| r.supply_source_blockaded(blockaded[i]))
+        .collect();
 
     for _ in 0..n {
         let mut changed = false;
@@ -46,9 +59,18 @@ pub fn recompute_supply(world: &mut World) {
                 if world.regions[j].owner != owner_i {
                     continue;
                 }
+                // Stage 2D (docs/phase2-spec.md "1. 海峡リンクの遮断"): a
+                // `Strait` link's throughput is throttled by the highest
+                // sea control any other faction holds in the zone it
+                // crosses — `None` (every non-Strait link, and the 中国—
+                // 九州 `Tunnel` deliberately) is unaffected.
+                let strait = match link.strait_zone {
+                    Some(zone) => naval::strait_factor(world, zone, owner_i),
+                    None => 1.0,
+                };
                 let infra_j = world.regions[j].effective_infrastructure();
                 let v = (cap_i * link.kind.retention() * (0.55 + 0.45 * infra_j))
-                    .min(link.kind.max_throughput())
+                    .min(link.kind.max_throughput() * strait)
                     .min(node_throughput[j]);
                 if v > cap[j] {
                     cap[j] = v;
@@ -87,6 +109,18 @@ pub fn recompute_supply(world: &mut World) {
 /// `unit.arms_delivery`, the arrival-rate ceiling `action::apply_reinforce`
 /// applies on top of its own separate stock check, so a faction with a full
 /// armory still can't instantly re-equip a unit the network can't reach.
+///
+/// Stage 2D (docs/phase2-spec.md "艦隊の補給"): fleets draw on the exact
+/// same national `Faction::stock[Munitions]` pool land units do, so their
+/// demand (`naval::fleet_demand_and_avail`, per sea zone rather than per
+/// region) is folded into this same pass and shares the same
+/// stock-limited `scale[f]` — computed once, from land's and sea's combined
+/// `total_served`/`total_demand` — before either domain's stock is
+/// deducted. Running the sea pass afterward against whatever land left in
+/// stock would give land an unconditional first claim on the shared pool,
+/// exactly the hardcoded-precedence defect shape this project keeps finding
+/// and fixing (see this function's own doc above for the land-side version
+/// of the same rule).
 pub fn distribute_supply(world: &mut World) {
     let n_regions = world.regions.len();
     let n_factions = world.factions.len();
@@ -104,9 +138,12 @@ pub fn distribute_supply(world: &mut World) {
         if !unit.alive {
             continue;
         }
-        let r = unit.location.index();
+        let Some(region) = unit.station.region() else {
+            continue; // fleets are handled by the sea-zone pass below
+        };
+        let r = region.index();
         let f = unit.owner.index();
-        let in_combat = world.has_enemy_units(unit.location, unit.owner);
+        let in_combat = world.has_enemy_units(region, unit.owner);
         let mult = if in_combat {
             crate::balance::COMBAT_SUPPLY_MULT
         } else {
@@ -143,46 +180,42 @@ pub fn distribute_supply(world: &mut World) {
     let mut served_arms = vec![vec![0.0f32; n_factions]; n_regions];
     for r in 0..n_regions {
         for f in 0..n_factions {
-            let total_avail = avail[r][f];
-            if total_avail <= 0.0 {
+            if avail[r][f] <= 0.0 {
                 continue;
             }
             let faction = &world.factions[f];
-            let w_munitions = faction.logistics_priority[Good::Munitions.index()].max(0.0);
-            let w_arms = faction.logistics_priority[Good::Arms.index()].max(0.0);
-            let w_sum = w_munitions + w_arms;
-            let (share_munitions_frac, share_arms_frac) = if w_sum > 0.0 {
-                (w_munitions / w_sum, w_arms / w_sum)
-            } else {
-                (0.5, 0.5)
-            };
-            let share_munitions = total_avail * share_munitions_frac;
-            let share_arms = total_avail * share_arms_frac;
+            let w_munitions = faction.logistics_priority[Good::Munitions.index()];
+            let w_arms = faction.logistics_priority[Good::Arms.index()];
+            let (m, a) =
+                split_munitions_arms(avail[r][f], w_munitions, w_arms, demand_munitions[r][f], demand_arms[r][f]);
+            served_munitions[r][f] = m;
+            served_arms[r][f] = a;
+        }
+    }
 
-            let dm = demand_munitions[r][f];
-            let da = demand_arms[r][f];
-            let served_m1 = dm.min(share_munitions);
-            let served_a1 = da.min(share_arms);
-
-            // Redistribute whatever either good's priority share left
-            // unused to the other, in proportion to its own remaining
-            // unmet demand - so a good with no demand this tick (Arms,
-            // most days) doesn't ring-fence throughput a hungry Munitions
-            // demand could actually use, without ever hardcoding which
-            // good gets first claim on the leftover.
-            let leftover = (share_munitions - served_m1) + (share_arms - served_a1);
-            let remaining_m = dm - served_m1;
-            let remaining_a = da - served_a1;
-            let remaining_total = remaining_m + remaining_a;
-            let (extra_m, extra_a) = if remaining_total > 0.0 && leftover > 0.0 {
-                let extra = leftover.min(remaining_total);
-                (extra * remaining_m / remaining_total, extra * remaining_a / remaining_total)
-            } else {
-                (0.0, 0.0)
-            };
-
-            served_munitions[r][f] = served_m1 + extra_m;
-            served_arms[r][f] = served_a1 + extra_a;
+    // Stage 2D: the sea-zone counterpart of the region-indexed arrays above,
+    // split by the same priority weights via the same shared helper.
+    let (demand_munitions_zone, demand_arms_zone, avail_zone) = naval::fleet_demand_and_avail(world);
+    let n_zones = world.sea_zones.len();
+    let mut served_munitions_zone = vec![vec![0.0f32; n_factions]; n_zones];
+    let mut served_arms_zone = vec![vec![0.0f32; n_factions]; n_zones];
+    for z in 0..n_zones {
+        for f in 0..n_factions {
+            if avail_zone[z][f] <= 0.0 {
+                continue;
+            }
+            let faction = &world.factions[f];
+            let w_munitions = faction.logistics_priority[Good::Munitions.index()];
+            let w_arms = faction.logistics_priority[Good::Arms.index()];
+            let (m, a) = split_munitions_arms(
+                avail_zone[z][f],
+                w_munitions,
+                w_arms,
+                demand_munitions_zone[z][f],
+                demand_arms_zone[z][f],
+            );
+            served_munitions_zone[z][f] = m;
+            served_arms_zone[z][f] = a;
         }
     }
 
@@ -192,6 +225,12 @@ pub fn distribute_supply(world: &mut World) {
         for f in 0..n_factions {
             total_served[f] += served_munitions[r][f];
             total_demand[f] += demand_munitions[r][f];
+        }
+    }
+    for z in 0..n_zones {
+        for f in 0..n_factions {
+            total_served[f] += served_munitions_zone[z][f];
+            total_demand[f] += demand_munitions_zone[z][f];
         }
     }
 
@@ -216,7 +255,10 @@ pub fn distribute_supply(world: &mut World) {
         if !unit.alive {
             continue;
         }
-        let r = unit.location.index();
+        let Some(region) = unit.station.region() else {
+            continue; // fleets are finished off by naval::apply_fleet_supply below
+        };
+        let r = region.index();
         let f = unit.owner.index();
         let target_munitions = if demand_munitions[r][f] > 0.0 {
             served_munitions[r][f] / demand_munitions[r][f] * scale[f]
@@ -239,24 +281,79 @@ pub fn distribute_supply(world: &mut World) {
         // equipment `arms_delivery`'s freshly-eased ratio allows against
         // *this instant's* gap, not accumulated or rolled over from
         // before. `action::apply_reinforce` spends this down as it
-        // delivers equipment; stamping `arms_delivery_region` alongside it
-        // records which region this budget was computed for, so a unit
+        // delivers equipment; stamping `arms_delivery_station` alongside it
+        // records which station this budget was computed for, so a unit
         // that moves before its next `ReinforceUnit` action is detected as
         // stale and recomputed on the spot instead of trusted -
         // `logistics::instantaneous_arms_delivery`.
         let equipment_gap = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
         unit.arms_budget = equipment_gap * unit.arms_delivery;
-        unit.arms_delivery_region = unit.location;
+        unit.arms_delivery_station = unit.station;
     }
+
+    naval::apply_fleet_supply(
+        world,
+        &served_munitions_zone,
+        &demand_munitions_zone,
+        &served_arms_zone,
+        &demand_arms_zone,
+        &scale,
+    );
 }
 
-/// External code review fix (Stage 2C): recomputes a single unit's Arms
+/// Splits `total_avail` throughput between Munitions and Arms demand by
+/// `logistics_priority` weight (falling back to an even split if both
+/// weights are zero), then hands back to the other good whatever share
+/// either good's priority left unused, in proportion to its own remaining
+/// unmet demand — so a good with no demand this tick doesn't ring-fence
+/// throughput a hungry demand could actually use, and neither good ever
+/// gets a hardcoded first claim on the leftover. Shared by `distribute_supply`'s
+/// land (per-region) and sea (per-zone, via `naval::fleet_demand_and_avail`)
+/// passes — the pool being split is the same contention in both cases, only
+/// the place it's keyed by differs.
+fn split_munitions_arms(
+    total_avail: f32,
+    w_munitions: f32,
+    w_arms: f32,
+    demand_munitions: f32,
+    demand_arms: f32,
+) -> (f32, f32) {
+    let w_munitions = w_munitions.max(0.0);
+    let w_arms = w_arms.max(0.0);
+    let w_sum = w_munitions + w_arms;
+    let (share_munitions_frac, share_arms_frac) = if w_sum > 0.0 {
+        (w_munitions / w_sum, w_arms / w_sum)
+    } else {
+        (0.5, 0.5)
+    };
+    let share_munitions = total_avail * share_munitions_frac;
+    let share_arms = total_avail * share_arms_frac;
+
+    let served_m1 = demand_munitions.min(share_munitions);
+    let served_a1 = demand_arms.min(share_arms);
+
+    let leftover = (share_munitions - served_m1) + (share_arms - served_a1);
+    let remaining_m = demand_munitions - served_m1;
+    let remaining_a = demand_arms - served_a1;
+    let remaining_total = remaining_m + remaining_a;
+    let (extra_m, extra_a) = if remaining_total > 0.0 && leftover > 0.0 {
+        let extra = leftover.min(remaining_total);
+        (extra * remaining_m / remaining_total, extra * remaining_a / remaining_total)
+    } else {
+        (0.0, 0.0)
+    };
+
+    (served_m1 + extra_m, served_a1 + extra_a)
+}
+
+/// External code review fix (Stage 2C): recomputes a single land unit's Arms
 /// delivery ratio and per-tick budget from its *current* region, for
 /// `action::apply_reinforce` to call when the unit's cached
-/// `Unit::arms_delivery_region` no longer matches `Unit::location` -
+/// `Unit::arms_delivery_station` no longer matches `Unit::station` -
 /// `distribute_supply` above only runs once a tick, before movement, so a
 /// unit that has since moved carries numbers stamped from a region it has
-/// already left.
+/// already left. Land only — `apply_reinforce` calls
+/// `naval::instantaneous_fleet_arms_delivery` instead for a fleet.
 ///
 /// Mirrors `distribute_supply`'s per-region Arms throughput share, but
 /// treats `unit`'s own equipment gap as the *only* Arms demand in its
@@ -279,7 +376,10 @@ pub fn instantaneous_arms_delivery(world: &World, unit_id: crate::ids::UnitId) -
         return (1.0, 0.0);
     }
 
-    let region = unit.location;
+    let region = unit
+        .station
+        .region()
+        .expect("instantaneous_arms_delivery is land-only; callers must route fleets to naval::instantaneous_fleet_arms_delivery");
     let r = region.index();
     let faction = unit.owner;
     let owner = world.regions[r].owner;

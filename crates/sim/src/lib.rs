@@ -13,6 +13,7 @@ pub mod good;
 pub mod ids;
 pub mod logistics;
 pub mod military;
+pub mod naval;
 pub mod observation;
 pub mod politics;
 pub mod rng;

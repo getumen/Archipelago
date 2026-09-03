@@ -68,6 +68,7 @@ fn main() {
             }
             if sim.world.day % args.report == 0 {
                 report::print_faction_table(&sim.world);
+                report::print_sea_zone_table(&sim.world);
             }
         }
     };

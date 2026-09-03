@@ -89,6 +89,12 @@ pub const ORG_DAMAGE_MULT: f32 = 2.0;
 pub const MANPOWER_LOSS_PER_DAMAGE: f32 = 0.004;
 pub const EQUIPMENT_LOSS_PER_DAMAGE: f32 = 0.12;
 pub const BROKEN_LOSS_MULT: f32 = 3.0;
+/// Morale lost per broken hit taken in combat (`tick_combat`/
+/// `naval::tick_naval_combat`, multiplied by `BROKEN_LOSS_MULT` when the
+/// hit breaks the unit's organization).
+pub const MORALE_LOSS_PER_BROKEN_HIT: f32 = 0.01;
+/// Experience gained per hit taken in combat, land or naval.
+pub const EXPERIENCE_GAIN_PER_HIT: f32 = 0.0015;
 
 pub const ORG_REGEN: f32 = 2.5;
 pub const ORG_MARCH_DRAIN: f32 = 3.0;
@@ -250,3 +256,40 @@ pub const NODE_PORT: f32 = 4.0;
 /// `Faction::logistics_priority` has real contention to split rather than
 /// one side dwarfing the other by construction.
 pub const ARMS_SUPPLY_NEED_PER_GAP: f32 = 0.1;
+
+/// Stage 2D (docs/phase2-spec.md "Stage 2D — 海軍・制海権・海上封鎖"): days for
+/// a fleet to cross into an adjacent sea zone at full speed (no `LinkKind`
+/// exists for sea-zone adjacency to derive a figure from) — set between
+/// `LinkKind::Road::travel_days()` (3.0) and `LinkKind::Sea::travel_days()`
+/// (6.0), the fastest and slowest land-facing figures, since open-ocean
+/// fleet transit is neither as quick as a road march nor as slow as cargo
+/// crossing a sea link end-to-end.
+pub const FLEET_MOVE_DAYS: f32 = 4.0;
+
+/// Naval combat's analogue of `COMBAT_DAMAGE` (docs/phase2-spec.md "3. 海戦":
+/// "地形補正はなく、代わりに NAVAL_DAMAGE を用いる"). Kept equal to
+/// `COMBAT_DAMAGE` — sea zones have no terrain to apply a defense bonus
+/// through, so naval combat's damage scale doesn't need to be re-tuned
+/// independently of land's; it only needs its own named constant so the
+/// systems that use it don't share a single knob across both domains.
+pub const NAVAL_DAMAGE: f32 = 8.0;
+
+/// Sea-control threshold (docs/phase2-spec.md "2. 港の封鎖", "1. 海峡リンクの
+/// 遮断") past which a faction's presence in a sea zone counts as a real
+/// blockade of the ports/straits touching it, rather than a token patrol
+/// that happens to have inflicted a little damage. Set well above "any
+/// nonzero control" so a handful of skirmishing fleets can't flip a port's
+/// import on and off; a faction needs a clear majority of the zone's naval
+/// power to choke it.
+pub const BLOCKADE_CONTROL_THRESHOLD: f32 = 0.6;
+
+/// External code review fix (Stage 2D): floor on `naval::strait_factor`
+/// (`1 - enemy_control_max`) when it is applied to a crossing's per-tick
+/// movement progress in `military::tick_movement`. `strait_factor` is
+/// already `.clamp(0.0, 1.0)`, so this is not a divide-by-zero guard — it
+/// exists so a unit mid-crossing under a total (or near-total) blockade
+/// still creeps forward at a slow trickle each tick instead of making
+/// literally zero progress, keeping the per-tick math finite and away from
+/// the degenerate all-progress-happens-in-one-instant edge a bare `* 0.0`
+/// would produce every tick it's fully blockaded.
+pub const STRAIT_CROSSING_FACTOR_FLOOR: f32 = 0.05;

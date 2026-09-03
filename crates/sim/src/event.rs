@@ -2,7 +2,8 @@
 
 use std::fmt;
 
-use crate::ids::{FactionId, RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::world::Station;
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -11,9 +12,17 @@ pub enum Event {
         factions: Vec<FactionId>,
         casualties: f32,
     },
+    /// Stage 2D (docs/phase2-spec.md "3. 海戦"): the sea-domain counterpart
+    /// of `Battle`, kept as its own variant rather than reusing `Battle`'s
+    /// `region: RegionId` field, which a sea zone can't fill.
+    NavalBattle {
+        zone: SeaZoneId,
+        factions: Vec<FactionId>,
+        casualties: f32,
+    },
     UnitDestroyed {
         unit: UnitId,
-        region: RegionId,
+        station: Station,
         owner: FactionId,
     },
     RegionCaptured {
@@ -43,15 +52,32 @@ impl fmt::Display for Event {
                     casualties
                 )
             }
-            Event::UnitDestroyed {
-                unit,
-                region,
-                owner,
-            } => write!(
-                f,
-                "unit {} (faction {}) destroyed in region {}",
-                unit.0, owner.0, region.0
-            ),
+            Event::NavalBattle {
+                zone,
+                factions,
+                casualties,
+            } => {
+                let ids: Vec<String> = factions.iter().map(|f| f.0.to_string()).collect();
+                write!(
+                    f,
+                    "naval battle in sea zone {} between factions [{}]: {:.2} manpower lost",
+                    zone.0,
+                    ids.join(", "),
+                    casualties
+                )
+            }
+            Event::UnitDestroyed { unit, station, owner } => match station {
+                Station::Region(region) => write!(
+                    f,
+                    "unit {} (faction {}) destroyed in region {}",
+                    unit.0, owner.0, region.0
+                ),
+                Station::Sea(zone) => write!(
+                    f,
+                    "unit {} (faction {}) sunk in sea zone {}",
+                    unit.0, owner.0, zone.0
+                ),
+            },
             Event::RegionCaptured { region, from, to } => write!(
                 f,
                 "region {} captured by faction {} from faction {}",

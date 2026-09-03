@@ -4,7 +4,7 @@
 //! the front. No randomness of its own, so a run stays fully determined by
 //! the simulation's seed.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
@@ -15,9 +15,22 @@ use archipelago_sim::balance::{
 };
 use archipelago_sim::construction::Project;
 use archipelago_sim::good::Good;
-use archipelago_sim::ids::{FactionId, RegionId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use archipelago_sim::military::Unit;
+use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
-use archipelago_sim::world::World;
+use archipelago_sim::world::{Domain, Station, World};
+
+/// Whether `unit` currently shares its station with an enemy of `faction` -
+/// the domain-generic form of the land-only `world.has_enemy_units` /
+/// sea-only `world.has_enemy_fleets` checks, for AI code that walks both
+/// land units and fleets through `Observation::own_units`.
+fn unit_contested(world: &World, unit: &Unit, faction: FactionId) -> bool {
+    match unit.station {
+        Station::Region(r) => world.has_enemy_units(r, faction),
+        Station::Sea(z) => world.has_enemy_fleets(z, faction),
+    }
+}
 
 /// Minimum unit-count headroom (as a multiple of a fresh unit's cost) a
 /// faction keeps in reserve before it will spend on a new recruit.
@@ -101,6 +114,17 @@ const LOGISTICS_PRESSURE_THRESHOLD: f32 = 0.75;
 /// on (the other gets `1.0 -` this); an even split when neither or both axes
 /// are under pressure, so neither ever gets a fixed unconditional priority.
 const LOGISTICS_FOCUSED_WEIGHT: f32 = 0.7;
+/// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, point 1):
+/// fleet count below which the agent keeps building fleets at a safe home
+/// port, mirroring `unit_cap`'s role for land recruitment but as a small
+/// fixed floor rather than one scaled off industry — a minimal navy, not a
+/// second army.
+const NAVY_MIN_FLEETS: f32 = 2.0;
+/// Naval counterpart of `offensive()`'s land engagement margin: added to
+/// the enemy power a target zone's `caution` threshold is judged against,
+/// so a fleet won't engage a target at exact parity with nothing in
+/// reserve.
+const NAVY_ENGAGE_MARGIN: f32 = 0.6;
 
 /// Decides for one faction every `period` days (offset by faction id so the
 /// three AIs don't all act on the same day), per mvp-spec.md §7.
@@ -145,8 +169,10 @@ impl Agent for HeuristicAgent {
         set_logistics_priority(obs, &mut actions);
         reinforce(self.faction, obs, &mut actions);
         recruit(self.faction, obs, &mut actions);
+        naval_recruit(self.faction, obs, &mut actions);
         build(self.faction, obs, &mut actions);
         offensive(self.faction, self.caution, obs, &mut actions);
+        naval_ops(self.faction, self.caution, obs, &mut actions);
 
         let already_moved: BTreeSet<UnitId> = actions
             .iter()
@@ -170,10 +196,21 @@ fn unit_cap(faction: FactionId, obs: &Observation) -> f32 {
     3.0 + obs.world.industry_total(faction) / 5.0
 }
 
+/// Count of `obs.own_units()` in a given domain — `unit_cap`/`recruit`'s
+/// land army sizing must not be diluted by fleets sharing the same
+/// `own_units()` list Stage 2D introduced (`naval_recruit` has its own,
+/// separate `NAVY_MIN_FLEETS` floor).
+fn own_unit_count(obs: &Observation, domain: Domain) -> usize {
+    obs.own_units()
+        .into_iter()
+        .filter(|&u| obs.world.unit(u).station.domain() == domain)
+        .count()
+}
+
 fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let manpower = f.manpower;
-    let at_unit_cap = obs.own_units().len() as f32
+    let at_unit_cap = own_unit_count(obs, Domain::Land) as f32
         >= unit_cap(faction, obs) * STOP_CONSCRIPTION_UNIT_CAP_FRACTION;
     let conscription = if manpower < 5.0 {
         0.9
@@ -194,7 +231,7 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
         .into_iter()
         .map(|unit_id| {
             let unit = obs.world.unit(unit_id);
-            let mult = if obs.world.has_enemy_units(unit.location, faction) {
+            let mult = if unit_contested(obs.world, unit, faction) {
                 COMBAT_SUPPLY_MULT
             } else {
                 1.0
@@ -310,18 +347,23 @@ fn set_logistics_priority(obs: &Observation, actions: &mut Vec<Action>) {
     actions.push(Action::SetLogisticsPriority { good: Good::Arms, weight: arms_weight });
 }
 
-/// Tops up under-strength units sitting safely in friendly, uncontested territory.
+/// Tops up under-strength units (land or fleet) sitting safely in friendly,
+/// uncontested territory/waters. A land unit's station must additionally be
+/// its own faction's region (matches the pre-Stage-2D check exactly); a sea
+/// zone has no owner, so a fleet only needs to be uncontested.
 fn reinforce(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let mut units = obs.own_units();
     units.sort_by_key(|u| u.0);
 
     for unit_id in units {
         let unit = obs.world.unit(unit_id);
-        let region = unit.location;
-        if obs.world.region(region).owner != faction {
-            continue;
-        }
-        if obs.world.has_enemy_units(region, faction) {
+        let safe = match unit.station {
+            Station::Region(r) => {
+                obs.world.region(r).owner == faction && !obs.world.has_enemy_units(r, faction)
+            }
+            Station::Sea(z) => !obs.world.has_enemy_fleets(z, faction),
+        };
+        if !safe {
             continue;
         }
         if unit.strength() < REINFORCE_THRESHOLD {
@@ -336,7 +378,7 @@ fn reinforce(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let cap = unit_cap(faction, obs);
-    if obs.own_units().len() as f32 >= cap {
+    if own_unit_count(obs, Domain::Land) as f32 >= cap {
         return;
     }
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
@@ -362,7 +404,7 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     };
 
     if let Some(region) = region {
-        actions.push(Action::RecruitUnit { region });
+        actions.push(Action::RecruitUnit { region, domain: Domain::Land });
     }
 }
 
@@ -379,6 +421,215 @@ fn safe_own_regions(faction: FactionId, obs: &Observation) -> Vec<RegionId> {
         .collect();
     regions.sort_by_key(|r| r.0);
     regions
+}
+
+/// The best own, uncontested port region to operate a navy out of - highest
+/// `port` value, ties broken toward the lowest region id - or `None` if the
+/// faction holds no safe port at all. Shared by `naval_recruit` (where to
+/// build) and `home_zone` (where an idle fleet with nothing else to do
+/// returns to).
+fn best_own_port_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    safe_own_regions(faction, obs)
+        .into_iter()
+        .filter(|&r| obs.world.region(r).port > 0.0)
+        .fold(None, |best: Option<(RegionId, f32)>, r| {
+            let port = obs.world.region(r).port;
+            match best {
+                Some((_, best_port)) if port <= best_port => best,
+                _ => Some((r, port)),
+            }
+        })
+        .map(|(r, _)| r)
+}
+
+/// The sea zone the faction's main port faces (docs/phase2-spec.md Stage 2D
+/// AI point 4: "自国の主要港の海域"), if it holds a safe port at all.
+fn home_zone(faction: FactionId, obs: &Observation) -> Option<SeaZoneId> {
+    naval::home_zone(obs.world, best_own_port_region(faction, obs)?)
+}
+
+/// Sea zones touching a port region matching `own` (`true`: this faction's
+/// own regions; `false`: any other faction's) — regardless of whether that
+/// region is currently contested, since a blockade target or a defense
+/// target is about the port's *owner*, not today's fighting there.
+fn port_zones(faction: FactionId, obs: &Observation, own: bool) -> BTreeSet<SeaZoneId> {
+    let mut zones = BTreeSet::new();
+    for region in &obs.world.regions {
+        let matches_owner = if own { region.owner == faction } else { region.owner != faction };
+        if matches_owner && region.port > 0.0 {
+            zones.extend(obs.world.zones_touching(region.id));
+        }
+    }
+    zones
+}
+
+/// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, point 1):
+/// keeps at least `NAVY_MIN_FLEETS` fleets in being, built at the faction's
+/// best safe port, the same affordability gate `recruit` uses for land units.
+fn naval_recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let f = obs.world.faction(faction);
+    if own_unit_count(obs, Domain::Sea) as f32 >= NAVY_MIN_FLEETS {
+        return;
+    }
+    if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+    {
+        return;
+    }
+    if let Some(region) = best_own_port_region(faction, obs) {
+        actions.push(Action::RecruitUnit { region, domain: Domain::Sea });
+    }
+}
+
+/// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, points
+/// 2-4): moves idle fleets, grouped by their current zone, toward whichever
+/// of three priorities applies -
+/// 1. (point 2) clear enemy fleets from a zone touching one of this
+///    faction's own ports, if reachable and the force ratio (`caution`,
+///    the same margin `offensive()` uses for land) favors attacking;
+/// 2. (point 3) otherwise, contest a zone touching an *enemy* port under
+///    the same force-ratio gate — sea denial against the faction most
+///    dependent on that water;
+/// 3. (point 4) otherwise, head back to the faction's main home port zone,
+///    where it stays once there (no target found next time it's idle).
+fn naval_ops(faction: FactionId, caution: f32, obs: &Observation, actions: &mut Vec<Action>) {
+    let own_port_zones = port_zones(faction, obs, true);
+    let enemy_port_zones = port_zones(faction, obs, false);
+
+    let mut idle_by_zone: BTreeMap<SeaZoneId, Vec<UnitId>> = BTreeMap::new();
+    for unit_id in obs.own_units() {
+        let unit = obs.world.unit(unit_id);
+        if unit.movement.is_some() {
+            continue;
+        }
+        if let Some(zone) = unit.station.sea_zone() {
+            idle_by_zone.entry(zone).or_default().push(unit_id);
+        }
+    }
+    if idle_by_zone.is_empty() {
+        return;
+    }
+
+    let home = home_zone(faction, obs);
+
+    for (&zone, fleets) in &idle_by_zone {
+        let reachable_zones = |candidates: &BTreeSet<SeaZoneId>| -> Vec<SeaZoneId> {
+            candidates
+                .iter()
+                .copied()
+                .filter(|&z| z == zone || obs.world.sea_zone(zone).adjacent.contains(&z))
+                .collect()
+        };
+
+        // Point 2: defend an own port zone under threat - the most
+        // dangerous reachable one (highest enemy power) is the most urgent.
+        let defend_target = reachable_zones(&own_port_zones)
+            .into_iter()
+            .map(|z| (z, obs.enemy_zone_power(z)))
+            .filter(|&(_, danger)| danger > 0.0)
+            .fold(None, |best: Option<(SeaZoneId, f32)>, (z, danger)| {
+                match best {
+                    Some((_, best_danger)) if danger <= best_danger => best,
+                    _ => Some((z, danger)),
+                }
+            })
+            .map(|(z, _)| z);
+
+        // Point 3: contest an enemy port zone - same `value / (1 +
+        // enemy_power)` scoring `offensive()` uses for land targets, so the
+        // agent prefers a valuable, weakly-held zone over a strongly
+        // defended one.
+        let blockade_target = reachable_zones(&enemy_port_zones)
+            .into_iter()
+            .fold(None, |best: Option<(SeaZoneId, f32)>, z| {
+                let score = zone_value(obs, z) / (1.0 + obs.enemy_zone_power(z));
+                match best {
+                    Some((_, best_score)) if score <= best_score => best,
+                    _ => Some((z, score)),
+                }
+            })
+            .map(|(z, _)| z);
+
+        let target = defend_target.or(blockade_target);
+
+        if let Some(target) = target {
+            if target == zone {
+                continue; // already there; naval combat resolves it this tick
+            }
+            let own_power = obs.own_zone_power(zone);
+            let enemy_power = obs.enemy_zone_power(target);
+            if own_power >= caution * (enemy_power + NAVY_ENGAGE_MARGIN) {
+                for &unit_id in fleets {
+                    actions.push(Action::MoveUnit { unit: unit_id, to: Station::Sea(target) });
+                }
+            }
+            continue;
+        }
+
+        // Point 4: nothing to do here - head back toward the main home port.
+        if let Some(home) = home {
+            if zone != home {
+                if let Some(next) = zone_path_next(obs.world, zone, home) {
+                    for &unit_id in fleets {
+                        actions.push(Action::MoveUnit { unit: unit_id, to: Station::Sea(next) });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Rough strategic value of a sea zone for blockade targeting: the highest
+/// `Region::value()` among the ports it touches.
+fn zone_value(obs: &Observation, zone: SeaZoneId) -> f32 {
+    obs.world
+        .sea_zone(zone)
+        .coast
+        .iter()
+        .map(|&r| obs.world.region(r).value())
+        .fold(0.0f32, f32::max)
+}
+
+/// Breadth-first next hop from `from` toward `to` over the sea-zone
+/// adjacency graph — the zone-domain counterpart of
+/// `Observation::path_next` (which is region/land-graph specific).
+fn zone_path_next(world: &World, from: SeaZoneId, to: SeaZoneId) -> Option<SeaZoneId> {
+    if from == to {
+        return None;
+    }
+    let n = world.sea_zones.len();
+    let mut visited = vec![false; n];
+    let mut prev = vec![None; n];
+    let mut queue = VecDeque::new();
+    visited[from.index()] = true;
+    queue.push_back(from);
+
+    while let Some(current) = queue.pop_front() {
+        if current == to {
+            break;
+        }
+        let mut neighbors: Vec<SeaZoneId> = world.sea_zone(current).adjacent.clone();
+        neighbors.sort_by_key(|z| z.0);
+        for next in neighbors {
+            if !visited[next.index()] {
+                visited[next.index()] = true;
+                prev[next.index()] = Some(current);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    if !visited[to.index()] {
+        return None;
+    }
+    let mut step = to;
+    while let Some(p) = prev[step.index()] {
+        if p == from {
+            return Some(step);
+        }
+        step = p;
+    }
+    None
 }
 
 /// Build priorities (docs/phase2-spec.md Stage 2B):
@@ -571,8 +822,9 @@ fn offensive(faction: FactionId, caution: f32, obs: &Observation, actions: &mut 
             present.len()
         };
 
-        let is_en_route_here =
-            |u: &UnitId| matches!(obs.world.unit(*u).movement, Some(mv) if mv.to == target);
+        let is_en_route_here = |u: &UnitId| {
+            matches!(obs.world.unit(*u).movement, Some(mv) if mv.to == Station::Region(target))
+        };
 
         // A unit already under way toward `target` occupies one of the
         // capacity slots without needing a fresh order - re-issuing
@@ -587,7 +839,7 @@ fn offensive(faction: FactionId, caution: f32, obs: &Observation, actions: &mut 
 
         let idle: Vec<UnitId> = present.into_iter().filter(|u| !is_en_route_here(u)).collect();
         for &unit_id in idle.iter().take(new_orders) {
-            actions.push(Action::MoveUnit { unit: unit_id, to: target });
+            actions.push(Action::MoveUnit { unit: unit_id, to: Station::Region(target) });
         }
     }
 }
@@ -618,7 +870,11 @@ fn advance_interior(
         if unit.movement.is_some() {
             continue;
         }
-        let location = unit.location;
+        // Fleets are steered by `naval_ops`, not this land-only walk toward
+        // the region front.
+        let Some(location) = unit.station.region() else {
+            continue;
+        };
         if front.binary_search(&location).is_ok() {
             continue;
         }
@@ -641,7 +897,7 @@ fn advance_interior(
         let Some(nearest_front) = nearest_front else { continue };
 
         if let Some(next) = obs.path_next(location, nearest_front) {
-            actions.push(Action::MoveUnit { unit: unit_id, to: next });
+            actions.push(Action::MoveUnit { unit: unit_id, to: Station::Region(next) });
         }
     }
 }
