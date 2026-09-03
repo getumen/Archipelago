@@ -2,6 +2,7 @@
 //! (factions, units, supply) that every tick system reads and writes.
 
 use crate::balance::WORKFORCE_SHARE;
+use crate::good::{Good, GOOD_COUNT};
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::military::Unit;
 
@@ -89,8 +90,8 @@ pub struct Region {
     /// Owner at the outbreak of war; used to tell home soil from occupied land.
     pub core: FactionId,
     pub population: f32,
-    pub industry: f32,
-    pub food: f32,
+    /// Production capacity per commodity, indexed by `Good::index()`.
+    pub capacity: [f32; GOOD_COUNT],
     pub infrastructure: f32,
     pub port: f32,
     pub mobilized: f32,
@@ -101,8 +102,22 @@ pub struct Region {
 }
 
 impl Region {
+    /// Sum of every commodity's capacity except `Food` — this region's
+    /// contribution to war-relevant industry (Stage 2A redefinition of the
+    /// Phase 1 `industry` field that `World::industry_total` and
+    /// `supply_source`/`value` below depend on).
+    pub fn industry_total(&self) -> f32 {
+        let mut total = 0.0;
+        for good in crate::good::ALL_GOODS {
+            if good != Good::Food {
+                total += self.capacity[good.index()];
+            }
+        }
+        total
+    }
+
     pub fn supply_source(&self) -> f32 {
-        self.industry * 0.5 + self.port * 4.0
+        self.industry_total() * 0.5 + self.port * 4.0
     }
 
     pub fn labor_ratio(&self) -> f32 {
@@ -112,7 +127,7 @@ impl Region {
 
     /// Rough strategic value of this region, used by AI agents to weigh targets.
     pub fn value(&self) -> f32 {
-        self.industry * 1.5 + self.population * 0.05 + self.port * 3.0
+        self.industry_total() * 1.5 + self.population * 0.05 + self.port * 3.0
     }
 }
 
@@ -122,10 +137,21 @@ pub struct Faction {
     pub name: String,
     pub capital: RegionId,
     pub manpower: f32,
-    pub supplies: f32,
-    pub equipment: f32,
+    /// Stockpile per commodity, indexed by `Good::index()`. Units draw
+    /// `Munitions` for upkeep and `Arms` for equipment (Phase 1's
+    /// `supplies`/`equipment`).
+    pub stock: [f32; GOOD_COUNT],
     pub conscription: f32,
-    pub production_mix: f32,
+    /// Priority weight per commodity, indexed by `Good::index()`, used to
+    /// apportion a shared input (currently: Steel and Energy contended by
+    /// Machinery and Munitions) between competing outputs.
+    pub industry_priority: [f32; GOOD_COUNT],
+    /// Fraction of civilian Food/Energy/Machinery demand the government
+    /// actually delivers, in `balance::CIVILIAN_RATION_MIN..=
+    /// CIVILIAN_RATION_MAX` (design.md §9: squeezing civilians to feed the
+    /// war effort is a policy choice with an unrest cost, not a fixed rule).
+    /// Set via `Action::SetCivilianRation`.
+    pub civilian_ration: f32,
     pub war_support: f32,
     pub stability: f32,
     pub shortage: f32,
@@ -207,7 +233,7 @@ impl World {
         self.regions
             .iter()
             .filter(|r| r.owner == faction)
-            .fold(0.0, |acc, r| acc + r.industry)
+            .fold(0.0, |acc, r| acc + r.industry_total())
     }
 
     pub fn unit(&self, id: UnitId) -> &Unit {

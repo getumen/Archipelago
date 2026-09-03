@@ -4,6 +4,7 @@
 //! surrounding labels are Japanese too so the two read as one table.
 
 use archipelago_sim::event::Event;
+use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::World;
 
@@ -67,7 +68,7 @@ pub fn print_faction_table(world: &World) {
     println!();
     println!("--- 勢力サマリ (day {}) ---", world.day);
     println!(
-        "{}  領土  部隊   人的資源    備蓄    装備   補給率  安定度  戦意",
+        "{}  領土  部隊   人的資源  補給率  安定度  戦意  不足率  配給率",
         pad_right("勢力", 10)
     );
     for faction in &world.factions {
@@ -75,17 +76,22 @@ pub fn print_faction_table(world: &World) {
         let regions = world.region_count(faction.id);
         let units = world.units.iter().filter(|u| u.alive && u.owner == faction.id).count();
         println!(
-            "{}  {:4}  {:4}  {:8.2}  {:6.1}  {:6.1}  {:6.1}%  {:6.1}  {:5.1}{status}",
+            "{}  {:4}  {:4}  {:8.2}  {:6.1}%  {:6.1}  {:5.1}  {:5.1}%  {:5.1}%{status}",
             pad_right(&faction.name, 10),
             regions,
             units,
             faction.manpower,
-            faction.supplies,
-            faction.equipment,
             faction.supply_ratio * 100.0,
             faction.stability,
             faction.war_support,
+            faction.shortage * 100.0,
+            faction.civilian_ration * 100.0,
         );
+        let stock_line: Vec<String> = ALL_GOODS
+            .iter()
+            .map(|g| format!("{}={:.1}", g.label(), faction.stock[g.index()]))
+            .collect();
+        println!("  {}  在庫: {}", pad_right("", 8), stock_line.join(" "));
     }
 }
 

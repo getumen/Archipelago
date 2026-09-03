@@ -9,8 +9,10 @@ use std::collections::{BTreeSet, VecDeque};
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
+    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER,
+    UNIT_EQUIPMENT, UNIT_MANPOWER,
 };
+use archipelago_sim::good::Good;
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::observation::Observation;
 use archipelago_sim::world::World;
@@ -20,17 +22,45 @@ use archipelago_sim::world::World;
 const RECRUIT_STOCK_MARGIN: f32 = 1.5;
 /// A unit below this fraction of full manpower/equipment gets reinforced.
 const REINFORCE_THRESHOLD: f32 = 0.75;
-/// Days of stockpiled supply below which the agent shifts production toward
-/// supplies instead of equipment (design.md §9's war/economy trade-off).
+/// Days of stockpiled Munitions below which the agent shifts the shared
+/// Steel/Energy input toward Munitions instead of Machinery (design.md §9's
+/// war/economy trade-off, now expressed as an `industry_priority` split).
 const LOW_SUPPLY_DAYS: f32 = 20.0;
-/// `production_mix` (the equipment share of output) used when the stockpile
-/// is running low.
-const SUPPLY_FOCUSED_MIX: f32 = 0.3;
-/// `production_mix` used otherwise, favoring equipment.
-const EQUIPMENT_FOCUSED_MIX: f32 = 0.7;
+/// Munitions industry-priority weight used when the Munitions stockpile is
+/// running low (Machinery gets `1.0 - this`).
+const MUNITIONS_FOCUSED_WEIGHT: f32 = 0.7;
+/// Machinery industry-priority weight used when Arms production is starved
+/// on Machinery input specifically (Stage 2A's "detect the blocking
+/// upstream good and raise its priority").
+const MACHINERY_FOCUSED_WEIGHT: f32 = 0.7;
+/// Even split used when neither side is under particular pressure.
+const BALANCED_WEIGHT: f32 = 0.5;
 /// Manpower pool above which conscription is throttled hard - hoarding
 /// manpower has a real cost since it suppresses labour via `region.mobilized`.
 const CONSCRIPTION_THROTTLE_MANPOWER: f32 = 25.0;
+/// Fraction of `unit_cap` (own unit count / cap) above which the faction is
+/// considered to have nowhere left to spend manpower: `recruit` stops
+/// raising new units once the cap is reached, so a pool this large just
+/// sits idle suppressing `labor_ratio` via `region.mobilized` for nothing.
+/// Combined with `CONSCRIPTION_THROTTLE_MANPOWER` (an already-large
+/// reserve), this is when the agent stops drafting entirely instead of
+/// merely throttling it - the pool's own demobilization
+/// (`balance::MANPOWER_DEMOBILIZATION_RATE`) handles bringing it back down.
+const STOP_CONSCRIPTION_UNIT_CAP_FRACTION: f32 = 0.9;
+/// `civilian_ration` used when Munitions/Arms are critically short and
+/// stability can still absorb it (design.md §9's civilian/war trade-off):
+/// squeeze civilian Food/Energy/Machinery delivery down to this fraction to
+/// free up stock for the war economy, at the cost of raising `shortage`
+/// (and therefore unrest) pressure.
+const CIVILIAN_RATION_LOW: f32 = 0.7;
+/// Stability floor below which the agent stops rationing and returns
+/// `civilian_ration` to 1.0 even if Munitions/Arms are still short - unrest
+/// is already a problem, so squeezing civilians further isn't worth it.
+const RATION_STABILITY_FLOOR: f32 = 60.0;
+/// Arms stockpile, in unit-equivalents of `UNIT_EQUIPMENT`, below which
+/// Arms counts as "critically short" for rationing purposes (mirrors
+/// `RECRUIT_STOCK_MARGIN`'s notion of a comfortable buffer).
+const ARMS_LOW_UNIT_MARGIN: f32 = 1.5;
 
 /// Decides for one faction every `period` days (offset by faction id so the
 /// three AIs don't all act on the same day), per mvp-spec.md §7.
@@ -88,13 +118,29 @@ impl Agent for HeuristicAgent {
     }
 }
 
+/// Unit-count ceiling the agent recruits toward (mvp-spec.md §7.3): scales
+/// with industrial base so a stronger economy can support a bigger army.
+/// Shared by `recruit` (which stops raising new units at this cap) and
+/// `set_policy` (which uses proximity to this cap to decide whether a large
+/// manpower pool still has somewhere to go).
+fn unit_cap(faction: FactionId, obs: &Observation) -> f32 {
+    3.0 + obs.world.industry_total(faction) / 5.0
+}
+
 fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let manpower = f.manpower;
+    let at_unit_cap = obs.own_units().len() as f32
+        >= unit_cap(faction, obs) * STOP_CONSCRIPTION_UNIT_CAP_FRACTION;
     let conscription = if manpower < 5.0 {
         0.9
     } else if manpower > CONSCRIPTION_THROTTLE_MANPOWER {
-        0.15
+        // A large pool with no unit-cap headroom left to spend it on is
+        // just dead weight suppressing `labor_ratio` - stop drafting
+        // entirely and let demobilization drain it back to the workforce.
+        // Otherwise keep the existing hard throttle: there's still room to
+        // grow the army, so a trickle of conscription is worth its cost.
+        if at_unit_cap { 0.0 } else { 0.15 }
     } else {
         0.6
     };
@@ -113,12 +159,41 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
             unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult
         })
         .sum();
-    let production_mix = if daily_demand > 0.0 && f.supplies / daily_demand < LOW_SUPPLY_DAYS {
-        SUPPLY_FOCUSED_MIX
+    let munitions = f.stock[Good::Munitions.index()];
+    let munitions_running_low = daily_demand > 0.0 && munitions / daily_demand < LOW_SUPPLY_DAYS;
+
+    // Detect whether Arms production is bottlenecked on Machinery input
+    // specifically (rather than Steel): if the Machinery stock funds fewer
+    // days of Arms output than the Steel stock does, Machinery is the
+    // blocking upstream good, and raising its share of the shared
+    // Steel/Energy input (at Munitions' expense) is what relieves it.
+    let machinery_limited_arms_days = f.stock[Good::Machinery.index()] / ARMS_INPUT_MACHINERY;
+    let steel_limited_arms_days = f.stock[Good::Steel.index()] / ARMS_INPUT_STEEL;
+    let arms_blocked_on_machinery = machinery_limited_arms_days < steel_limited_arms_days;
+
+    let (machinery_weight, munitions_weight) = if munitions_running_low {
+        (1.0 - MUNITIONS_FOCUSED_WEIGHT, MUNITIONS_FOCUSED_WEIGHT)
+    } else if arms_blocked_on_machinery {
+        (MACHINERY_FOCUSED_WEIGHT, 1.0 - MACHINERY_FOCUSED_WEIGHT)
     } else {
-        EQUIPMENT_FOCUSED_MIX
+        (BALANCED_WEIGHT, BALANCED_WEIGHT)
     };
-    actions.push(Action::SetProductionMix(production_mix));
+    actions.push(Action::SetIndustryPriority { good: Good::Machinery, weight: machinery_weight });
+    actions.push(Action::SetIndustryPriority { good: Good::Munitions, weight: munitions_weight });
+
+    // Civilian rationing (design.md §9): when Munitions or Arms are
+    // critically short and stability can still absorb the unrest cost,
+    // divert some civilian Food/Energy/Machinery delivery to the war
+    // economy. Ease off (back to full delivery) once stability drops too
+    // far or the stockpiles have recovered - rationing further at that
+    // point just compounds the unrest it caused.
+    let arms_low = f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * ARMS_LOW_UNIT_MARGIN;
+    let ration = if (munitions_running_low || arms_low) && f.stability > RATION_STABILITY_FLOOR {
+        CIVILIAN_RATION_LOW
+    } else {
+        1.0
+    };
+    actions.push(Action::SetCivilianRation(ration));
 }
 
 /// Tops up under-strength units sitting safely in friendly, uncontested territory.
@@ -146,12 +221,12 @@ fn reinforce(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 /// already well-manned relative to its industrial base.
 fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
-    let unit_cap = 3.0 + obs.world.industry_total(faction) / 5.0;
-    if obs.own_units().len() as f32 >= unit_cap {
+    let cap = unit_cap(faction, obs);
+    if obs.own_units().len() as f32 >= cap {
         return;
     }
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.equipment < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
     {
         return;
     }
@@ -163,7 +238,7 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
         safe_own_regions(faction, obs)
             .into_iter()
             .fold(None, |best: Option<(RegionId, f32)>, r| {
-                let industry = obs.world.region(r).industry;
+                let industry = obs.world.region(r).industry_total();
                 match best {
                     Some((_, best_industry)) if industry <= best_industry => best,
                     _ => Some((r, industry)),

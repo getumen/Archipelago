@@ -1,6 +1,10 @@
 //! Builds the fixed 10-region, 3-faction MVP map described in the design
 //! doc's §19 (10 地域・3 勢力), all factions starting at war with each other.
+//! Stage 2A (docs/phase2-spec.md) replaces the old single `industry`/`food`
+//! pair with a per-commodity `capacity` table, deliberately profiled so
+//! Kanto/Tokai are the nation's Machinery hub and losing them chokes Arms.
 
+use crate::good::GOOD_COUNT;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::military::Unit;
 use crate::world::{Faction, Link, LinkKind, Region, Terrain, World};
@@ -9,8 +13,9 @@ struct RegionSpec {
     name: &'static str,
     terrain: Terrain,
     population: f32,
-    industry: f32,
-    food: f32,
+    /// Capacity per commodity, in `Good::index()` order: Food, Energy,
+    /// Steel, Machinery, Munitions, Arms.
+    capacity: [f32; GOOD_COUNT],
     infrastructure: f32,
     port: f32,
 }
@@ -22,16 +27,16 @@ struct FactionSpec {
 }
 
 const REGION_SPECS: [RegionSpec; 10] = [
-    RegionSpec { name: "北海道", terrain: Terrain::Plain, population: 510.0, industry: 3.0, food: 12.0, infrastructure: 0.55, port: 1.0 },
-    RegionSpec { name: "北東北", terrain: Terrain::Hill, population: 330.0, industry: 2.5, food: 9.0, infrastructure: 0.50, port: 0.6 },
-    RegionSpec { name: "南東北", terrain: Terrain::Hill, population: 550.0, industry: 5.0, food: 8.0, infrastructure: 0.65, port: 0.7 },
-    RegionSpec { name: "関東", terrain: Terrain::Urban, population: 4300.0, industry: 20.0, food: 3.0, infrastructure: 1.00, port: 1.5 },
-    RegionSpec { name: "信越・北陸", terrain: Terrain::Mountain, population: 480.0, industry: 4.0, food: 6.0, infrastructure: 0.55, port: 0.5 },
-    RegionSpec { name: "東海", terrain: Terrain::Plain, population: 1500.0, industry: 16.0, food: 4.0, infrastructure: 0.90, port: 1.2 },
-    RegionSpec { name: "近畿", terrain: Terrain::Urban, population: 2200.0, industry: 14.0, food: 2.0, infrastructure: 0.95, port: 1.3 },
-    RegionSpec { name: "中国", terrain: Terrain::Hill, population: 740.0, industry: 6.0, food: 3.5, infrastructure: 0.70, port: 0.9 },
-    RegionSpec { name: "四国", terrain: Terrain::Hill, population: 370.0, industry: 2.0, food: 4.0, infrastructure: 0.60, port: 0.6 },
-    RegionSpec { name: "九州", terrain: Terrain::Plain, population: 1300.0, industry: 8.0, food: 7.0, infrastructure: 0.75, port: 1.4 },
+    RegionSpec { name: "北海道", terrain: Terrain::Plain, population: 510.0, capacity: [12.0, 2.0, 0.5, 0.3, 0.2, 0.0], infrastructure: 0.55, port: 1.0 },
+    RegionSpec { name: "北東北", terrain: Terrain::Hill, population: 330.0, capacity: [9.0, 1.5, 0.5, 0.3, 0.2, 0.0], infrastructure: 0.50, port: 0.6 },
+    RegionSpec { name: "南東北", terrain: Terrain::Hill, population: 550.0, capacity: [8.0, 2.5, 1.5, 0.8, 0.5, 0.2], infrastructure: 0.65, port: 0.7 },
+    RegionSpec { name: "関東", terrain: Terrain::Urban, population: 4300.0, capacity: [3.0, 4.0, 3.5, 6.5, 3.0, 3.0], infrastructure: 1.00, port: 1.5 },
+    RegionSpec { name: "信越・北陸", terrain: Terrain::Mountain, population: 480.0, capacity: [6.0, 3.0, 1.0, 0.7, 0.3, 0.0], infrastructure: 0.55, port: 0.5 },
+    RegionSpec { name: "東海", terrain: Terrain::Plain, population: 1500.0, capacity: [4.0, 2.0, 3.0, 7.0, 2.0, 2.0], infrastructure: 0.90, port: 1.2 },
+    RegionSpec { name: "近畿", terrain: Terrain::Urban, population: 2200.0, capacity: [2.0, 2.5, 3.5, 4.5, 2.0, 1.5], infrastructure: 0.95, port: 1.3 },
+    RegionSpec { name: "中国", terrain: Terrain::Hill, population: 740.0, capacity: [3.5, 2.0, 2.5, 1.0, 0.5, 0.0], infrastructure: 0.70, port: 0.9 },
+    RegionSpec { name: "四国", terrain: Terrain::Hill, population: 370.0, capacity: [4.0, 0.8, 0.5, 0.4, 0.3, 0.0], infrastructure: 0.60, port: 0.6 },
+    RegionSpec { name: "九州", terrain: Terrain::Plain, population: 1300.0, capacity: [7.0, 2.5, 2.0, 1.5, 1.5, 0.5], infrastructure: 0.75, port: 1.4 },
 ];
 
 const LINK_SPECS: [(u32, u32, LinkKind); 12] = [
@@ -56,10 +61,16 @@ const FACTION_SPECS: [FactionSpec; 3] = [
 ];
 
 const FACTION_MANPOWER: f32 = 12.0;
-const FACTION_SUPPLIES: f32 = 400.0;
-const FACTION_EQUIPMENT: f32 = 250.0;
+/// Initial stock per commodity, in `Good::index()` order (Food, Energy,
+/// Steel, Machinery, Munitions, Arms). Munitions/Arms keep Phase 1's
+/// `supplies`/`equipment` starting values; the upstream goods start with a
+/// modest buffer so the chain isn't starved on day one.
+const FACTION_STOCK: [f32; GOOD_COUNT] = [200.0, 100.0, 80.0, 40.0, 400.0, 250.0];
 const FACTION_CONSCRIPTION: f32 = 0.5;
-const FACTION_PRODUCTION_MIX: f32 = 0.6;
+/// Initial industry priority: an even split between Machinery and
+/// Munitions, the only two goods contending for shared Steel/Energy input
+/// in Stage 2A.
+const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.5, 0.5, 0.0];
 const FACTION_WAR_SUPPORT: f32 = 60.0;
 const FACTION_STABILITY: f32 = 80.0;
 
@@ -86,8 +97,7 @@ pub fn build_world() -> World {
             owner: owner_of[i],
             core: owner_of[i],
             population: spec.population,
-            industry: spec.industry,
-            food: spec.food,
+            capacity: spec.capacity,
             infrastructure: spec.infrastructure,
             port: spec.port,
             mobilized: 0.0,
@@ -111,10 +121,10 @@ pub fn build_world() -> World {
             name: spec.name.to_string(),
             capital: RegionId(spec.capital),
             manpower: FACTION_MANPOWER,
-            supplies: FACTION_SUPPLIES,
-            equipment: FACTION_EQUIPMENT,
+            stock: FACTION_STOCK,
             conscription: FACTION_CONSCRIPTION,
-            production_mix: FACTION_PRODUCTION_MIX,
+            industry_priority: FACTION_INDUSTRY_PRIORITY,
+            civilian_ration: crate::balance::CIVILIAN_RATION_DEFAULT,
             war_support: FACTION_WAR_SUPPORT,
             stability: FACTION_STABILITY,
             shortage: 0.0,
@@ -169,3 +179,6 @@ pub fn build_world() -> World {
         day: 0,
     }
 }
+
+/// Number of regions in the fixed MVP map — used by `observation::ENCODING_LEN`.
+pub const REGION_COUNT: usize = REGION_SPECS.len();

@@ -3,8 +3,22 @@
 
 use std::collections::VecDeque;
 
+use crate::good::GOOD_COUNT;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::world::World;
+
+/// Per-region field count in `Observation::encode()`: `[owned, population,
+/// infrastructure, supply, unrest, own_power, enemy_power]` (7 fixed
+/// fields) followed by `capacity[GOOD_COUNT]`.
+pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT;
+
+/// Faction-scalar field count in `Observation::encode()`: `manpower`,
+/// `stock[GOOD_COUNT]`, `war_support`, `stability`, `unit_count`.
+pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT;
+
+/// Fixed total length of `Observation::encode()`'s output for the MVP map
+/// (`scenario::REGION_COUNT` regions).
+pub const ENCODING_LEN: usize = crate::scenario::REGION_COUNT * REGION_FIELD_COUNT + FACTION_FIELD_COUNT;
 
 pub struct Observation<'a> {
     pub faction: FactionId,
@@ -90,28 +104,34 @@ impl<'a> Observation<'a> {
         None
     }
 
-    /// Length `regions.len() * 8 + 6`: per-region
-    /// `[owned, population, industry, infrastructure, supply, unrest, own_power, enemy_power]`,
-    /// then faction scalars `[manpower, supplies, equipment, war_support, stability, unit_count]`.
+    /// Fixed length `ENCODING_LEN` (`regions.len() * REGION_FIELD_COUNT +
+    /// FACTION_FIELD_COUNT`): per-region `[owned, population,
+    /// infrastructure, supply, unrest, own_power, enemy_power,
+    /// capacity[GOOD_COUNT]...]`, then faction scalars `[manpower,
+    /// stock[GOOD_COUNT]..., war_support, stability, unit_count]`.
     pub fn encode(&self) -> Vec<f32> {
-        let mut out = Vec::with_capacity(self.world.regions.len() * 8 + 6);
+        let mut out = Vec::with_capacity(ENCODING_LEN);
         for region in &self.world.regions {
             out.push(if region.owner == self.faction { 1.0 } else { 0.0 });
             out.push(region.population);
-            out.push(region.industry);
             out.push(region.infrastructure);
             out.push(self.world.supply[region.id.index()]);
             out.push(region.unrest);
             out.push(self.own_power(region.id));
             out.push(self.enemy_power(region.id));
+            for g in 0..GOOD_COUNT {
+                out.push(region.capacity[g]);
+            }
         }
         let faction = self.world.faction(self.faction);
         out.push(faction.manpower);
-        out.push(faction.supplies);
-        out.push(faction.equipment);
+        for g in 0..GOOD_COUNT {
+            out.push(faction.stock[g]);
+        }
         out.push(faction.war_support);
         out.push(faction.stability);
         out.push(self.own_units().len() as f32);
+        debug_assert_eq!(out.len(), ENCODING_LEN);
         out
     }
 }

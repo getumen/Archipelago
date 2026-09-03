@@ -1,8 +1,9 @@
 //! Spec §9 acceptance tests for the simulation core.
 
 use crate::action::{Action, ActionError};
-use crate::balance::{OCCUPATION_RATE, UNIT_DEATH_MANPOWER};
+use crate::balance::{CIVILIAN_ENERGY_DEMAND_PER_POP, OCCUPATION_RATE, UNIT_DEATH_MANPOWER};
 use crate::economy;
+use crate::good::{Good, GOOD_COUNT};
 use crate::ids::{FactionId, RegionId};
 use crate::logistics;
 use crate::military;
@@ -96,8 +97,7 @@ fn determinism() {
 
     for (fa, fb) in sim_a.world.factions.iter().zip(sim_b.world.factions.iter()) {
         assert_eq!(fa.manpower, fb.manpower);
-        assert_eq!(fa.supplies, fb.supplies);
-        assert_eq!(fa.equipment, fb.equipment);
+        assert_eq!(fa.stock, fb.stock);
         assert_eq!(fa.war_support, fb.war_support);
         assert_eq!(fa.stability, fb.stability);
         assert_eq!(fa.alive, fb.alive);
@@ -253,6 +253,73 @@ fn mobilized_tracks_current_commitment() {
     );
 }
 
+/// The manpower pool must be a self-correcting reservoir, not a one-way
+/// accumulator: a faction drafting continuously (`conscription = 1.0`) off
+/// a fixed population, with nothing ever spending the pool (no units
+/// recruited), should converge to a finite level instead of growing
+/// forever. `economy::tick_economy` alone drives this - it's the
+/// draft-in/demobilize-out balance, independent of anything military or
+/// political - so calling it directly in a loop isolates exactly that.
+#[test]
+fn manpower_pool_does_not_grow_without_bound() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    world.faction_mut(faction).conscription = 1.0;
+
+    for _ in 0..1000 {
+        economy::tick_economy(&mut world);
+    }
+    let settled = world.faction(faction).manpower;
+
+    for _ in 0..500 {
+        economy::tick_economy(&mut world);
+    }
+    let later = world.faction(faction).manpower;
+
+    assert!(
+        settled < 500.0,
+        "pool should have converged to a finite level, not ballooned: {settled}"
+    );
+    assert!(
+        (later - settled).abs() < 0.01,
+        "pool should have stopped growing by day 1000, not still be climbing: settled={settled}, later={later}"
+    );
+}
+
+/// Once a faction stops feeding the pool, the idle conscripts in it must
+/// drain back into the civilian workforce and be reflected in
+/// `labor_ratio` - proving the pool isn't just capped but genuinely gives
+/// labour back, per docs/mvp-spec.md §4.1's "動員解除・損耗で戻る".
+#[test]
+fn idle_conscripts_return_to_workforce() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    // A pool this large, relative to the capital's workforce, pins
+    // labor_ratio at its floor the moment it's counted as mobilized.
+    world.faction_mut(faction).manpower = 3000.0;
+    world.faction_mut(faction).conscription = 0.0;
+    economy::tick_economy(&mut world);
+    let ratio_depressed = world.region(capital).labor_ratio();
+    assert!(
+        ratio_depressed <= 0.16,
+        "expected the oversized pool to pin labor_ratio near its floor: {ratio_depressed}"
+    );
+
+    // With conscription at 0, nothing refills the pool, so demobilization
+    // alone should drain it back out and let labor_ratio recover.
+    for _ in 0..400 {
+        economy::tick_economy(&mut world);
+    }
+    let ratio_recovered = world.region(capital).labor_ratio();
+
+    assert!(
+        ratio_recovered > ratio_depressed + 0.3,
+        "expected labor_ratio to recover once the pool drained: before={ratio_depressed}, after={ratio_recovered}"
+    );
+}
+
 #[test]
 fn conscription_reduces_labor() {
     let mut sim = Simulation::new(3);
@@ -320,6 +387,271 @@ fn casualties_accumulate_from_combat() {
     assert!(
         sim.world.faction(FactionId(1)).casualties > 0.0,
         "expected faction 1 to have suffered casualties"
+    );
+}
+
+/// Stage 2A acceptance test: losing the nation's Machinery hub (Kanto, the
+/// scenario's largest Machinery/Arms capacity by far) should leave Arms
+/// production nearly stalled even with Steel and Energy in abundant supply,
+/// because Arms production is capped by its own capacity-derived potential
+/// and by the Machinery stock it consumes - not by Steel/Energy alone.
+#[test]
+fn losing_machinery_region_halts_arms() {
+    let build = |strip_kanto: bool| {
+        let mut world = scenario::build_world();
+        if strip_kanto {
+            // Region 3 (Kanto) is faction 0's own capital; handing it away
+            // simulates losing the country's main Machinery/Arms base.
+            world.region_mut(RegionId(3)).owner = FactionId(2);
+        }
+        let faction = FactionId(0);
+        let f = world.faction_mut(faction);
+        f.stock = [0.0; GOOD_COUNT];
+        f.stock[Good::Steel.index()] = 1000.0;
+        f.stock[Good::Energy.index()] = 1000.0;
+        f.industry_priority[Good::Machinery.index()] = 0.5;
+        f.industry_priority[Good::Munitions.index()] = 0.5;
+        world
+    };
+
+    let mut with_kanto = build(false);
+    economy::tick_economy(&mut with_kanto);
+    let arms_with = with_kanto.faction(FactionId(0)).stock[Good::Arms.index()];
+
+    let mut without_kanto = build(true);
+    economy::tick_economy(&mut without_kanto);
+    let arms_without = without_kanto.faction(FactionId(0)).stock[Good::Arms.index()];
+
+    assert!(
+        arms_with > 1.0,
+        "expected meaningful Arms output while holding Kanto, got {arms_with}"
+    );
+    assert!(
+        arms_without < arms_with * 0.15,
+        "expected losing the Machinery hub to nearly halt Arms production despite \
+         ample Steel/Energy: with={arms_with}, without={arms_without}"
+    );
+}
+
+/// Stage 2A acceptance test: draining a faction's Energy-producing capacity
+/// to zero should cascade downstream - Steel needs Energy, and Machinery /
+/// Munitions / Arms all sit behind Steel - so every good past Energy stays
+/// pinned at zero for the tick.
+#[test]
+fn input_shortage_limits_output() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1); // owns regions 4, 5, 6 with real Steel capacity
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity[Good::Energy.index()] = 0.0;
+        }
+    }
+    let f = world.faction_mut(faction);
+    f.stock = [0.0; GOOD_COUNT];
+    f.industry_priority[Good::Machinery.index()] = 0.5;
+    f.industry_priority[Good::Munitions.index()] = 0.5;
+
+    economy::tick_economy(&mut world);
+
+    let stock = world.faction(faction).stock;
+    assert_eq!(stock[Good::Energy.index()], 0.0, "no Energy capacity means no Energy output");
+    assert_eq!(
+        stock[Good::Steel.index()],
+        0.0,
+        "Steel needs Energy input and should stay at zero without it"
+    );
+    assert_eq!(stock[Good::Machinery.index()], 0.0);
+    assert_eq!(stock[Good::Munitions.index()], 0.0);
+    assert_eq!(stock[Good::Arms.index()], 0.0);
+}
+
+/// Stage 2A acceptance test: when Steel is too scarce to fund both
+/// Machinery's and Munitions' full potential, the contended input is split
+/// between them in the ratio of `Faction::industry_priority` - raising a
+/// good's weight should raise its share of the scarce input (and therefore
+/// its output) relative to the other.
+#[test]
+fn industry_priority_splits_shared_input() {
+    let build = |machinery_weight: f32, munitions_weight: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                // Plenty of Machinery/Munitions potential and Energy so
+                // Steel - deliberately kept scarce - is the only binding
+                // constraint, and Arms consumes nothing (capacity zeroed)
+                // so it can't eat into the Machinery this test measures.
+                region.capacity[Good::Machinery.index()] = 100.0;
+                region.capacity[Good::Munitions.index()] = 100.0;
+                region.capacity[Good::Arms.index()] = 0.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+            }
+        }
+        let f = world.faction_mut(faction);
+        f.stock = [0.0; GOOD_COUNT];
+        f.stock[Good::Steel.index()] = 5.0;
+        f.stock[Good::Energy.index()] = 1000.0;
+        f.stability = 100.0;
+        f.industry_priority[Good::Machinery.index()] = machinery_weight;
+        f.industry_priority[Good::Munitions.index()] = munitions_weight;
+
+        economy::tick_economy(&mut world);
+        let stock = world.faction(faction).stock;
+        (stock[Good::Machinery.index()], stock[Good::Munitions.index()])
+    };
+
+    let (machinery_favored_m, machinery_favored_mu) = build(0.8, 0.2);
+    let (munitions_favored_m, munitions_favored_mu) = build(0.2, 0.8);
+
+    assert!(
+        machinery_favored_m > machinery_favored_mu,
+        "with Machinery weighted higher, it should out-produce Munitions: \
+         machinery={machinery_favored_m}, munitions={machinery_favored_mu}"
+    );
+    assert!(
+        munitions_favored_mu > munitions_favored_m,
+        "with Munitions weighted higher, it should out-produce Machinery: \
+         machinery={munitions_favored_m}, munitions={munitions_favored_mu}"
+    );
+    assert!(
+        munitions_favored_m < machinery_favored_m,
+        "shifting priority toward Munitions should reduce Machinery's output"
+    );
+    assert!(
+        machinery_favored_mu < munitions_favored_mu,
+        "shifting priority toward Machinery should reduce Munitions' output"
+    );
+}
+
+/// Regression guard for the Stage 2A "solve-order defect": with civilian
+/// demand deducted before industry draws its inputs (economy.rs's fixed
+/// stage order) and the scenario's default policy (`civilian_ration ==
+/// 1.0`), every faction should be able to feed its population from a few
+/// days of its own production - shortage must not be structurally pinned
+/// high from day one regardless of any decision, the way it was when
+/// industry drained Energy/Machinery before civilians ever got a turn.
+#[test]
+fn starting_factions_are_not_in_shortage() {
+    let mut world = scenario::build_world();
+    for _ in 0..10 {
+        economy::tick_economy(&mut world);
+    }
+
+    for faction in &world.factions {
+        assert!(
+            faction.shortage < 0.2,
+            "{} shortage {} after 10 ticks at scenario start with default policy",
+            faction.name,
+            faction.shortage
+        );
+    }
+}
+
+/// Stage 2A acceptance test: `civilian_ration` is design.md §9's civilian/
+/// war trade-off made explicit - rationing civilians harder must raise
+/// `shortage` (the unrest pressure it feeds) while leaving more of the
+/// rationed goods' stock for industry to consume. Food and Machinery are
+/// pre-loaded with an abundant stock buffer so the comparison isolates the
+/// Energy path: Energy capacity is deliberately scarce and Steel capacity
+/// deliberately abundant, so Steel output is purely bound by whatever
+/// Energy civilians left behind.
+#[test]
+fn rationing_trades_unrest_for_output() {
+    let build = |ration: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        {
+            let f = world.faction_mut(faction);
+            f.stability = 100.0;
+            f.civilian_ration = ration;
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Food.index()] = 1000.0;
+            f.stock[Good::Machinery.index()] = 1000.0;
+        }
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 100.0;
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Energy.index()] = 0.5; // 4 regions -> 2.0 total
+                region.capacity[Good::Steel.index()] = 100.0; // ample: Energy-input-bound, not potential-bound
+            }
+        }
+
+        economy::tick_economy(&mut world);
+        let f = world.faction(faction);
+        (f.shortage, f.stock[Good::Steel.index()])
+    };
+
+    let (shortage_full, steel_full) = build(1.0);
+    let (shortage_low, steel_low) = build(0.7);
+
+    assert!(
+        shortage_low > shortage_full,
+        "lowering civilian_ration should raise shortage: full={shortage_full}, low={shortage_low}"
+    );
+    assert!(
+        steel_low > steel_full,
+        "lowering civilian_ration should free up more Energy for industry: \
+         full={steel_full}, low={steel_low}"
+    );
+}
+
+/// Stage 2A acceptance test for the structural half of the fix: when
+/// produced Energy is barely enough to cover civilian demand and nothing
+/// more, civilians must be served in full and it's industry - not
+/// civilians - that gets cut to nothing. This is the reverse of the
+/// original defect, where industry always spent Energy first and civilians
+/// were left with an unsatisfiable remainder.
+#[test]
+fn civilian_demand_is_served_before_industry() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    {
+        let f = world.faction_mut(faction);
+        f.stability = 100.0;
+        f.civilian_ration = 1.0;
+        f.stock = [0.0; GOOD_COUNT];
+        // Food and Machinery are pre-funded so only the Energy path is under test.
+        f.stock[Good::Food.index()] = 1000.0;
+        f.stock[Good::Machinery.index()] = 1000.0;
+    }
+
+    let owned: Vec<usize> = world
+        .regions
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.owner == faction)
+        .map(|(i, _)| i)
+        .collect();
+    for &i in &owned {
+        world.regions[i].infrastructure = 1.0;
+        world.regions[i].unrest = 0.0;
+        world.regions[i].population = 100.0;
+    }
+    let total_pop = owned.len() as f32 * 100.0;
+    let energy_need = total_pop * CIVILIAN_ENERGY_DEMAND_PER_POP;
+    let per_region_energy = energy_need / owned.len() as f32;
+    for &i in &owned {
+        world.regions[i].capacity = [0.0; GOOD_COUNT];
+        world.regions[i].capacity[Good::Energy.index()] = per_region_energy;
+        world.regions[i].capacity[Good::Steel.index()] = 100.0; // would produce plenty, if it had Energy left
+    }
+
+    economy::tick_economy(&mut world);
+
+    let f = world.faction(faction);
+    assert!(
+        f.shortage < 0.02,
+        "civilian demand should be met when production barely covers it: shortage={}",
+        f.shortage
+    );
+    assert!(
+        f.stock[Good::Steel.index()] < 0.02,
+        "with no Energy left after civilians, Steel output should be cut to ~zero: steel={}",
+        f.stock[Good::Steel.index()]
     );
 }
 

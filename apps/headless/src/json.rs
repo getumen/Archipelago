@@ -3,8 +3,19 @@
 //! dependency-free, so this covers only what `World`/`Outcome` need
 //! (strings, finite numbers, bools, arrays, objects, null).
 
+use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::World;
+
+/// Renders a `[f32; GOOD_COUNT]`-shaped array as a JSON object keyed by
+/// `Good::key()`, e.g. `{"food":1.0,"energy":2.0,...}`.
+fn good_object(values: &[f32]) -> String {
+    let items: Vec<String> = ALL_GOODS
+        .iter()
+        .map(|g| format!("{}:{}", string(g.key()), number(values[g.index()])))
+        .collect();
+    format!("{{{}}}", items.join(","))
+}
 
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -63,17 +74,17 @@ fn serialize_factions(world: &World) -> String {
         .map(|f| {
             let units = world.units.iter().filter(|u| u.alive && u.owner == f.id).count();
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"manpower\":{},\"supplies\":{},\"equipment\":{},\"conscription\":{},\"production_mix\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
                 world.region_count(f.id),
                 units,
                 number(f.manpower),
-                number(f.supplies),
-                number(f.equipment),
+                good_object(&f.stock),
                 number(f.conscription),
-                number(f.production_mix),
+                good_object(&f.industry_priority),
+                number(f.civilian_ration),
                 number(f.war_support),
                 number(f.stability),
                 number(f.shortage),
@@ -95,12 +106,13 @@ fn serialize_regions(world: &World) -> String {
                 None => "null".to_string(),
             };
             format!(
-                "{{\"id\":{},\"name\":{},\"owner\":{},\"owner_name\":{},\"core\":{},\"unrest\":{},\"occupation\":{},\"occupier\":{},\"supply\":{}}}",
+                "{{\"id\":{},\"name\":{},\"owner\":{},\"owner_name\":{},\"core\":{},\"capacity\":{},\"unrest\":{},\"occupation\":{},\"occupier\":{},\"supply\":{}}}",
                 r.id.0,
                 string(&r.name),
                 r.owner.0,
                 string(&world.faction(r.owner).name),
                 r.core.0,
+                good_object(&r.capacity),
                 number(r.unrest),
                 number(r.occupation),
                 occupier,

@@ -8,6 +8,7 @@ pub mod agent;
 pub mod balance;
 pub mod economy;
 pub mod event;
+pub mod good;
 pub mod ids;
 pub mod logistics;
 pub mod military;

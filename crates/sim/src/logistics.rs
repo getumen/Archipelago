@@ -3,6 +3,7 @@
 //! a single corridor region starves everything behind it.
 
 use crate::balance::{PROJECTED_SUPPLY_FACTOR, SUPPLY_NEED_PER_MANPOWER, SUPPLY_SMOOTHING};
+use crate::good::Good;
 use crate::world::World;
 
 /// Recomputes `world.supply`: the maximum throughput each region can draw
@@ -116,12 +117,13 @@ pub fn distribute_supply(world: &mut World) {
     let mut scale = vec![1.0f32; n_factions];
     for faction in world.factions.iter_mut() {
         let f = faction.id.index();
+        let munitions = faction.stock[Good::Munitions.index()];
         scale[f] = if total_served[f] > 0.0 {
-            (faction.supplies / total_served[f]).min(1.0)
+            (munitions / total_served[f]).min(1.0)
         } else {
             1.0
         };
-        faction.supplies = (faction.supplies - total_served[f] * scale[f]).max(0.0);
+        faction.stock[Good::Munitions.index()] = (munitions - total_served[f] * scale[f]).max(0.0);
         faction.supply_ratio = if total_demand[f] > 0.0 {
             (total_served[f] * scale[f] / total_demand[f]).min(1.0)
         } else {

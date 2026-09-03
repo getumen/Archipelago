@@ -1,7 +1,11 @@
 //! Player/agent-facing commands and the validation that turns them into
 //! world mutations. Invalid actions are rejected, never panicked on.
 
-use crate::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO};
+use crate::balance::{
+    CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
+    UNIT_START_ORG_RATIO,
+};
+use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::military::{move_required, Movement, Unit};
 use crate::world::World;
@@ -13,7 +17,8 @@ pub enum Action {
     RecruitUnit { region: RegionId },
     ReinforceUnit { unit: UnitId },
     SetConscription(f32),
-    SetProductionMix(f32),
+    SetIndustryPriority { good: Good, weight: f32 },
+    SetCivilianRation(f32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -40,7 +45,10 @@ pub fn apply_action(
         Action::RecruitUnit { region } => apply_recruit(world, faction, region),
         Action::ReinforceUnit { unit } => apply_reinforce(world, faction, unit),
         Action::SetConscription(value) => apply_set_conscription(world, faction, value),
-        Action::SetProductionMix(value) => apply_set_production_mix(world, faction, value),
+        Action::SetIndustryPriority { good, weight } => {
+            apply_set_industry_priority(world, faction, good, weight)
+        }
+        Action::SetCivilianRation(value) => apply_set_civilian_ration(world, faction, value),
     }
 }
 
@@ -110,12 +118,12 @@ fn apply_recruit(
     if f.manpower < UNIT_MANPOWER {
         return Err(ActionError::InsufficientManpower);
     }
-    if f.equipment < UNIT_EQUIPMENT {
+    if f.stock[Good::Arms.index()] < UNIT_EQUIPMENT {
         return Err(ActionError::InsufficientEquipment);
     }
 
     world.faction_mut(faction).manpower -= UNIT_MANPOWER;
-    world.faction_mut(faction).equipment -= UNIT_EQUIPMENT;
+    world.faction_mut(faction).stock[Good::Arms.index()] -= UNIT_EQUIPMENT;
 
     let id = UnitId(world.units.len() as u32);
     let name = format!("{} Corps {}", world.faction(faction).name, id.0);
@@ -150,10 +158,10 @@ fn apply_reinforce(
 
     let f = world.faction(faction);
     let fill_manpower = need_manpower.min(f.manpower);
-    let fill_equipment = need_equipment.min(f.equipment);
+    let fill_equipment = need_equipment.min(f.stock[Good::Arms.index()]);
 
     world.faction_mut(faction).manpower -= fill_manpower;
-    world.faction_mut(faction).equipment -= fill_equipment;
+    world.faction_mut(faction).stock[Good::Arms.index()] -= fill_equipment;
     let unit = world.unit_mut(unit_id);
     unit.manpower += fill_manpower;
     unit.equipment += fill_equipment;
@@ -172,14 +180,27 @@ fn apply_set_conscription(
     Ok(())
 }
 
-fn apply_set_production_mix(
+fn apply_set_industry_priority(
+    world: &mut World,
+    faction: FactionId,
+    good: Good,
+    weight: f32,
+) -> Result<(), ActionError> {
+    if !(0.0..=1.0).contains(&weight) {
+        return Err(ActionError::InvalidValue);
+    }
+    world.faction_mut(faction).industry_priority[good.index()] = weight;
+    Ok(())
+}
+
+fn apply_set_civilian_ration(
     world: &mut World,
     faction: FactionId,
     value: f32,
 ) -> Result<(), ActionError> {
-    if !(0.0..=1.0).contains(&value) {
+    if !(CIVILIAN_RATION_MIN..=CIVILIAN_RATION_MAX).contains(&value) {
         return Err(ActionError::InvalidValue);
     }
-    world.faction_mut(faction).production_mix = value;
+    world.faction_mut(faction).civilian_ration = value;
     Ok(())
 }

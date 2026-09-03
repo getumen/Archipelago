@@ -2,11 +2,78 @@
 //! so systems never carry magic numbers of their own.
 
 pub const WORKFORCE_SHARE: f32 = 0.5;
-pub const INDUSTRY_OUTPUT_PER_POINT: f32 = 1.10;
-pub const FOOD_OUTPUT_PER_POINT: f32 = 0.9;
-pub const CIVILIAN_DEMAND_PER_POP: f32 = 0.0023;
-pub const FOOD_DEMAND_PER_POP: f32 = 0.0022;
 pub const CONSCRIPT_RATE: f32 = 0.00035;
+
+/// Daily fraction of the manpower pool (drafted conscripts not yet
+/// assigned to a unit) that returns to the civilian workforce, independent
+/// of policy. This is the demobilization half of the manpower-pool fix
+/// (`economy::tick_economy`): `conscription` only throttles inflow, so
+/// without an outflow a faction sitting on a large population could draft
+/// forever and never give the labour back, even though `Region::mobilized`
+/// (and therefore `labor_ratio`) is recomputed from the *current* pool
+/// every tick. Draining the pool changes nothing about population or unit
+/// manpower - it only shrinks what counts toward `mobilized`, so the
+/// workforce comes back automatically on the next tick.
+///
+/// At this rate a pool being fed by continuous drafting settles at
+/// `draft / MANPOWER_DEMOBILIZATION_RATE` instead of growing without
+/// bound: e.g. a faction drafting at the AI's throttled 0.15 tier
+/// (agents::CONSCRIPTION_THROTTLE_MANPOWER) off the *entire* map's
+/// population (~12,280) settles around 32 (万人) - the same order of
+/// magnitude as that throttle threshold, not the hundreds a one-way
+/// accumulator produces.
+pub const MANPOWER_DEMOBILIZATION_RATE: f32 = 0.02;
+
+/// Stage 2A production chain (docs/phase2-spec.md "Stage 2A"): input goods
+/// consumed per unit of output good produced, at the `Steel -> Machinery /
+/// Munitions -> Arms` stage. `Food` and `Energy` have no inputs.
+pub const STEEL_INPUT_ENERGY: f32 = 0.5;
+pub const MACHINERY_INPUT_STEEL: f32 = 0.4;
+pub const MACHINERY_INPUT_ENERGY: f32 = 0.3;
+pub const MUNITIONS_INPUT_STEEL: f32 = 0.3;
+pub const MUNITIONS_INPUT_ENERGY: f32 = 0.2;
+pub const ARMS_INPUT_MACHINERY: f32 = 0.5;
+pub const ARMS_INPUT_STEEL: f32 = 0.3;
+
+/// Civilian demand, per capita (population is tracked in 万人/"ten
+/// thousands"), for the three commodities civilians draw on directly.
+///
+/// `CIVILIAN_ENERGY_DEMAND_PER_POP` and `CIVILIAN_MACHINERY_DEMAND_PER_POP`
+/// are derived from the Stage 2A scenario capacity table
+/// (docs/phase2-spec.md's region list, summed per faction), not guessed:
+/// with civilian demand met first and industry taking the remainder (see
+/// economy.rs), each faction's civilian Energy draw should land around a
+/// quarter of its *national* Energy capacity, and its civilian Machinery
+/// draw around a twentieth of its Machinery capacity, so every faction can
+/// both feed its population and still fund a substantial share of its
+/// Steel/Machinery/Munitions/Arms chain. Concretely, at the nation's Energy
+/// capacity (10.0 for 東方連合) versus what running Steel+Machinery+
+/// Munitions at full table capacity alone would draw (~6.2), a civilian
+/// share near 25% (~2.5) leaves the chain's ~6.2 need covered with room to
+/// spare; scaled by each faction's own population this comes out to
+/// approximately:
+/// - 東方連合 (pop 5690, Energy 10.0): demand ≈ 2.56 (25.6% of capacity)
+/// - 中央同盟 (pop 4180, Energy 7.5): demand ≈ 1.88 (25.1% of capacity)
+/// - 西方同盟 (pop 2410, Energy 5.3): demand ≈ 1.08 (20.5% of capacity)
+///
+/// which fixes the per-capita rate at 0.00045. The same table-driven method
+/// (target ≈5-8% of national Machinery capacity, since Arms' Machinery
+/// input is small relative to Machinery capacity) fixes Machinery at
+/// 0.0001.
+pub const CIVILIAN_FOOD_DEMAND_PER_POP: f32 = 0.0022;
+pub const CIVILIAN_ENERGY_DEMAND_PER_POP: f32 = 0.00045;
+pub const CIVILIAN_MACHINERY_DEMAND_PER_POP: f32 = 0.0001;
+
+/// Valid range for `Faction::civilian_ration` (design.md §9's civilian/war
+/// trade-off, `Action::SetCivilianRation`): the fraction of civilian Food/
+/// Energy/Machinery demand the government actually delivers. Below 1.0 the
+/// undelivered share is never drawn from stock, freeing it for industry, at
+/// the cost of feeding `Faction::shortage` (and therefore unrest) exactly
+/// as genuine scarcity would. Floored at 0.5 so rationing is a costly lever,
+/// not a way to make civilian demand vanish.
+pub const CIVILIAN_RATION_MIN: f32 = 0.5;
+pub const CIVILIAN_RATION_MAX: f32 = 1.0;
+pub const CIVILIAN_RATION_DEFAULT: f32 = 1.0;
 
 pub const UNIT_MANPOWER: f32 = 1.0;
 pub const UNIT_EQUIPMENT: f32 = 20.0;
