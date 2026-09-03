@@ -1,0 +1,9 @@
+[package]
+name = "archipelago-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+archipelago-sim = { path = "../../crates/sim" }
+archipelago-agents = { path = "../../crates/agents" }
