@@ -4,8 +4,10 @@
 //! (strings, finite numbers, bools, arrays, objects, null).
 
 use archipelago_sim::construction::{Construction, Project};
+use archipelago_sim::diplomacy::ALL_TREATIES;
 use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::group::ALL_GROUPS;
+use archipelago_sim::ids::FactionId;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::{Domain, Station, World};
 
@@ -80,6 +82,49 @@ fn number(v: f32) -> String {
     if v.is_finite() { format!("{v}") } else { "0".to_string() }
 }
 
+/// Stage 3B (docs/phase3-spec.md "Stage 3B"): every faction pair's stance,
+/// opinion (both directions) and active grant treaties, plus the pending
+/// proposal queue.
+fn serialize_diplomacy(world: &World) -> String {
+    let n = world.factions.len();
+    let mut pairs = Vec::new();
+    for a_idx in 0..n {
+        for b_idx in (a_idx + 1)..n {
+            let a = FactionId(a_idx as u32);
+            let b = FactionId(b_idx as u32);
+            let grants: Vec<String> = ALL_TREATIES
+                .iter()
+                .copied()
+                .filter(|t| !t.is_stance() && world.diplomacy.has_treaty(a, b, *t))
+                .map(|t| string(t.key()))
+                .collect();
+            pairs.push(format!(
+                "{{\"a\":{},\"b\":{},\"stance\":{},\"opinion_a_of_b\":{},\"opinion_b_of_a\":{},\"grants\":[{}]}}",
+                a.0,
+                b.0,
+                string(world.diplomacy.stance(a, b).key()),
+                number(world.diplomacy.opinion(a, b)),
+                number(world.diplomacy.opinion(b, a)),
+                grants.join(","),
+            ));
+        }
+    }
+    let pending: Vec<String> = world
+        .diplomacy
+        .pending
+        .iter()
+        .map(|p| {
+            format!(
+                "{{\"from\":{},\"to\":{},\"treaty\":{}}}",
+                p.from.0,
+                p.to.0,
+                string(p.treaty.key()),
+            )
+        })
+        .collect();
+    format!("{{\"pairs\":[{}],\"pending\":[{}]}}", pairs.join(","), pending.join(","))
+}
+
 pub fn serialize_state(world: &World, seed: u64, outcome: Outcome) -> String {
     let mut out = String::new();
     out.push('{');
@@ -88,7 +133,8 @@ pub fn serialize_state(world: &World, seed: u64, outcome: Outcome) -> String {
     out.push_str(&format!("\"outcome\":{},", serialize_outcome(world, outcome)));
     out.push_str(&format!("\"factions\":{},", serialize_factions(world)));
     out.push_str(&format!("\"regions\":{},", serialize_regions(world)));
-    out.push_str(&format!("\"sea_zones\":{}", serialize_sea_zones(world)));
+    out.push_str(&format!("\"sea_zones\":{},", serialize_sea_zones(world)));
+    out.push_str(&format!("\"diplomacy\":{}", serialize_diplomacy(world)));
     out.push('}');
     out
 }

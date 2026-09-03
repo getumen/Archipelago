@@ -501,6 +501,124 @@ pub const SEPARATISM_UNREST_GARRISON_MULT: f32 = 1.0;
 /// project's standing rule against absorbing states (docs/phase3-spec.md §0).
 pub const SEPARATISM_GARRISON_MAX_SUPPRESSION: f32 = 0.85;
 
+// ---------------------------------------------------------------------------
+// Stage 3B — 外交関係と条約 (docs/phase3-spec.md "Stage 3B"): `Stance`, the
+// asymmetric `opinion` matrix, the six `Treaty` kinds, the one-tick
+// pending-proposal queue, and `TradeAgreement`'s surplus-to-deficit flow.
+// Per §0's carried-forward rules: `opinion` moves toward a target (0) rather
+// than accumulating one-way, so no pair of factions can reach a diplomatic
+// state neither can ever recover from; every treaty-affecting action is
+// either idempotent (re-proposing/re-accepting an already-active treaty is
+// rejected outright) or metered by a real, decrementing cooldown, never a
+// ratio re-applied to a shrinking remainder - see `diplomacy.rs`'s module
+// doc for how each action is made abuse-resistant against a reward
+// optimiser spamming it every tick.
+// ---------------------------------------------------------------------------
+
+/// Daily rate at which `Diplomacy::opinion[a][b]` closes the gap toward its
+/// 0 baseline (the same target-approach shape as `GROUP_ADAPT_RATE`/
+/// `UNREST_ADAPT_RATE`) - every opinion swing from a treaty being signed,
+/// broken, or a war being declared is a bounded one-time delta, not a
+/// permanent shift, so no relationship can be driven to -100 and pinned
+/// there forever.
+pub const OPINION_DECAY_RATE: f32 = 0.03;
+
+/// Opinion gained, both directions, when a proposed treaty is accepted
+/// (`action::apply_accept_treaty`).
+pub const TREATY_ACCEPT_OPINION_BONUS: f32 = 15.0;
+
+/// Opinion lost, both directions, when `Action::DeclareWar` breaks a
+/// `Ceasefire` (docs/phase3-spec.md: "いつでも DeclareWar で破棄できる") - the
+/// single largest diplomatic penalty, since ending a truce outright is the
+/// most hostile bilateral act short of the war itself.
+pub const DECLARE_WAR_OPINION_PENALTY: f32 = 40.0;
+
+/// Notice period (days) `Action::BreakTreaty` on a `NonAggression` pact must
+/// serve before the pair actually reverts to `Stance::War`
+/// (docs/phase3-spec.md: "破棄には NON_AGGRESSION_NOTICE_DAYS の予告が要る") -
+/// tracked per pair in `Diplomacy::pending_breaks` and counted down by
+/// `diplomacy::tick_diplomacy`; combat and occupation stay suppressed for
+/// the whole notice period, since the stance itself doesn't change until it
+/// elapses.
+pub const NON_AGGRESSION_NOTICE_DAYS: u32 = 10;
+/// Opinion lost, both directions, the moment notice is served (not when the
+/// war actually starts `NON_AGGRESSION_NOTICE_DAYS` later) - breaking the
+/// pact is the diplomatic act; the war that follows is `DECLARE_WAR`'s own
+/// betrayal-scale penalty, not repeated here.
+pub const NON_AGGRESSION_BREAK_OPINION_PENALTY: f32 = 20.0;
+
+/// Opinion lost, both directions, when `Action::BreakTreaty` ends an
+/// `Alliance` (immediate: stance falls back to `Ceasefire`, not war - an
+/// alliance ending is a diplomatic rupture, not a declaration of war).
+pub const ALLIANCE_BREAK_OPINION_PENALTY: f32 = 30.0;
+
+/// Opinion lost, both directions, when `Action::BreakTreaty` cancels a
+/// `MilitaryAccess`/`PortAccess`/`TradeAgreement` grant - the smallest
+/// break penalty, since these are working arrangements, not the core
+/// war/peace relationship.
+pub const MINOR_TREATY_BREAK_OPINION_PENALTY: f32 = 10.0;
+
+/// Days a (pair, `Treaty` kind) combination is locked out of
+/// `Action::ProposeTreaty` after that treaty was broken (`BreakTreaty`) or,
+/// for `Ceasefire` specifically, after `Action::DeclareWar` ends one - the
+/// abuse-resistance guard named in docs/phase3-spec.md §0: without a real,
+/// decrementing cooldown a reward optimiser could cycle
+/// propose-accept-break every tick to keep re-harvesting
+/// `TREATY_ACCEPT_OPINION_BONUS`, or declare war and instantly re-propose
+/// `Ceasefire` to dodge `NonAggression`'s notice period in spirit.
+pub const TREATY_COOLDOWN_DAYS: u32 = 20;
+
+/// How many days a `PendingProposal` survives, once created, before
+/// `diplomacy::tick_diplomacy` expires it unanswered
+/// (docs/phase3-spec.md: "提案は 1 tick 保留され、相手の応答を待つ"). Not a
+/// spendable resource of its own - re-proposing after expiry costs nothing
+/// beyond the normal cooldown/duplicate-proposal rules, so a genuinely
+/// interested counterpart is never permanently locked out by one missed day.
+///
+/// External code review fix (C1/C2 re-audit): kept above the bare "1 tick"
+/// the spec line names, because a literal 1-day hold combined with
+/// `archipelago-agents`' `HeuristicAgent` (each faction only decides once
+/// every `period` days, offset by faction id so they don't all act the same
+/// day) makes some ordered pairs structurally unable to ever answer a
+/// proposal in time - not a rare edge case: with `period == 4` and 3
+/// factions at offsets `0`/`1`/`2`, a proposal from the offset-`2` faction
+/// to the offset-`0` one needs 2 days before that target's next turn, but a
+/// 1-day TTL is already gone by then, so *every* proposal in that direction
+/// (and the reverse) silently expired unanswered, regardless of how
+/// favorable its terms were. `3` comfortably covers the worst gap any
+/// small, offset-staggered set of agents can produce against this same
+/// period without over-extending how long a stale offer lingers.
+pub const PROPOSAL_TTL_DAYS: u32 = 3;
+
+/// Fraction of a `TradeAgreement` exporter's own stock of a tradeable good
+/// (`Food`/`Energy`/`Machinery`) that is reserved for its own domestic use
+/// before any of it counts as exportable surplus
+/// (`trade::tick_trade_agreements`): `surplus = stock * (1 -
+/// TRADE_SURPLUS_RESERVE_FRACTION)`. A fraction of current stock rather than
+/// a flat number so the reserve scales sensibly across goods that start at
+/// very different stockpile levels (`scenario::FACTION_STOCK`).
+pub const TRADE_SURPLUS_RESERVE_FRACTION: f32 = 0.5;
+
+/// Ceiling on how much of one tradeable good one `TradeAgreement` partner
+/// can pull from another in a single day, at the importer's `shortage_by_good`
+/// fully saturated (`== 1.0`) - kept on the same order as `IMPORT_PER_PORT`
+/// (world-market imports' own per-port ceiling) so a trade partnership is a
+/// meaningful substitute for (or complement to) the world market, not a
+/// dominant or negligible one.
+pub const TRADE_FLOW_RATE_MAX: f32 = 6.0;
+
+/// External code review-style fix, applied up front (docs/phase3-spec.md §0:
+/// "複数の主体が奪い合う量は必ず比率で按分する"): `TradeAgreement` inflow and
+/// world-market import inflow for the same importing faction both draw on
+/// the *same* pooled port capacity (`trade::tick_imports` /
+/// `trade::tick_trade_agreements`'s shared `capacity[f]`, which
+/// `Treaty::PortAccess` can extend with a partner's own ports). Neither is
+/// computed first and the other given only the leftover - both wanted
+/// amounts are summed, and if they exceed capacity both are scaled down by
+/// the same ratio, `capacity / (world_wanted + trade_wanted)`. No named
+/// constant is needed for the split itself; `trade::tick_imports` and
+/// `trade::tick_trade_agreements` both implement this rule.
+
 /// External code review fix (Stage 2D): floor on `naval::strait_factor`
 /// (`1 - enemy_control_max`) when it is applied to a crossing's per-tick
 /// movement progress in `military::tick_movement`. `strait_factor` is

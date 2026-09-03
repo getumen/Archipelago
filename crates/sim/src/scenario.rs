@@ -4,6 +4,7 @@
 //! pair with a per-commodity `capacity` table, deliberately profiled so
 //! Kanto/Tokai are the nation's Machinery hub and losing them chokes Arms.
 
+use crate::diplomacy::Diplomacy;
 use crate::good::GOOD_COUNT;
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -262,6 +263,12 @@ pub fn build_world() -> World {
         }
     }
 
+    // Stage 3B (docs/phase3-spec.md "Stage 3B": "初期状態は全勢力が相互に War"):
+    // `Diplomacy::new` starts every pair at `Stance::War`, exactly
+    // reproducing the pre-Stage-3B assumption every earlier scenario/test
+    // already relies on.
+    let diplomacy = Diplomacy::new(FACTION_SPECS.len());
+
     World {
         regions,
         factions,
@@ -269,6 +276,7 @@ pub fn build_world() -> World {
         supply,
         sea_zones,
         day: 0,
+        diplomacy,
     }
 }
 
@@ -278,3 +286,7 @@ pub const REGION_COUNT: usize = REGION_SPECS.len();
 /// Number of sea zones in the fixed MVP map — used by
 /// `observation::ENCODING_LEN` (Stage 2D).
 pub const SEA_ZONE_COUNT: usize = SEA_ZONE_SPECS.len();
+
+/// Number of factions in the fixed MVP scenario — used by
+/// `observation::ENCODING_LEN` (Stage 3B's per-relation diplomacy fields).
+pub const FACTION_COUNT: usize = FACTION_SPECS.len();

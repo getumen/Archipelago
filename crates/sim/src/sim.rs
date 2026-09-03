@@ -3,6 +3,7 @@
 
 use crate::action::{self, Action, ActionError};
 use crate::construction;
+use crate::diplomacy;
 use crate::economy;
 use crate::event::Event;
 use crate::ids::FactionId;
@@ -53,6 +54,13 @@ impl Simulation {
     /// devastation recovery, then survival bookkeeping.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
+
+        // Stage 3B (docs/phase3-spec.md "Stage 3B"): diplomacy maintenance
+        // runs first, so a `NonAggression` notice period expiring today (or
+        // any other stance/treaty change queued by an action applied before
+        // this `step()` call) is fully resolved before combat, occupation
+        // and trade decide anything off `world.diplomacy` today.
+        diplomacy::tick_diplomacy(&mut self.world, &mut events);
 
         // Stage 2D: sea control is recomputed first, from fleet positions
         // as they stood at the end of the previous tick's movement — the

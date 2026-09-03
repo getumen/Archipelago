@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 
+use crate::diplomacy::Treaty;
 use crate::good::GOOD_COUNT;
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -24,11 +25,22 @@ pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 /// `group_support[GROUP_COUNT]` (Stage 3A), `unit_count`.
 pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT;
 
+/// Stage 3B per-relation field count in `Observation::encode()`, one block
+/// per *other* faction (own row zeroed - see `encode`'s doc): `[stance_code,
+/// opinion, military_access, port_access, trade_agreement,
+/// pending_incoming, pending_incoming_treaty, pending_outgoing,
+/// pending_outgoing_treaty]`. `stance_code` is `Stance::index()` as an
+/// `f32`; the `*_treaty` fields are `Treaty::index()` as an `f32`, or `-1.0`
+/// when there's no pending proposal in that direction.
+pub const DIPLOMACY_FIELD_COUNT: usize = 9;
+
 /// Fixed total length of `Observation::encode()`'s output for the MVP map
-/// (`scenario::REGION_COUNT` regions, `scenario::SEA_ZONE_COUNT` sea zones).
+/// (`scenario::REGION_COUNT` regions, `scenario::SEA_ZONE_COUNT` sea zones,
+/// `scenario::FACTION_COUNT` factions).
 pub const ENCODING_LEN: usize = crate::scenario::REGION_COUNT * REGION_FIELD_COUNT
     + crate::scenario::SEA_ZONE_COUNT * SEA_ZONE_FIELD_COUNT
-    + FACTION_FIELD_COUNT;
+    + FACTION_FIELD_COUNT
+    + crate::scenario::FACTION_COUNT * DIPLOMACY_FIELD_COUNT;
 
 pub struct Observation<'a> {
     pub faction: FactionId,
@@ -135,7 +147,9 @@ impl<'a> Observation<'a> {
     /// per-sea-zone (Stage 2D) `[own_control, enemy_control_max, own_power,
     /// enemy_power]`, then faction scalars `[manpower, stock[GOOD_COUNT]...,
     /// war_support, stability, group_support[GROUP_COUNT]..., unit_count]`
-    /// (Stage 3A adds `group_support`). `construction_progress` is
+    /// (Stage 3A adds `group_support`), then one Stage 3B
+    /// `DIPLOMACY_FIELD_COUNT`-sized relation block per faction (own row
+    /// zeroed - see the loop below). `construction_progress` is
     /// `invested / required` in `0..=1`, or `0.0` when no project is in
     /// progress. `import_flow`/`node_throughput` are Stage 2C's per-port
     /// import volume and per-node supply throughput cap
@@ -180,6 +194,34 @@ impl<'a> Observation<'a> {
             out.push(faction.group_support[g]);
         }
         out.push(self.own_units().len() as f32);
+
+        // Stage 3B (docs/phase3-spec.md "Stage 3B"): one `DIPLOMACY_FIELD_
+        // COUNT`-sized block per faction in ascending `FactionId` order
+        // (including self, zeroed, so every faction's encoding has the same
+        // fixed shape regardless of which faction it's viewing from - the
+        // same convention the region "owned" flag already uses).
+        let dip = &self.world.diplomacy;
+        for g_idx in 0..crate::scenario::FACTION_COUNT {
+            let other = FactionId(g_idx as u32);
+            if other == self.faction {
+                for _ in 0..DIPLOMACY_FIELD_COUNT {
+                    out.push(0.0);
+                }
+                continue;
+            }
+            out.push(dip.stance(self.faction, other).index() as f32);
+            out.push(dip.opinion(self.faction, other));
+            out.push(if dip.has_treaty(self.faction, other, Treaty::MilitaryAccess) { 1.0 } else { 0.0 });
+            out.push(if dip.has_treaty(self.faction, other, Treaty::PortAccess) { 1.0 } else { 0.0 });
+            out.push(if dip.has_treaty(self.faction, other, Treaty::TradeAgreement) { 1.0 } else { 0.0 });
+            let incoming = dip.pending.iter().find(|p| p.from == other && p.to == self.faction);
+            out.push(if incoming.is_some() { 1.0 } else { 0.0 });
+            out.push(incoming.map(|p| p.treaty.index() as f32).unwrap_or(-1.0));
+            let outgoing = dip.pending.iter().find(|p| p.from == self.faction && p.to == other);
+            out.push(if outgoing.is_some() { 1.0 } else { 0.0 });
+            out.push(outgoing.map(|p| p.treaty.index() as f32).unwrap_or(-1.0));
+        }
+
         debug_assert_eq!(out.len(), ENCODING_LEN);
         out
     }

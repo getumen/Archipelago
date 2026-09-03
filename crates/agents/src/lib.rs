@@ -10,11 +10,13 @@ use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
     ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
-    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT, MACHINERY_INPUT_STEEL,
-    MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
-    STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
+    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT, IMPORT_PER_PORT,
+    MACHINERY_INPUT_STEEL, MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD,
+    REGIME_CHANGE_THRESHOLD, STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT,
+    UNIT_MANPOWER,
 };
 use archipelago_sim::construction::Project;
+use archipelago_sim::diplomacy::Treaty;
 use archipelago_sim::good::Good;
 use archipelago_sim::group::Group;
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -153,11 +155,443 @@ const POLITICAL_ARMS_LEAN_WEIGHT: f32 = 0.75;
 /// units already under way.
 const POLITICAL_CAUTION_BOOST: f32 = 1.35;
 
+/// Stage 3B AI (docs/phase3-spec.md "AI" under "Stage 3B": "相対戦力・
+/// opinion・自国の不足・共通の敵の有無から決める"): the fraction of an
+/// enemy's total military power this faction's own must fall to before it's
+/// considered "surrounded by a stronger enemy" and offers/accepts
+/// `Ceasefire`/`NonAggression` - "自分より強い勢力に囲まれているなら停戦・
+/// 不可侵を受け入れやすい" - scaled by the agent's own `caution` (`outmatched
+/// = own_power < enemy_power * PEACE_SEEK_BASE_RATIO * caution`). At the
+/// least cautious agent's `caution` (~1.15) this stays a real "clearly
+/// weaker" bar (~0.86x parity); at the most cautious (~1.45) it eases to
+/// "not clearly stronger" (~1.09x parity) - "caution の高い AI ほど条約を選
+/// 好する". Deliberately kept below 1.0 even at the least cautious tier so
+/// two roughly-matched factions don't rush to blanket peace the moment they
+/// meet regardless of `caution` - the played-out history should still
+/// depend on how the actual balance of power develops.
+const PEACE_SEEK_BASE_RATIO: f32 = 0.75;
+/// `opinion` floor (of the proposer, from the responder's point of view)
+/// below which the responder rejects a `Ceasefire`/`NonAggression` proposal
+/// outright even while outmatched - an actively hostile relationship isn't
+/// trusted just because the numbers say peace would help.
+const PEACE_ACCEPT_MIN_OPINION: f32 = -50.0;
+/// `opinion` floor to accept an `Alliance` proposal - alliances commit this
+/// faction to someone else's wars, so they need a real track record of good
+/// relations first (typically built up by an already-accepted `Ceasefire`/
+/// `NonAggression`/`TradeAgreement`'s `TREATY_ACCEPT_OPINION_BONUS`).
+const ALLIANCE_ACCEPT_MIN_OPINION: f32 = 25.0;
+/// `opinion` floor to accept a `MilitaryAccess`/`PortAccess` grant - low
+/// commitment, so only clearly hostile relationships refuse it.
+const ACCESS_ACCEPT_MIN_OPINION: f32 = -10.0;
+/// `opinion` floor to accept (or propose) a `TradeAgreement` - the lowest
+/// bar of any treaty kind, since it's mutually beneficial and low-risk by
+/// construction (`trade::tick_imports`'s exporter-side surplus cap means it
+/// can never actually cost the exporter its own reserve).
+const TRADE_ACCEPT_MIN_OPINION: f32 = -30.0;
+/// `Faction::shortage_by_good` level (docs/phase3-spec.md: "食料が不足して
+/// いるなら TradeAgreement を強く求める") past which the agent actively seeks
+/// out a `TradeAgreement` partner rather than merely accepting one if offered.
+const TRADE_SEEK_SHORTAGE_THRESHOLD: f32 = 0.1;
+
+/// External code review fix C1 (docs/phase3-spec.md "AI" under "Stage 3B":
+/// treaty variety - `Alliance`/`MilitaryAccess`/`PortAccess` were
+/// implemented and unit-tested but the heuristic AI never had a reason to
+/// actually propose any of them, so none of the three ever ran in a real
+/// game): how many times a third faction's total military power must exceed
+/// *both* this faction's own and a prospective ally's own before it counts
+/// as "clearly the dominant threat" worth allying against - see
+/// `dominant_threat`.
+const ALLIANCE_THREAT_RATIO: f32 = 1.5;
+
+/// External code review fix C2 (docs/phase3-spec.md §23: every seed should
+/// produce a different history): the "am I outmatched" peace-seeking checks
+/// below (proactive `Ceasefire` proposals and `evaluate_proposal`'s
+/// Ceasefire/NonAggression acceptance) additionally require this faction to
+/// have suffered at least this much real `Faction::casualties` before they
+/// engage at all. Without this gate, "am I outmatched" is judged purely off
+/// each side's starting army size - identical for every seed, since nothing
+/// about the map or the initial deployment varies by seed - so the very
+/// first opportunity (as early as day 0) always reaches the same verdict
+/// and the same treaty gets signed on the same day in every run. Gating on
+/// actual war losses instead means the decision waits for combat - whose
+/// exact damage rolls are seeded RNG (`military::tick_combat`/
+/// `naval::tick_naval_combat`'s `rng.range(0.85, 1.15)`) - to have actually
+/// happened, so which pair first crosses this bar, and when, can differ
+/// seed to seed without the simulation itself gaining any new randomness.
+const MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING: f32 = 0.05;
+
+/// Stage 3B AI: total military power (land + fleets combined) a faction can
+/// currently bring to bear, used by `diplomacy_ai` to judge "surrounded by a
+/// stronger enemy".
+fn total_military_power(world: &World, faction: FactionId) -> f32 {
+    world
+        .units
+        .iter()
+        .filter(|u| u.alive && u.owner == faction)
+        .map(Unit::combat_power)
+        .fold(0.0, |acc, p| acc + p)
+}
+
+/// Whether `faction` should accept a proposed `treaty` from `from`
+/// (docs/phase3-spec.md "AI" under "Stage 3B"): relative power for the two
+/// stance-easing treaties, an opinion floor for every kind (higher for the
+/// bigger commitments), and the shared `Faction::shortage_by_good` signal
+/// for `TradeAgreement`. `peace_disposition` is this faction's own
+/// diplomatic knob (see `HeuristicAgent::peace_disposition`'s doc) -
+/// deliberately independent of the faction's *military* `caution`, the way
+/// C2's fix asks for a knob of its own rather than reusing one that already
+/// serves a different purpose.
+fn evaluate_proposal(
+    faction: FactionId,
+    peace_disposition: f32,
+    world: &World,
+    from: FactionId,
+    treaty: Treaty,
+) -> bool {
+    let opinion = world.diplomacy.opinion(faction, from);
+    match treaty {
+        Treaty::Ceasefire | Treaty::NonAggression => {
+            if opinion < PEACE_ACCEPT_MIN_OPINION {
+                return false;
+            }
+            // External code review fix C2: judged off starting army size
+            // alone (`total_military_power`, identical for every seed at
+            // day 0) this would reach the same verdict on the same day in
+            // every run - see `MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING`'s doc.
+            if world.faction(faction).casualties < MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING {
+                return false;
+            }
+            let own_power = total_military_power(world, faction);
+            let enemy_power = total_military_power(world, from);
+            own_power < enemy_power * PEACE_SEEK_BASE_RATIO * peace_disposition
+        }
+        Treaty::Alliance => opinion >= ALLIANCE_ACCEPT_MIN_OPINION,
+        Treaty::MilitaryAccess | Treaty::PortAccess => opinion >= ACCESS_ACCEPT_MIN_OPINION,
+        Treaty::TradeAgreement => opinion >= TRADE_ACCEPT_MIN_OPINION,
+    }
+}
+
+/// Stage 3B AI (docs/phase3-spec.md "AI" under "Stage 3B"): responds to
+/// every pending proposal addressed to this faction, then proactively
+/// proposes `Ceasefire` to whichever enemy most outmatches it,
+/// `TradeAgreement` to trade partners once a tradeable good runs short,
+/// `Alliance` against a common dominant threat, `MilitaryAccess` when the
+/// shortest route to a war target crosses neutral land, and `PortAccess`
+/// when this faction's own port capacity is what's actually capping its
+/// imports (External code review fix C1 - the last three were implemented
+/// and unit-tested but the AI never had a reason to reach for any of them).
+/// Every proposal here is gated by `Diplomacy::cooldown`/an already-
+/// outstanding proposal, so a rejected or expired offer isn't immediately
+/// re-spammed (see `balance::TREATY_COOLDOWN_DAYS` and `diplomacy.rs`'s
+/// module doc for why that matters against a machine agent).
+fn diplomacy_ai(faction: FactionId, peace_disposition: f32, obs: &Observation, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    let n = world.factions.len();
+
+    // Respond to every proposal currently addressed to us. Collected first
+    // so the borrow of `world.diplomacy.pending` ends before `actions` (a
+    // separate `Vec`) is written to.
+    let incoming: Vec<(FactionId, Treaty)> = world
+        .diplomacy
+        .pending
+        .iter()
+        .filter(|p| p.to == faction)
+        .map(|p| (p.from, p.treaty))
+        .collect();
+    for (from, treaty) in incoming {
+        if evaluate_proposal(faction, peace_disposition, world, from, treaty) {
+            actions.push(Action::AcceptTreaty { from, treaty });
+        } else {
+            actions.push(Action::RejectTreaty { from, treaty });
+        }
+    }
+
+    let own_power = total_military_power(world, faction);
+    let own_casualties = world.faction(faction).casualties;
+    // Worst of Food/Energy/Machinery shortage - the same three goods
+    // `Treaty::TradeAgreement` moves (`trade::TRADE_GOODS`).
+    let shortage = world.faction(faction).shortage_by_good;
+    let trade_seeking = [Good::Food, Good::Energy, Good::Machinery]
+        .iter()
+        .any(|g| shortage[g.index()] > TRADE_SEEK_SHORTAGE_THRESHOLD);
+    // External code review fix C1: who (if anyone) is a common dominant
+    // threat worth allying against - see `dominant_threat`'s doc.
+    let threat = dominant_threat(world, faction);
+
+    // Proactive proposals, in ascending faction-id order for determinism -
+    // at most one outstanding outgoing proposal per target already enforced
+    // by `action::apply_propose_treaty` (a duplicate attempt is simply
+    // rejected, not queued again), so no per-tick budget bookkeeping is
+    // needed here beyond not re-proposing every single day regardless.
+    for other_idx in 0..n {
+        let other = FactionId(other_idx as u32);
+        if other == faction || !world.factions[other_idx].alive {
+            continue;
+        }
+        if world.diplomacy.find_pending(faction, other).is_some() {
+            continue;
+        }
+
+        if world.diplomacy.is_at_war(faction, other) {
+            // External code review fix C2: judged off starting army size
+            // alone this reaches the same verdict on the same day in every
+            // seed - see `MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING`'s doc.
+            let enemy_power = total_military_power(world, other);
+            let outmatched = own_casualties >= MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING
+                && own_power < enemy_power * PEACE_SEEK_BASE_RATIO * peace_disposition;
+            let opinion_ok = world.diplomacy.opinion(faction, other) >= PEACE_ACCEPT_MIN_OPINION;
+            if outmatched
+                && opinion_ok
+                && world.diplomacy.cooldown(faction, other, Treaty::Ceasefire) == 0
+            {
+                actions.push(Action::ProposeTreaty { to: other, treaty: Treaty::Ceasefire });
+                continue;
+            }
+        } else if let Some((threat_faction, _)) = threat {
+            // External code review fix C1 (docs/phase3-spec.md: "相対戦力・
+            // opinion・自国の不足・共通の敵の有無から決める" - "共通の敵の有無"
+            // specifically): `other` is already at peace with us and isn't
+            // the threat itself, so it's a candidate to ally against that
+            // threat with.
+            if other != threat_faction
+                && !world.diplomacy.has_treaty(faction, other, Treaty::Alliance)
+                && world.diplomacy.opinion(faction, other) >= ALLIANCE_ACCEPT_MIN_OPINION
+                && world.diplomacy.cooldown(faction, other, Treaty::Alliance) == 0
+            {
+                actions.push(Action::ProposeTreaty { to: other, treaty: Treaty::Alliance });
+                continue;
+            }
+        }
+
+        if trade_seeking
+            && !world.diplomacy.has_treaty(faction, other, Treaty::TradeAgreement)
+            && world.diplomacy.opinion(faction, other) >= TRADE_ACCEPT_MIN_OPINION
+            && world.diplomacy.cooldown(faction, other, Treaty::TradeAgreement) == 0
+        {
+            actions.push(Action::ProposeTreaty { to: other, treaty: Treaty::TradeAgreement });
+        }
+    }
+
+    military_access_seek(faction, world, actions);
+    port_access_seek(faction, world, actions);
+}
+
+/// External code review fix C1: the strongest other faction that clearly
+/// outclasses *both* `faction`'s own military power and its own -
+/// "clearly the dominant threat" the way docs/phase3-spec.md's "共通の敵"
+/// (common enemy) AI note calls for. `None` when nobody meets
+/// `ALLIANCE_THREAT_RATIO` against `faction` itself, so a faction that
+/// isn't actually threatened never goes looking for an ally.
+fn dominant_threat(world: &World, faction: FactionId) -> Option<(FactionId, f32)> {
+    let own_power = total_military_power(world, faction);
+    let n = world.factions.len();
+    let mut best: Option<(FactionId, f32)> = None;
+    for idx in 0..n {
+        let other = FactionId(idx as u32);
+        if other == faction || !world.factions[idx].alive {
+            continue;
+        }
+        let power = total_military_power(world, other);
+        if power <= own_power * ALLIANCE_THREAT_RATIO {
+            continue;
+        }
+        match best {
+            Some((_, best_power)) if power <= best_power => {}
+            _ => best = Some((other, power)),
+        }
+    }
+    best
+}
+
+/// This faction's own usable import capacity, mirroring `trade::tick_imports`'s
+/// `own_capacity` computation exactly (own, uncontested, unblockaded ports
+/// only) - the figure `Treaty::PortAccess` extends when granted, so it's
+/// also the figure that decides whether this faction's *own* capacity is
+/// the binding constraint worth seeking a grant to relieve.
+fn own_port_capacity(faction: FactionId, world: &World) -> f32 {
+    world
+        .regions
+        .iter()
+        .filter(|r| {
+            r.owner == faction
+                && r.port > 0.0
+                && !world.has_enemy_units(r.id, faction)
+                && !naval::is_port_blockaded(world, r.id)
+        })
+        .map(|r| r.port * IMPORT_PER_PORT * (1.0 - r.devastation))
+        .sum()
+}
+
+/// External code review fix C1 (docs/phase3-spec.md: "自国の不足" - port
+/// capacity specifically, per `Treaty::PortAccess`'s own doc): seeks a
+/// `PortAccess` grant when this faction is actually short on a good
+/// `Action::SetImportPlan` would want to import (mirroring
+/// `set_trade_policy`'s own shortage signal) *and* its own port capacity
+/// can't cover the import volume that shortage implies - i.e. its ports,
+/// not its Machinery budget or the world market itself, are the binding
+/// constraint. Targets whichever other faction has the most spare capacity
+/// of its own to lend, among those with a decent-enough relationship.
+fn port_access_seek(faction: FactionId, world: &World, actions: &mut Vec<Action>) {
+    let f = world.faction(faction);
+    let shortage_seeking = f.shortage_by_good[Good::Food.index()] > TRADE_SEEK_SHORTAGE_THRESHOLD
+        || f.shortage_by_good[Good::Energy.index()] > TRADE_SEEK_SHORTAGE_THRESHOLD;
+    if !shortage_seeking {
+        return;
+    }
+
+    let total_pop: f32 = world.regions.iter().filter(|r| r.owner == faction).map(|r| r.population).sum();
+    let desired_import = (total_pop * CIVILIAN_FOOD_DEMAND_PER_POP
+        + total_pop * CIVILIAN_ENERGY_DEMAND_PER_POP)
+        * IMPORT_REQUEST_SHORTAGE_SCALE;
+    if own_port_capacity(faction, world) >= desired_import {
+        return; // capacity isn't what's binding - nothing a grant would fix.
+    }
+
+    let n = world.factions.len();
+    let mut best: Option<(FactionId, f32)> = None;
+    for idx in 0..n {
+        let grantor = FactionId(idx as u32);
+        if grantor == faction || !world.factions[idx].alive {
+            continue;
+        }
+        if world.diplomacy.has_treaty(grantor, faction, Treaty::PortAccess) {
+            continue;
+        }
+        if world.diplomacy.find_pending(faction, grantor).is_some() {
+            continue;
+        }
+        if world.diplomacy.cooldown(faction, grantor, Treaty::PortAccess) > 0 {
+            continue;
+        }
+        if world.diplomacy.opinion(faction, grantor) < ACCESS_ACCEPT_MIN_OPINION {
+            continue;
+        }
+        let capacity = own_port_capacity(grantor, world);
+        if capacity <= 0.0 {
+            continue;
+        }
+        match best {
+            Some((_, best_cap)) if capacity <= best_cap => {}
+            _ => best = Some((grantor, capacity)),
+        }
+    }
+    if let Some((grantor, _)) = best {
+        actions.push(Action::ProposeTreaty { to: grantor, treaty: Treaty::PortAccess });
+    }
+}
+
+/// External code review fix C1 (docs/phase3-spec.md: "MilitaryAccess" -
+/// "相手領を通過できる"): for every faction this one is at war with, checks
+/// whether the shortest land route from this faction's capital to that
+/// enemy's capital crosses a third faction's territory - if so, and that
+/// third faction isn't itself hostile, seeks transit rights from it rather
+/// than never being able to reach a war target with no direct shared
+/// border at all.
+fn military_access_seek(faction: FactionId, world: &World, actions: &mut Vec<Action>) {
+    let n = world.factions.len();
+    let capital = world.faction(faction).capital;
+    for idx in 0..n {
+        let enemy = FactionId(idx as u32);
+        if enemy == faction || !world.factions[idx].alive {
+            continue;
+        }
+        if !world.diplomacy.is_at_war(faction, enemy) {
+            continue;
+        }
+        let enemy_capital = world.faction(enemy).capital;
+        let Some(path) = land_path(world, capital, enemy_capital) else { continue };
+        // The first leg and last leg of the route are our own departure and
+        // the enemy's own soil - only a region strictly in between, owned
+        // by neither side, means the route actually crosses foreign land.
+        let blocker = path
+            .iter()
+            .skip(1)
+            .take(path.len().saturating_sub(2))
+            .map(|&r| world.region(r).owner)
+            .find(|&owner| owner != faction && owner != enemy);
+        let Some(blocker) = blocker else { continue };
+        if world.diplomacy.is_at_war(faction, blocker) {
+            continue; // can't ask a hostile party for transit rights.
+        }
+        if world.diplomacy.has_treaty(faction, blocker, Treaty::MilitaryAccess) {
+            continue;
+        }
+        if world.diplomacy.find_pending(faction, blocker).is_some() {
+            continue;
+        }
+        if world.diplomacy.cooldown(faction, blocker, Treaty::MilitaryAccess) > 0 {
+            continue;
+        }
+        if world.diplomacy.opinion(faction, blocker) >= ACCESS_ACCEPT_MIN_OPINION {
+            actions.push(Action::ProposeTreaty { to: blocker, treaty: Treaty::MilitaryAccess });
+        }
+    }
+}
+
+/// Breadth-first shortest path (region ids, both ends included) from `from`
+/// to `to` over the *full* region graph, unrestricted by ownership - the
+/// land-domain counterpart of `zone_path_next`'s sea BFS, but returning the
+/// whole route (not just the next hop) since `military_access_seek` needs
+/// to inspect every region along the way, not just step toward it.
+fn land_path(world: &World, from: RegionId, to: RegionId) -> Option<Vec<RegionId>> {
+    if from == to {
+        return Some(vec![from]);
+    }
+    let n = world.regions.len();
+    let mut visited = vec![false; n];
+    let mut prev: Vec<Option<RegionId>> = vec![None; n];
+    let mut queue = VecDeque::new();
+    visited[from.index()] = true;
+    queue.push_back(from);
+
+    while let Some(current) = queue.pop_front() {
+        if current == to {
+            break;
+        }
+        let mut neighbors: Vec<RegionId> = world.neighbors(current).collect();
+        neighbors.sort_by_key(|r| r.0);
+        for next in neighbors {
+            if !visited[next.index()] {
+                visited[next.index()] = true;
+                prev[next.index()] = Some(current);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    if !visited[to.index()] {
+        return None;
+    }
+    let mut path = vec![to];
+    let mut step = to;
+    while let Some(p) = prev[step.index()] {
+        path.push(p);
+        step = p;
+    }
+    path.reverse();
+    Some(path)
+}
+
 /// Decides for one faction every `period` days (offset by faction id so the
 /// three AIs don't all act on the same day), per mvp-spec.md §7.
 pub struct HeuristicAgent {
     faction: FactionId,
     caution: f32,
+    /// External code review fix C2 (docs/phase3-spec.md §23: every seed
+    /// should produce a different history): each faction's own diplomatic
+    /// disposition, the way `caution` already differentiates each faction's
+    /// *military* aggressiveness - a deliberately separate knob, not a
+    /// reuse of `caution`, since a faction can be militarily bold but
+    /// diplomatically quick to make peace, or the reverse. Multiplies
+    /// `PEACE_SEEK_BASE_RATIO` in the outmatched checks `diplomacy_ai`/
+    /// `evaluate_proposal` run: below `1.0` this faction sues for peace/
+    /// alliance sooner (it counts as "outmatched" at a smaller power
+    /// deficit) than one above `1.0`. Set once at construction, never
+    /// randomized - the seed-to-seed variety this is meant to help produce
+    /// comes from combining it with the seeded RNG's actual combat outcomes
+    /// (see `MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING`), not from this knob
+    /// itself varying.
+    peace_disposition: f32,
     period: u32,
     offset: u32,
 }
@@ -169,11 +603,22 @@ impl HeuristicAgent {
     /// the agent more cautious (it waits for a bigger edge); ~1.0 means it
     /// will attack at parity. Values around 1.1-1.5 work well (the MVP
     /// scenario uses 1.15 / 1.30 / 1.45 for its three factions).
+    ///
+    /// `peace_disposition` defaults to `1.0` (no bias, matching this
+    /// function's pre-C2 behaviour) - use `with_peace_disposition` to give
+    /// factions differing diplomatic dispositions.
     pub fn new(faction: FactionId, caution: f32) -> Self {
+        Self::with_peace_disposition(faction, caution, 1.0)
+    }
+
+    /// As `new`, but with an explicit `peace_disposition` (see the field's
+    /// doc) instead of the neutral default.
+    pub fn with_peace_disposition(faction: FactionId, caution: f32, peace_disposition: f32) -> Self {
         const PERIOD: u32 = 4;
         HeuristicAgent {
             faction,
             caution,
+            peace_disposition,
             period: PERIOD,
             offset: faction.0 % PERIOD,
         }
@@ -194,6 +639,7 @@ impl Agent for HeuristicAgent {
         set_policy(self.faction, obs, &mut actions);
         set_trade_policy(self.faction, obs, &mut actions);
         set_logistics_priority(obs, &mut actions);
+        diplomacy_ai(self.faction, self.peace_disposition, obs, &mut actions);
         reinforce(self.faction, obs, &mut actions);
         recruit(self.faction, obs, &mut actions);
         naval_recruit(self.faction, obs, &mut actions);

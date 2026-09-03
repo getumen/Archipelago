@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::diplomacy::Treaty;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::world::Station;
 
@@ -71,6 +72,50 @@ pub enum Event {
         region: RegionId,
         from: FactionId,
         to: FactionId,
+    },
+    /// Stage 3B (docs/phase3-spec.md "Stage 3B — 外交関係と条約"):
+    /// `Action::ProposeTreaty` queued a one-tick pending proposal.
+    TreatyProposed {
+        from: FactionId,
+        to: FactionId,
+        treaty: Treaty,
+    },
+    /// `Action::AcceptTreaty` resolved a pending proposal into an active
+    /// treaty (a `Stance` change for `Ceasefire`/`NonAggression`/`Alliance`,
+    /// a mutual grant for `MilitaryAccess`/`PortAccess`/`TradeAgreement`).
+    TreatySigned {
+        a: FactionId,
+        b: FactionId,
+        treaty: Treaty,
+    },
+    /// `Action::RejectTreaty` turned down a pending proposal.
+    TreatyRejected {
+        from: FactionId,
+        to: FactionId,
+        treaty: Treaty,
+    },
+    /// `Action::BreakTreaty` ended an active treaty - immediately for
+    /// `Alliance`/`MilitaryAccess`/`PortAccess`/`TradeAgreement`, or (for
+    /// `NonAggression`) the moment its notice period was served, not when
+    /// the resulting war actually starts (see `Event::WarDeclared`).
+    TreatyBroken {
+        a: FactionId,
+        b: FactionId,
+        treaty: Treaty,
+    },
+    /// `a` and `b` are now at `Stance::War` - either `Action::DeclareWar`
+    /// breaking a `Ceasefire` outright, or a `NonAggression` break's notice
+    /// period running out.
+    WarDeclared {
+        a: FactionId,
+        b: FactionId,
+    },
+    /// `faction`'s `Stance::Alliance` with one side of a fresh war pulled it
+    /// into `into_war_with` too (docs/phase3-spec.md: "同盟国が攻撃されたら
+    /// 自動参戦する").
+    AllianceDragIn {
+        faction: FactionId,
+        into_war_with: FactionId,
     },
 }
 
@@ -148,6 +193,42 @@ impl fmt::Display for Event {
                 f,
                 "region {} reverts from faction {} to faction {} via separatism",
                 region.0, from.0, to.0
+            ),
+            Event::TreatyProposed { from, to, treaty } => write!(
+                f,
+                "faction {} proposes {} to faction {}",
+                from.0,
+                treaty.key(),
+                to.0
+            ),
+            Event::TreatySigned { a, b, treaty } => write!(
+                f,
+                "faction {} and faction {} sign {}",
+                a.0,
+                b.0,
+                treaty.key()
+            ),
+            Event::TreatyRejected { from, to, treaty } => write!(
+                f,
+                "faction {} rejects faction {}'s {} proposal",
+                to.0,
+                from.0,
+                treaty.key()
+            ),
+            Event::TreatyBroken { a, b, treaty } => write!(
+                f,
+                "faction {} breaks {} with faction {}",
+                a.0,
+                treaty.key(),
+                b.0
+            ),
+            Event::WarDeclared { a, b } => {
+                write!(f, "faction {} declares war on faction {}", a.0, b.0)
+            }
+            Event::AllianceDragIn { faction, into_war_with } => write!(
+                f,
+                "faction {} is dragged into war with faction {} by an alliance",
+                faction.0, into_war_with.0
             ),
         }
     }

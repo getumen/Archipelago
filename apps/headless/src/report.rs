@@ -3,11 +3,24 @@
 //! names come straight from the scenario data and are Japanese; the
 //! surrounding labels are Japanese too so the two read as one table.
 
+use archipelago_sim::diplomacy::Treaty;
 use archipelago_sim::event::Event;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::{Domain, Station, World};
+
+/// Japanese label for a `Treaty`, used by `print_event`'s Stage 3B lines.
+fn treaty_label(treaty: Treaty) -> &'static str {
+    match treaty {
+        Treaty::Ceasefire => "停戦",
+        Treaty::NonAggression => "不可侵条約",
+        Treaty::Alliance => "同盟",
+        Treaty::MilitaryAccess => "通行権",
+        Treaty::PortAccess => "港湾利用権",
+        Treaty::TradeAgreement => "通商協定",
+    }
+}
 
 /// Terminal columns count double-width for non-ASCII (CJK) characters, so a
 /// plain `.len()`-based pad leaves Japanese names looking ragged; this
@@ -100,6 +113,40 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
             world.faction(*from).name,
             world.faction(*to).name
         ),
+        Event::TreatyProposed { from, to, treaty } => format!(
+            "外交提案: {} が {} に {} を提案",
+            world.faction(*from).name,
+            world.faction(*to).name,
+            treaty_label(*treaty),
+        ),
+        Event::TreatySigned { a, b, treaty } => format!(
+            "条約締結: {} と {} が {} を締結",
+            world.faction(*a).name,
+            world.faction(*b).name,
+            treaty_label(*treaty),
+        ),
+        Event::TreatyRejected { from, to, treaty } => format!(
+            "外交拒否: {} が {} の {} 提案を拒否",
+            world.faction(*to).name,
+            world.faction(*from).name,
+            treaty_label(*treaty),
+        ),
+        Event::TreatyBroken { a, b, treaty } => format!(
+            "条約破棄: {} が {} との {} を破棄",
+            world.faction(*a).name,
+            world.faction(*b).name,
+            treaty_label(*treaty),
+        ),
+        Event::WarDeclared { a, b } => format!(
+            "宣戦布告: {} が {} に宣戦",
+            world.faction(*a).name,
+            world.faction(*b).name,
+        ),
+        Event::AllianceDragIn { faction, into_war_with } => format!(
+            "同盟参戦: {} が同盟により {} との戦争に参戦",
+            world.faction(*faction).name,
+            world.faction(*into_war_with).name,
+        ),
     };
     println!("[day {day:4}] {line}");
 }
@@ -170,6 +217,34 @@ pub fn print_faction_table(world: &World) {
             plan_line.join(" "),
             landed,
         );
+
+        // Stage 3B (docs/phase3-spec.md "Stage 3B"): stance and opinion
+        // toward every other faction.
+        let dip_line: Vec<String> = world
+            .factions
+            .iter()
+            .filter(|other| other.id != faction.id)
+            .map(|other| {
+                format!(
+                    "{}:{}(opinion {:.0})",
+                    other.name,
+                    stance_label(world.diplomacy.stance(faction.id, other.id)),
+                    world.diplomacy.opinion(faction.id, other.id),
+                )
+            })
+            .collect();
+        println!("  {}  外交: {}", pad_right("", 8), dip_line.join(" "));
+    }
+}
+
+/// Japanese label for a `Stance`, used by `print_faction_table`'s Stage 3B line.
+fn stance_label(stance: archipelago_sim::diplomacy::Stance) -> &'static str {
+    use archipelago_sim::diplomacy::Stance;
+    match stance {
+        Stance::War => "交戦",
+        Stance::Ceasefire => "停戦",
+        Stance::NonAggression => "不可侵",
+        Stance::Alliance => "同盟",
     }
 }
 

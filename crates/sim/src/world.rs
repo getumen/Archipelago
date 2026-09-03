@@ -3,6 +3,7 @@
 
 use crate::balance::{INFRA_DAMAGE_SHARE, NODE_BASE, NODE_INFRA, NODE_PORT, WORKFORCE_SHARE};
 use crate::construction::Construction;
+use crate::diplomacy::Diplomacy;
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -407,6 +408,10 @@ pub struct World {
     /// from the region graph.
     pub sea_zones: Vec<SeaZone>,
     pub day: u32,
+    /// Stage 3B (docs/phase3-spec.md "Stage 3B — 外交関係と条約"): every
+    /// pair's `Stance`/`opinion`/treaty grants and the pending-proposal
+    /// queue.
+    pub diplomacy: Diplomacy,
 }
 
 impl World {
@@ -448,8 +453,18 @@ impl World {
             .filter(move |unit| unit.alive && unit.station == Station::Region(region))
     }
 
+    /// Stage 3B (docs/phase3-spec.md "Stage 3B"): "enemy" now means
+    /// currently at `Stance::War` with `faction`, not merely "a different
+    /// owner" - a unit of a faction `faction` holds `Ceasefire`/
+    /// `NonAggression`/`Alliance` with no longer pins movement, blocks
+    /// recruiting/building, or contests a region for this check. The
+    /// pre-Stage-3B behaviour (every other faction always counts as enemy)
+    /// is exactly what `Diplomacy::new` reproduces by default - every pair
+    /// starts at `Stance::War`, so every existing scenario/test is
+    /// unaffected until a treaty actually changes a pair's stance.
     pub fn has_enemy_units(&self, region: RegionId, faction: FactionId) -> bool {
-        self.units_in(region).any(|unit| unit.owner != faction)
+        self.units_in(region)
+            .any(|unit| unit.owner != faction && self.diplomacy.is_at_war(faction, unit.owner))
     }
 
     /// Sum of `combat_power` for a faction's alive units present in `region`.
@@ -468,8 +483,37 @@ impl World {
             .filter(move |unit| unit.alive && unit.station == Station::Sea(zone))
     }
 
+    /// Stage 3B (docs/phase3-spec.md "Stage 3B"), External code review fix
+    /// A1: mirrors `has_enemy_units`'s stance-aware redefinition of "enemy" -
+    /// a fleet of a faction `faction` holds `Ceasefire`/`NonAggression`/
+    /// `Alliance` with no longer pins fleet movement or triggers combat
+    /// supply's `COMBAT_SUPPLY_MULT` for this check. Before this fix, every
+    /// other faction's fleet counted as "enemy" here regardless of `Stance`,
+    /// so peace never actually reached naval pinning/combat-supply the way
+    /// it already did for land via `has_enemy_units`.
     pub fn has_enemy_fleets(&self, zone: SeaZoneId, faction: FactionId) -> bool {
-        self.fleets_in(zone).any(|unit| unit.owner != faction)
+        self.fleets_in(zone)
+            .any(|unit| unit.owner != faction && self.diplomacy.is_at_war(faction, unit.owner))
+    }
+
+    /// The highest `SeaZone::control` held by a faction currently at
+    /// `Stance::War` with `faction` — the stance-aware form of
+    /// `SeaZone::enemy_control_max` used by blockade judgement (External
+    /// code review fix A1: "a faction at peace should not be blockading its
+    /// treaty partner's ports"). A `Ceasefire`/`NonAggression`/`Alliance`
+    /// partner's fleet presence, however dominant, never counts toward
+    /// blockading a port belonging to `faction` — only a partner actually at
+    /// war with it can. `SeaZone::enemy_control_max` itself stays as the raw
+    /// "every other faction" figure (strait-crossing throttle and the
+    /// hostile-destination check in `action::apply_move` keep using it,
+    /// since those are about contested control of the sea itself rather than
+    /// a punitive effect targeted at `faction` specifically).
+    pub fn hostile_control_max(&self, zone: SeaZoneId, faction: FactionId) -> f32 {
+        let zone = self.sea_zone(zone);
+        (0..self.factions.len())
+            .filter(|&f| f != faction.index() && self.diplomacy.is_at_war(faction, FactionId(f as u32)))
+            .map(|f| zone.control[f])
+            .fold(0.0f32, f32::max)
     }
 
     /// Sum of `combat_power` for a faction's alive fleets present in `zone`.

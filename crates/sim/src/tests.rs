@@ -2,12 +2,14 @@
 
 use crate::action::{self, Action, ActionError};
 use crate::balance::{
-    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MIN, CONSTRUCTION_MACHINERY_PER_POINT,
-    CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT,
-    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS,
-    STRIKE_OUTPUT_MULT, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
+    CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MIN,
+    CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
+    CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
+    OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, UNIT_DEATH_MANPOWER,
+    UNIT_EQUIPMENT,
 };
 use crate::construction::{self, Construction, Project};
+use crate::diplomacy::{self, Treaty};
 use crate::economy;
 use crate::event::Event;
 use crate::good::{Good, GOOD_COUNT};
@@ -16,6 +18,7 @@ use crate::ids::{FactionId, RegionId, SeaZoneId};
 use crate::logistics;
 use crate::military;
 use crate::naval;
+use crate::observation::{Observation, ENCODING_LEN};
 use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
@@ -2429,6 +2432,177 @@ fn garrison_slows_but_does_not_stop_separatism() {
     );
 }
 
+/// External code review fix (Stage 3A, Fix 3): regression guard for a
+/// playtested absorbing state - a faction that has taken on more territory
+/// (and the population that comes with it) than it can feed has, pre-Fix-2/
+/// 3, no way out: regime change only resets policy (it doesn't create
+/// food), and a garrisoned occupier used to veto separatism outright. With
+/// Fix 2/3 (a garrison slows separatism instead of stopping it,
+/// docs/phase3-spec.md §0's escape-hatch rule), occupied territory an
+/// over-extended faction can't hold drifts back to its still-alive `core`
+/// even while garrisoned, which is the population's actual way out - and
+/// that way out must show up as `Faction::shortage_by_good` actually
+/// recovering, not merely as the territory changing hands (a weaker guard
+/// that dropped units from every handed-over region entirely would never
+/// exercise `garrison_slows_but_does_not_stop_separatism`'s fix at all: it's
+/// only meaningful if a garrison is still standing there when the territory
+/// finally sheds).
+///
+/// Constructed directly - handing 西方同盟 (`FactionId(2)`) all three of
+/// 中央同盟's (`FactionId(1)`) regions, stationing a 西方同盟 garrison in one
+/// of them, and forcing LocalGovernment support below `SEPARATISM_THRESHOLD`,
+/// the same pattern `separatism_returns_occupied_region`/
+/// `garrison_slows_but_does_not_stop_separatism` above already use - rather
+/// than through a full, AI-driven 720-day run: Stage 3B's diplomacy AI
+/// (`archipelago-agents`) makes a full run's emergent history too sensitive
+/// to reliably reproduce this specific crisis on demand (western 西方同盟's
+/// only land neighbor is 中央同盟, so a perfectly reasonable `Ceasefire`
+/// between them - which docs/phase3-spec.md explicitly wants seeds to
+/// produce - removes the only front it could ever over-extend across in the
+/// first place).
+#[test]
+fn overextended_faction_sheds_unaffordable_territory_via_separatism() {
+    let mut world = scenario::build_world();
+    let watched = FactionId(2);
+    let core = FactionId(1);
+    let handed_over = [RegionId(4), RegionId(5), RegionId(6)];
+    // 信越・北陸: the least populous of the three, so a garrison here
+    // suppresses `separatist_rate` the hardest (`SEPARATISM_GARRISON_MAX_
+    // SUPPRESSION`'s cap) - the slowest-shedding case this guard can put in
+    // front of a garrison, still not a veto.
+    let garrisoned_region = RegionId(4);
+
+    for &r in &handed_over {
+        world.region_mut(r).owner = watched;
+        // A real conquest would leave exactly this behind
+        // (`military::tick_occupation`'s `DEVASTATION_ON_CAPTURE`/
+        // `CAPTURE_UNREST` on the region that just changed hands) - this
+        // test's direct, costless `owner` reassignment skips the fighting
+        // that would normally produce it, so it's set explicitly instead.
+        // Without it these particular regions are self-sufficient enough on
+        // their own `capacity`/`population` that 西方同盟 would show no Food
+        // shortage at all even holding all six - see `shortage_before`'s
+        // sanity check below.
+        world.region_mut(r).devastation = DEVASTATION_ON_CAPTURE;
+        world.region_mut(r).unrest = CAPTURE_UNREST;
+    }
+    // Strips the starting `scenario::FACTION_STOCK` Food reserve, which
+    // would otherwise cushion a single day's shortfall and mask exactly the
+    // property under test (today's production against today's need) behind
+    // a buffer that has nothing to do with whether the territory itself is
+    // affordable.
+    world.faction_mut(watched).stock[Good::Food.index()] = 0.0;
+    // `core`'s original units, still sitting in what are now `watched`-owned
+    // regions, would otherwise be a foreign, at-war presence there and hand
+    // each region's meter to `military::tick_occupation` instead of
+    // `politics::tick_separatism` (see `tick_separatism`'s `foreign_present`
+    // check). Killed rather than relocated: `handed_over` is *all three* of
+    // `core`'s starting regions (`scenario::FACTION_SPECS`'s
+    // `中央同盟: regions: &[4, 5, 6]`) - including its own capital
+    // (region 6) - so every one of `core`'s units is already inside
+    // `handed_over` and there is no safe own region left to move any of
+    // them to (unlike `separatism_returns_occupied_region`'s single-region
+    // handover, where the owner's capital survives untouched). `core`
+    // itself stays untouched otherwise (still `alive` - `Faction::alive` is
+    // only ever set by `Simulation::step`'s elimination check, which this
+    // test never calls).
+    for unit in world.units.iter_mut() {
+        if unit.owner == core {
+            unit.alive = false;
+        }
+    }
+
+    // A 西方同盟 garrison, left standing in `garrisoned_region` for the
+    // entire run - this is the fix under test: the garrison must slow that
+    // region's separatism (`garrison_slows_but_does_not_stop_separatism`)
+    // but never prevent it from eventually shedding along with the other
+    // two, ungarrisoned regions.
+    let garrison_id = crate::ids::UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: garrison_id,
+        owner: watched,
+        name: "Test Garrison".to_string(),
+        station: Station::Region(garrisoned_region),
+        movement: None,
+        manpower: 1.0,
+        equipment: UNIT_EQUIPMENT,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(garrisoned_region),
+        experience: 0.0,
+        alive: true,
+    });
+
+    world.faction_mut(watched).group_support[Group::LocalGovernment.index()] =
+        SEPARATISM_THRESHOLD - 5.0;
+
+    // Baseline: while still over-extended (six regions, three of them
+    // freshly conquered and devastated/unrested, its Food reserve already
+    // spent), a single `economy::tick_economy` pass should show a real,
+    // measurable Food shortage - the starving state this guard needs
+    // shedding to recover from.
+    economy::tick_economy(&mut world);
+    let shortage_before = world.faction(watched).shortage_by_good[Good::Food.index()];
+    assert!(
+        shortage_before > 0.01,
+        "sanity: an over-extended faction holding territory it can't feed should show a \
+         measurable Food shortage before it sheds anything: shortage_by_good[Food]={shortage_before}"
+    );
+
+    let mut events = Vec::new();
+    let mut shed_territory = false;
+    for _ in 0..600 {
+        politics::tick_separatism(&mut world, &mut events);
+        if handed_over.iter().all(|&r| world.region(r).owner == core) {
+            shed_territory = true;
+            break;
+        }
+    }
+
+    assert!(
+        shed_territory,
+        "expected every handed-over region to eventually drift back to its still-alive core \
+         faction via separatism, even the one 西方同盟 garrisons"
+    );
+    assert_eq!(
+        world.region_count(watched),
+        3,
+        "shedding the unaffordable territory should return the faction to exactly its \
+         original three regions"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::Separatism { region, from, to } if *region == garrisoned_region && *from == watched && *to == core)
+        ),
+        "expected the garrisoned region specifically to still revert via Event::Separatism, \
+         proving the garrison slowed it rather than vetoing it"
+    );
+
+    // Recovery, not just the territory loss: back at its sustainable
+    // footprint (its original three regions and starting stock), a single
+    // `economy::tick_economy` pass should serve civilian Food demand in
+    // full - the same baseline `starting_factions_are_not_in_shortage`
+    // already establishes for every faction at day 0, now reached again
+    // after shedding what it couldn't afford to hold. The comparison
+    // against `shortage_before` is the property that actually matters here:
+    // not just "some small number", but a real recovery from real distress.
+    economy::tick_economy(&mut world);
+    let shortage_after = world.faction(watched).shortage_by_good[Good::Food.index()];
+    assert!(
+        shortage_after < shortage_before * 0.1,
+        "expected shortage to recover substantially once the unaffordable territory (and the \
+         population it carried) was shed: before={shortage_before}, after={shortage_after}"
+    );
+    assert!(
+        shortage_after < 0.01,
+        "expected shortage to recover once the unaffordable territory (and the population it \
+         carried) was shed: shortage_by_good[Food]={shortage_after}"
+    );
+}
+
 /// docs/phase3-spec.md "安定度の再定義": `stability` must always equal the
 /// influence-weighted average of `group_support`, not an independently
 /// tracked variable.
@@ -2453,3 +2627,549 @@ fn stability_is_weighted_group_support() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3B — 外交関係と条約 (docs/phase3-spec.md "Stage 3B"). `Simulation`
+// isn't needed for most of these - `action::apply_action`/`diplomacy::
+// tick_diplomacy`/`military::tick_combat`/`military::tick_occupation`/
+// `trade::tick_imports` are called directly, the same style every earlier
+// Stage 2/3A test in this file already uses.
+// ---------------------------------------------------------------------------
+
+/// `Observation::encode()`'s only length check in the whole codebase - it's
+/// never called from `apps/headless` or the AI, only by external RL/LLM
+/// consumers (design.md §15/§18), so nothing else exercises the
+/// `debug_assert_eq!` inside `encode()` itself. Stage 3B extended
+/// `ENCODING_LEN`'s formula with the new per-relation diplomacy block - this
+/// confirms the two stay in sync for every faction's own view, not just one.
+#[test]
+fn observation_encoding_matches_declared_length() {
+    let world = scenario::build_world();
+    for faction in &world.factions {
+        let obs = Observation { faction: faction.id, world: &world };
+        assert_eq!(obs.encode().len(), ENCODING_LEN);
+    }
+}
+
+/// `Stance::Ceasefire` (docs/phase3-spec.md "Ceasefire": "戦闘・占領が発生し
+/// ない"): two factions sharing a region must not fight once a Ceasefire is
+/// signed between them, even though the default scenario would otherwise
+/// have them fight every tick (every other combat test in this file
+/// exercises exactly that default).
+#[test]
+fn ceasefire_stops_combat() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire })
+        .unwrap();
+    action::apply_action(&mut world, b, Action::AcceptTreaty { from: a, treaty: Treaty::Ceasefire })
+        .unwrap();
+    assert_eq!(world.diplomacy.stance(a, b), crate::diplomacy::Stance::Ceasefire);
+
+    // Same setup `combat_reduces_organization` uses: put a faction-1 unit
+    // into region 3, which already has faction-0 units.
+    let intruder = world.units.iter().position(|u| u.owner == b).unwrap();
+    world.units[intruder].station = Station::Region(RegionId(3));
+    world.units[intruder].movement = None;
+    let org_before: Vec<f32> = world.units.iter().map(|u| u.organization).collect();
+    let devastation_before = world.region(RegionId(3)).devastation;
+
+    let mut rng = Rng::new(1);
+    let mut events = Vec::new();
+    let report = military::tick_combat(&mut world, &mut rng, &mut events);
+
+    assert!(!report.fought[intruder], "a Ceasefire partner's unit must not fight");
+    assert_eq!(world.units[intruder].organization, org_before[intruder]);
+    assert_eq!(world.region(RegionId(3)).devastation, devastation_before);
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Battle { region, .. } if *region == RegionId(3))),
+        "no Battle event should be logged for a region with no warring pair present"
+    );
+
+    // Occupation must not advance either - the intruder physically present
+    // in foreign territory, at peace, is not an invasion.
+    for _ in 0..5 {
+        military::tick_occupation(&mut world, &mut events);
+    }
+    assert_eq!(world.region(RegionId(3)).owner, FactionId(0));
+    assert_eq!(world.region(RegionId(3)).occupation, 0.0);
+}
+
+/// `Stance::Alliance` (docs/phase3-spec.md: "同盟国が攻撃されたら自動参戦す
+/// る"): when faction `a` (allied with `c`) goes back to war with `b`,
+/// `c` - previously at `Ceasefire` with `b`, not at war at all - is dragged
+/// into that war too.
+#[test]
+fn alliance_drags_into_war() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+    let c = FactionId(2);
+
+    for (x, y) in [(a, c), (b, c)] {
+        action::apply_action(&mut world, x, Action::ProposeTreaty { to: y, treaty: Treaty::Ceasefire })
+            .unwrap();
+        action::apply_action(&mut world, y, Action::AcceptTreaty { from: x, treaty: Treaty::Ceasefire })
+            .unwrap();
+    }
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Alliance })
+        .unwrap();
+    action::apply_action(&mut world, b, Action::AcceptTreaty { from: a, treaty: Treaty::Alliance })
+        .unwrap();
+    assert_eq!(world.diplomacy.stance(a, b), crate::diplomacy::Stance::Alliance);
+    assert!(!world.diplomacy.is_at_war(b, c), "sanity: b and c start at Ceasefire, not War");
+
+    action::apply_action(&mut world, a, Action::DeclareWar { to: c }).unwrap();
+
+    assert!(world.diplomacy.is_at_war(a, c), "a declared war on c directly");
+    assert!(
+        world.diplomacy.is_at_war(b, c),
+        "b, allied with a, should be dragged into a's war with c even though b and c were at \
+         Ceasefire"
+    );
+    assert!(
+        world
+            .diplomacy
+            .log
+            .iter()
+            .any(|e| matches!(e, Event::AllianceDragIn { faction, into_war_with } if *faction == b && *into_war_with == c)),
+        "expected an Event::AllianceDragIn naming b's forced entry into the war with c"
+    );
+}
+
+/// `Treaty::MilitaryAccess` (docs/phase3-spec.md: "相手領を通過できる（占領は
+/// 発生しない）"): a faction can sit in a granted region indefinitely without
+/// that presence ever starting an occupation, even while the two remain at
+/// `Stance::War` - the default, permanent-war scenario every other
+/// occupation test in this file relies on stays valid without this grant
+/// (`occupation_flips_owner` uses the exact same region-8 setup and *does*
+/// flip ownership).
+#[test]
+fn military_access_allows_transit_without_occupation() {
+    let mut world = scenario::build_world();
+    let owner = FactionId(2);
+    let visitor = FactionId(0);
+
+    action::apply_action(
+        &mut world,
+        owner,
+        Action::ProposeTreaty { to: visitor, treaty: Treaty::MilitaryAccess },
+    )
+    .unwrap();
+    action::apply_action(
+        &mut world,
+        visitor,
+        Action::AcceptTreaty { from: owner, treaty: Treaty::MilitaryAccess },
+    )
+    .unwrap();
+    assert!(world.diplomacy.is_at_war(owner, visitor), "sanity: still at War by default");
+
+    // Region 8 (Shikoku) starts undefended by faction 2 - same setup
+    // `occupation_flips_owner` uses.
+    let mover = world.units.iter().position(|u| u.owner == visitor).unwrap();
+    world.units[mover].station = Station::Region(RegionId(8));
+    world.units[mover].movement = None;
+
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        military::tick_occupation(&mut world, &mut events);
+    }
+
+    assert_eq!(
+        world.region(RegionId(8)).owner,
+        owner,
+        "MilitaryAccess should let the visitor sit in region 8 indefinitely without capturing it"
+    );
+    assert_eq!(world.region(RegionId(8)).occupation, 0.0);
+}
+
+/// `Treaty::PortAccess` (docs/phase3-spec.md: "相手の港を自国の輸入容量とし
+/// て使える"): granting it measurably raises the grantee's usable import
+/// capacity - the same request, against the same grantee, actually lands
+/// more Food with the grant than without it.
+#[test]
+fn port_access_adds_import_capacity() {
+    let grantor = FactionId(0);
+    let grantee = FactionId(2);
+
+    let build = |grant: bool| {
+        let mut world = scenario::build_world();
+        world.faction_mut(grantee).import_plan[Good::Food.index()] = 1000.0;
+        world.faction_mut(grantee).stock[Good::Machinery.index()] = 100_000.0;
+        if grant {
+            action::apply_action(
+                &mut world,
+                grantor,
+                Action::ProposeTreaty { to: grantee, treaty: Treaty::PortAccess },
+            )
+            .unwrap();
+            action::apply_action(
+                &mut world,
+                grantee,
+                Action::AcceptTreaty { from: grantor, treaty: Treaty::PortAccess },
+            )
+            .unwrap();
+        }
+        trade::tick_imports(&mut world);
+        world.faction(grantee).stock[Good::Food.index()]
+    };
+
+    let without_grant = build(false);
+    let with_grant = build(true);
+
+    assert!(
+        with_grant > without_grant,
+        "PortAccess should let the grantee import more than its own ports alone allow: \
+         without={without_grant}, with={with_grant}"
+    );
+}
+
+/// `Treaty::TradeAgreement` (docs/phase3-spec.md: "余剰のある側から不足のあ
+/// る側へ、港湾容量の範囲で流れる"): a surplus faction's stock actually moves
+/// to a deficit partner once the agreement is signed.
+#[test]
+fn trade_agreement_moves_surplus_to_deficit() {
+    let mut world = scenario::build_world();
+    let surplus = FactionId(0);
+    let deficit = FactionId(1);
+
+    world.faction_mut(surplus).stock[Good::Food.index()] = 1000.0;
+    world.faction_mut(deficit).shortage_by_good[Good::Food.index()] = 1.0;
+    let surplus_food_before = world.faction(surplus).stock[Good::Food.index()];
+    let deficit_food_before = world.faction(deficit).stock[Good::Food.index()];
+
+    action::apply_action(
+        &mut world,
+        surplus,
+        Action::ProposeTreaty { to: deficit, treaty: Treaty::TradeAgreement },
+    )
+    .unwrap();
+    action::apply_action(
+        &mut world,
+        deficit,
+        Action::AcceptTreaty { from: surplus, treaty: Treaty::TradeAgreement },
+    )
+    .unwrap();
+
+    trade::tick_imports(&mut world);
+
+    let surplus_food_after = world.faction(surplus).stock[Good::Food.index()];
+    let deficit_food_after = world.faction(deficit).stock[Good::Food.index()];
+
+    assert!(
+        deficit_food_after > deficit_food_before,
+        "the deficit faction should receive Food: before={deficit_food_before}, \
+         after={deficit_food_after}"
+    );
+    assert!(
+        surplus_food_after < surplus_food_before,
+        "the surplus faction should give up exactly what it sent: before={surplus_food_before}, \
+         after={surplus_food_after}"
+    );
+    let sent = surplus_food_before - surplus_food_after;
+    let received = deficit_food_after - deficit_food_before;
+    assert!(
+        (sent - received).abs() < 1e-3,
+        "the flow must conserve the good exactly: sent={sent}, received={received}"
+    );
+}
+
+/// `opinion` (docs/phase3-spec.md "関係": "-100..100 の非対称な感情"):
+/// `Action::BreakTreaty` must damage it, never improve or leave it
+/// unchanged - the opposite of what accepting a treaty does.
+#[test]
+fn breaking_treaty_damages_opinion() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(
+        &mut world,
+        a,
+        Action::ProposeTreaty { to: b, treaty: Treaty::MilitaryAccess },
+    )
+    .unwrap();
+    action::apply_action(
+        &mut world,
+        b,
+        Action::AcceptTreaty { from: a, treaty: Treaty::MilitaryAccess },
+    )
+    .unwrap();
+    assert!(world.diplomacy.has_treaty(a, b, Treaty::MilitaryAccess));
+    let opinion_a_before = world.diplomacy.opinion(a, b);
+    let opinion_b_before = world.diplomacy.opinion(b, a);
+
+    action::apply_action(&mut world, a, Action::BreakTreaty { with: b, treaty: Treaty::MilitaryAccess })
+        .unwrap();
+
+    assert!(!world.diplomacy.has_treaty(a, b, Treaty::MilitaryAccess));
+    assert!(
+        world.diplomacy.opinion(a, b) < opinion_a_before,
+        "breaker's opinion of the other side should drop: before={opinion_a_before}, \
+         after={}",
+        world.diplomacy.opinion(a, b)
+    );
+    assert!(
+        world.diplomacy.opinion(b, a) < opinion_b_before,
+        "the other side's opinion of the breaker should drop: before={opinion_b_before}, \
+         after={}",
+        world.diplomacy.opinion(b, a)
+    );
+    assert!(
+        world
+            .diplomacy
+            .log
+            .iter()
+            .any(|e| matches!(e, Event::TreatyBroken { a: x, b: y, treaty: Treaty::MilitaryAccess } if *x == a && *y == b)),
+        "expected an Event::TreatyBroken to be logged"
+    );
+}
+
+/// docs/phase3-spec.md "条約": "一方的な提案だけでは条約が成立しない" - a
+/// proposal with no matching `AcceptTreaty` never becomes an active treaty,
+/// and expires on its own after `PROPOSAL_TTL_DAYS` (docs/phase3-spec.md:
+/// "提案は 1 tick 保留され、相手の応答を待つ").
+#[test]
+fn proposal_requires_acceptance() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire })
+        .unwrap();
+
+    assert!(
+        !world.diplomacy.has_treaty(a, b, Treaty::Ceasefire),
+        "a lone proposal must not itself establish the treaty"
+    );
+    assert!(world.diplomacy.find_pending(a, b).is_some(), "the proposal should be pending");
+
+    // Nobody ever answers it - `tick_diplomacy` (`Simulation::step`'s
+    // once-a-day diplomacy maintenance) should expire it on its own.
+    let mut events = Vec::new();
+    for _ in 0..5 {
+        diplomacy::tick_diplomacy(&mut world, &mut events);
+    }
+
+    assert!(
+        !world.diplomacy.has_treaty(a, b, Treaty::Ceasefire),
+        "still no treaty after the unanswered proposal expired"
+    );
+    assert!(
+        world.diplomacy.find_pending(a, b).is_none(),
+        "an unanswered proposal should expire rather than stay pending forever"
+    );
+}
+
+/// External code review fix A1: `Stance::Ceasefire` must stop naval combat
+/// exactly the way `ceasefire_stops_combat` already proves it stops land
+/// combat - before this fix `tick_naval_combat` had no stance awareness at
+/// all, so fleets of factions under Ceasefire/NonAggression/Alliance kept
+/// fighting every tick regardless of what treaty they'd signed.
+#[test]
+fn ceasefire_stops_naval_combat() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+    let zone = SeaZoneId(0);
+
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire })
+        .unwrap();
+    action::apply_action(&mut world, b, Action::AcceptTreaty { from: a, treaty: Treaty::Ceasefire })
+        .unwrap();
+    assert_eq!(world.diplomacy.stance(a, b), crate::diplomacy::Stance::Ceasefire);
+
+    // Any two units, repurposed as fleets sharing a zone - same technique
+    // `naval_combat_sinks_fleet` uses.
+    let fleet_a = world.units.iter().find(|u| u.owner == a).unwrap().id;
+    let fleet_b = world.units.iter().find(|u| u.owner == b).unwrap().id;
+    world.unit_mut(fleet_a).station = Station::Sea(zone);
+    world.unit_mut(fleet_a).movement = None;
+    world.unit_mut(fleet_b).station = Station::Sea(zone);
+    world.unit_mut(fleet_b).movement = None;
+
+    assert!(
+        !world.has_enemy_fleets(zone, a),
+        "a Ceasefire partner's fleet must no longer count as an enemy fleet"
+    );
+
+    let org_before = world.unit(fleet_a).organization;
+    let mut rng = Rng::new(1);
+    let mut events = Vec::new();
+    let report = naval::tick_naval_combat(&mut world, &mut rng, &mut events);
+
+    assert!(!report.fought[fleet_a.index()], "a Ceasefire partner's fleet must not fight");
+    assert!(!report.fought[fleet_b.index()], "a Ceasefire partner's fleet must not fight");
+    assert_eq!(world.unit(fleet_a).organization, org_before);
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::NavalBattle { zone: z, .. } if *z == zone)),
+        "no NavalBattle event should be logged for a zone with no warring pair present"
+    );
+}
+
+/// External code review fix A1: a faction at peace with a port's owner must
+/// never blockade that port, no matter how completely it dominates the sea
+/// zones the port faces - the contrast case for `blockade_stops_import`
+/// (identical setup, still at War, still blockades).
+#[test]
+fn peace_partner_port_is_not_blockaded() {
+    let mut world = scenario::build_world();
+    let owner = FactionId(1); // owns 信越・北陸(4), 東海(5), 近畿(6)
+    let peace_partner = FactionId(0);
+    let still_at_war = FactionId(2);
+
+    action::apply_action(
+        &mut world,
+        owner,
+        Action::ProposeTreaty { to: peace_partner, treaty: Treaty::Ceasefire },
+    )
+    .unwrap();
+    action::apply_action(
+        &mut world,
+        peace_partner,
+        Action::AcceptTreaty { from: owner, treaty: Treaty::Ceasefire },
+    )
+    .unwrap();
+    assert_eq!(world.diplomacy.stance(owner, peace_partner), crate::diplomacy::Stance::Ceasefire);
+    assert!(world.diplomacy.is_at_war(owner, still_at_war), "sanity: still at War by default");
+
+    // peace_partner (faction 0's slot) holds full, uncontested control of
+    // every sea zone touching 東海 (region 5) - well past
+    // BLOCKADE_CONTROL_THRESHOLD.
+    for zone in world.zones_touching(RegionId(5)) {
+        world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+    }
+    assert!(
+        !naval::is_port_blockaded(&world, RegionId(5)),
+        "a Ceasefire partner's dominant sea control must not blockade the port"
+    );
+
+    // The identical control, attributed to a faction still at War instead,
+    // must still blockade - confirming the difference above is the Stance,
+    // not something else this test changed.
+    for zone in world.zones_touching(RegionId(5)) {
+        world.sea_zone_mut(zone).control = vec![0.0, 0.0, 1.0];
+    }
+    assert!(
+        naval::is_port_blockaded(&world, RegionId(5)),
+        "sanity: the same dominant control from a faction still at War must still blockade"
+    );
+}
+
+/// External code review fix A2: crossed bilateral proposals (`a` proposes a
+/// treaty to `b` while `b` independently proposes the same treaty to `a`,
+/// before either has answered) must not let the signing bonus be paid
+/// twice - accepting one direction activates the treaty and must silently
+/// retire the now-redundant reverse proposal, and even if it somehow
+/// survived, accepting an already-active treaty a second time must be
+/// rejected outright.
+#[test]
+fn crossed_proposals_pay_signing_bonus_once() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(
+        &mut world,
+        a,
+        Action::ProposeTreaty { to: b, treaty: Treaty::NonAggression },
+    )
+    .unwrap();
+    action::apply_action(
+        &mut world,
+        b,
+        Action::ProposeTreaty { to: a, treaty: Treaty::NonAggression },
+    )
+    .unwrap();
+    assert!(world.diplomacy.find_pending(a, b).is_some(), "sanity: a's proposal to b is pending");
+    assert!(world.diplomacy.find_pending(b, a).is_some(), "sanity: b's proposal to a is pending");
+
+    let opinion_a_before = world.diplomacy.opinion(a, b);
+    let opinion_b_before = world.diplomacy.opinion(b, a);
+
+    // a accepts b's proposal first, activating the treaty and paying the
+    // bonus exactly once.
+    action::apply_action(
+        &mut world,
+        a,
+        Action::AcceptTreaty { from: b, treaty: Treaty::NonAggression },
+    )
+    .unwrap();
+    assert_eq!(world.diplomacy.stance(a, b), crate::diplomacy::Stance::NonAggression);
+    let opinion_a_after = world.diplomacy.opinion(a, b);
+    let opinion_b_after = world.diplomacy.opinion(b, a);
+    assert!(opinion_a_after > opinion_a_before, "the signing bonus should have been paid once");
+    assert!(opinion_b_after > opinion_b_before, "the signing bonus should have been paid once");
+
+    assert!(
+        world.diplomacy.find_pending(a, b).is_none(),
+        "the now-obsolete reverse-direction proposal must be cleared once the treaty activates"
+    );
+    let result = action::apply_action(
+        &mut world,
+        b,
+        Action::AcceptTreaty { from: a, treaty: Treaty::NonAggression },
+    );
+    assert!(
+        result.is_err(),
+        "accepting an already-active treaty a second time must be rejected, not silently succeed"
+    );
+
+    assert_eq!(
+        world.diplomacy.opinion(a, b), opinion_a_after,
+        "the signing bonus must not be paid a second time for one treaty"
+    );
+    assert_eq!(
+        world.diplomacy.opinion(b, a), opinion_b_after,
+        "the signing bonus must not be paid a second time for one treaty"
+    );
+}
+
+/// External code review fix A3: re-proposing the exact same treaty that's
+/// already pending in the same direction - the shape a machine agent
+/// spamming `ProposeTreaty` every tick would produce - must be a true no-op:
+/// no TTL refresh (which would keep the proposal alive forever) and no
+/// second `Event::TreatyProposed` (which would flood the event log).
+#[test]
+fn repeated_proposal_does_not_refresh_or_relog() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire })
+        .unwrap();
+    assert_eq!(
+        world.diplomacy.log.iter().filter(|e| matches!(e, Event::TreatyProposed { .. })).count(),
+        1,
+        "sanity: the first proposal logs exactly one TreatyProposed event"
+    );
+
+    // Let a day pass so the ttl actually counts down from its initial value
+    // - otherwise a refreshed proposal and an untouched one would look
+    // identical.
+    let mut events = Vec::new();
+    diplomacy::tick_diplomacy(&mut world, &mut events);
+    let ttl_after_one_day = world.diplomacy.pending[world.diplomacy.find_pending(a, b).unwrap()].ttl;
+
+    // Re-propose the identical (from, to, treaty) repeatedly, the way a
+    // machine agent hammering the same action every tick would.
+    for _ in 0..5 {
+        action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire })
+            .unwrap();
+    }
+
+    assert!(
+        world.diplomacy.log.is_empty(),
+        "repeated proposals for an already-pending treaty must not log a second \
+         Event::TreatyProposed: {:?}",
+        world.diplomacy.log
+    );
+    let idx = world.diplomacy.find_pending(a, b).expect("the proposal should still be pending");
+    assert_eq!(
+        world.diplomacy.pending[idx].ttl, ttl_after_one_day,
+        "repeated proposals for an already-pending treaty must not refresh its ttl"
+    );
+}
+

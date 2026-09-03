@@ -6,6 +6,7 @@ use crate::balance::{
     UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
+use crate::diplomacy::{self, Stance, Treaty};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::logistics;
@@ -41,6 +42,26 @@ pub enum Action {
     /// to split contended regional throughput between Munitions and Arms
     /// delivery for `good`.
     SetLogisticsPriority { good: Good, weight: f32 },
+    /// Stage 3B (docs/phase3-spec.md "条約"): queues a one-tick pending
+    /// proposal, visible to `to` via `Observation`/`Diplomacy::pending`.
+    /// Replaces any existing outgoing proposal from this faction to `to`
+    /// rather than stacking a second one.
+    ProposeTreaty { to: FactionId, treaty: Treaty },
+    /// Resolves a pending proposal *from* `from` *to* this faction into an
+    /// active treaty.
+    AcceptTreaty { from: FactionId, treaty: Treaty },
+    /// Turns down a pending proposal *from* `from` *to* this faction.
+    RejectTreaty { from: FactionId, treaty: Treaty },
+    /// Ends an active `Stance::Ceasefire` with `to` immediately
+    /// (docs/phase3-spec.md: "いつでも DeclareWar で破棄できる"). Rejected
+    /// against any other current stance - breaking `NonAggression` or
+    /// `Alliance` goes through `BreakTreaty` instead (`NonAggression` carries
+    /// a notice period; `Alliance` falls back to `Ceasefire`, not war).
+    DeclareWar { to: FactionId },
+    /// Ends an active treaty with `with` - see `diplomacy::break_treaty` for
+    /// what happens per treaty kind. Rejected for `Treaty::Ceasefire`
+    /// (use `DeclareWar`).
+    BreakTreaty { with: FactionId, treaty: Treaty },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,6 +105,11 @@ pub fn apply_action(
         Action::SetLogisticsPriority { good, weight } => {
             apply_set_logistics_priority(world, faction, good, weight)
         }
+        Action::ProposeTreaty { to, treaty } => apply_propose_treaty(world, faction, to, treaty),
+        Action::AcceptTreaty { from, treaty } => apply_accept_treaty(world, faction, from, treaty),
+        Action::RejectTreaty { from, treaty } => apply_reject_treaty(world, faction, from, treaty),
+        Action::DeclareWar { to } => apply_declare_war(world, faction, to),
+        Action::BreakTreaty { with, treaty } => apply_break_treaty(world, faction, with, treaty),
     }
 }
 
@@ -422,5 +448,132 @@ fn apply_cancel_build(
     }
 
     world.region_mut(region_id).construction = None;
+    Ok(())
+}
+
+/// `Action::ProposeTreaty` (docs/phase3-spec.md "条約"). Rejects a
+/// self-target, a dead/unknown target, a treaty already active between the
+/// pair, and a (pair, treaty) combination still on cooldown after a recent
+/// break - each of these keeps `ProposeTreaty` from being a free, repeatable
+/// no-op an optimiser could spam for no reason. A *duplicate* outgoing
+/// proposal (same treaty already pending to the same target) is allowed
+/// through here but has no additional effect - `diplomacy::propose` replaces
+/// rather than stacks it.
+fn apply_propose_treaty(
+    world: &mut World,
+    faction: FactionId,
+    to: FactionId,
+    treaty: Treaty,
+) -> Result<(), ActionError> {
+    if to == faction {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.factions.get(to.index()).is_none_or(|f| !f.alive) {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.diplomacy.has_treaty(faction, to, treaty) {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.diplomacy.cooldown(faction, to, treaty) > 0 {
+        return Err(ActionError::InvalidValue);
+    }
+    diplomacy::propose(world, faction, to, treaty);
+    Ok(())
+}
+
+/// `Action::AcceptTreaty`: `from` must have an outstanding proposal of
+/// exactly this `treaty` to this faction. Consumes it (removed from
+/// `Diplomacy::pending` here, before `diplomacy::accept` applies the
+/// effect) so it can never be accepted twice.
+///
+/// External code review fix A2: also revalidates the treaty isn't already
+/// active between the pair before applying it - a crossed-bilateral
+/// proposal (`a` proposes to `b` while `b` independently proposes the same
+/// treaty to `a`) would otherwise let accepting the second one re-apply
+/// `diplomacy::accept` (and its `TREATY_ACCEPT_OPINION_BONUS`) for a treaty
+/// that accepting the first already activated. `diplomacy::accept` itself
+/// now clears the reverse-direction proposal the instant a treaty activates
+/// (see its doc), so this check is a backstop rather than the only guard -
+/// but a `PendingProposal` predating that fix, or reaching this some other
+/// way, must still never be actable on twice.
+fn apply_accept_treaty(
+    world: &mut World,
+    faction: FactionId,
+    from: FactionId,
+    treaty: Treaty,
+) -> Result<(), ActionError> {
+    let idx = world
+        .diplomacy
+        .pending
+        .iter()
+        .position(|p| p.from == from && p.to == faction && p.treaty == treaty)
+        .ok_or(ActionError::InvalidValue)?;
+    if world.diplomacy.has_treaty(faction, from, treaty) {
+        return Err(ActionError::InvalidValue);
+    }
+    world.diplomacy.pending.remove(idx);
+    diplomacy::accept(world, faction, from, treaty);
+    Ok(())
+}
+
+/// `Action::RejectTreaty`: same lookup as `AcceptTreaty`, but simply
+/// discards the proposal instead of applying it.
+fn apply_reject_treaty(
+    world: &mut World,
+    faction: FactionId,
+    from: FactionId,
+    treaty: Treaty,
+) -> Result<(), ActionError> {
+    let idx = world
+        .diplomacy
+        .pending
+        .iter()
+        .position(|p| p.from == from && p.to == faction && p.treaty == treaty)
+        .ok_or(ActionError::InvalidValue)?;
+    world.diplomacy.pending.remove(idx);
+    diplomacy::reject(world, from, faction, treaty);
+    Ok(())
+}
+
+/// `Action::DeclareWar` (docs/phase3-spec.md "Ceasefire": "いつでも
+/// DeclareWar で破棄できる"): only valid against a current `Stance::Ceasefire`
+/// - already `War` is a no-op the action layer refuses rather than silently
+/// accepting, and `NonAggression`/`Alliance` must go through `BreakTreaty`
+/// (the former for its notice period, the latter because breaking an
+/// alliance is a rupture, not automatically a declaration of war).
+fn apply_declare_war(world: &mut World, faction: FactionId, to: FactionId) -> Result<(), ActionError> {
+    if to == faction || world.factions.get(to.index()).is_none_or(|f| !f.alive) {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.diplomacy.stance(faction, to) != Stance::Ceasefire {
+        return Err(ActionError::InvalidValue);
+    }
+    let mut events = Vec::new();
+    diplomacy::declare_war(world, faction, to, &mut events);
+    world.diplomacy.log.extend(events);
+    Ok(())
+}
+
+/// `Action::BreakTreaty`: `with` must currently hold exactly the treaty
+/// being broken (rejects breaking something not actually active, and
+/// `Treaty::Ceasefire` outright - see `Action::DeclareWar`'s doc).
+fn apply_break_treaty(
+    world: &mut World,
+    faction: FactionId,
+    with: FactionId,
+    treaty: Treaty,
+) -> Result<(), ActionError> {
+    if with == faction || treaty == Treaty::Ceasefire {
+        return Err(ActionError::InvalidValue);
+    }
+    if !world.diplomacy.has_treaty(faction, with, treaty) {
+        return Err(ActionError::InvalidValue);
+    }
+    if treaty == Treaty::NonAggression && world.diplomacy.pending_break(faction, with).is_some() {
+        // Already serving notice - breaking it twice must not restart (or
+        // extend) the countdown.
+        return Err(ActionError::InvalidValue);
+    }
+    diplomacy::break_treaty(world, faction, with, treaty);
     Ok(())
 }

@@ -50,11 +50,16 @@ pub fn tick_sea_control(world: &mut World) {
 }
 
 /// docs/phase2-spec.md "2. 港の封鎖": a port is blockaded when some faction
-/// other than its owner holds at least `BLOCKADE_CONTROL_THRESHOLD` control
-/// in any sea zone the region faces. Judged per port region, never
-/// aggregated — a blockade of one port must never affect another
-/// (`Region::port`-less regions can't be blockaded; every MVP region has a
-/// port, but the guard keeps the function meaningful on a map that doesn't).
+/// currently at `Stance::War` with its owner holds at least
+/// `BLOCKADE_CONTROL_THRESHOLD` control in any sea zone the region faces.
+/// Judged per port region, never aggregated — a blockade of one port must
+/// never affect another (`Region::port`-less regions can't be blockaded;
+/// every MVP region has a port, but the guard keeps the function meaningful
+/// on a map that doesn't). External code review fix A1: reads
+/// `World::hostile_control_max` rather than the raw `SeaZone::enemy_control_max`
+/// - a faction at `Ceasefire`/`NonAggression`/`Alliance` with the owner,
+/// however dominant its fleet presence, must not blockade its own treaty
+/// partner's port.
 pub fn is_port_blockaded(world: &World, region: RegionId) -> bool {
     let owner = world.region(region).owner;
     if world.region(region).port <= 0.0 {
@@ -63,7 +68,7 @@ pub fn is_port_blockaded(world: &World, region: RegionId) -> bool {
     world
         .zones_touching(region)
         .into_iter()
-        .any(|z| world.sea_zone(z).enemy_control_max(owner) >= BLOCKADE_CONTROL_THRESHOLD)
+        .any(|z| world.hostile_control_max(z, owner) >= BLOCKADE_CONTROL_THRESHOLD)
 }
 
 /// docs/phase2-spec.md "1. 海峡リンクの遮断": the throughput/speed multiplier
@@ -84,6 +89,14 @@ pub fn strait_factor(world: &World, zone: SeaZoneId, faction: FactionId) -> f32 
 /// terrain) — kept as a separate function from land's rather than a shared
 /// generic one, since the "who defends" concept land needs solely to apply
 /// its terrain bonus has nothing to attach to here.
+///
+/// External code review fix A1: stance-aware exactly like land
+/// `military::tick_combat` — factions merely sharing a zone isn't enough, at
+/// least one *pair* present must actually be at `Stance::War`, and each
+/// side's damage dealt/received only ever comes from sides it's actually at
+/// war with. Before this fix every other faction's fleet always counted as
+/// hostile here regardless of `Stance`, so a `Ceasefire`/`NonAggression`/
+/// `Alliance` partner's fleets still fought every tick.
 pub fn tick_naval_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) -> CombatReport {
     let mut fought = vec![false; world.units.len()];
     let mut casualties = vec![0.0f32; world.factions.len()];
@@ -97,16 +110,29 @@ pub fn tick_naval_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Even
         if factions_present.len() < 2 {
             continue;
         }
+        let any_war = factions_present
+            .iter()
+            .enumerate()
+            .any(|(i, &a)| factions_present[i + 1..].iter().any(|&b| world.diplomacy.is_at_war(a, b)));
+        if !any_war {
+            continue;
+        }
 
         let power: Vec<f32> = factions_present
             .iter()
             .map(|&f| world.zone_power(zone_id, f))
             .collect();
-        let total_power: f32 = power.iter().sum();
 
         let mut battle_casualties = 0.0f32;
         for (side_idx, &side_faction) in factions_present.iter().enumerate() {
-            let enemy_power = total_power - power[side_idx];
+            let enemy_power: f32 = factions_present
+                .iter()
+                .enumerate()
+                .filter(|&(other_idx, &other_faction)| {
+                    other_idx != side_idx && world.diplomacy.is_at_war(side_faction, other_faction)
+                })
+                .map(|(other_idx, _)| power[other_idx])
+                .sum();
             if enemy_power <= 0.0 {
                 continue;
             }

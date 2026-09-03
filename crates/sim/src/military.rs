@@ -10,6 +10,7 @@ use crate::balance::{
     UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN,
     WAR_SUPPORT_LOSS_PENALTY,
 };
+use crate::diplomacy::Treaty;
 use crate::event::Event;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::naval;
@@ -223,6 +224,20 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         if factions_present.len() < 2 {
             continue;
         }
+        // Stage 3B (docs/phase3-spec.md "Ceasefire": "戦闘・占領が発生しな
+        // い"): two or more factions merely sharing a region isn't enough -
+        // at least one *pair* of them must actually be at `Stance::War`, or
+        // this is peaceful coexistence (a `Ceasefire`/`NonAggression`/
+        // `Alliance` partner's units passing through), not a battle. The
+        // default scenario starts every pair at War, so this is a no-op
+        // there — every existing test keeps its prior behaviour.
+        let any_war = factions_present
+            .iter()
+            .enumerate()
+            .any(|(i, &a)| factions_present[i + 1..].iter().any(|&b| world.diplomacy.is_at_war(a, b)));
+        if !any_war {
+            continue;
+        }
 
         let region = world.region(region_id);
         let defender = pick_defender(world, region, &factions_present);
@@ -240,7 +255,6 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                 }
             })
             .collect();
-        let total_power: f32 = power.iter().sum();
 
         let mut battle_casualties = 0.0f32;
         // Raw damage dealt in this region today, summed across every side
@@ -249,7 +263,19 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         // manpower/equipment casualties it also causes.
         let mut region_damage = 0.0f32;
         for (side_idx, &side_faction) in factions_present.iter().enumerate() {
-            let enemy_power = total_power - power[side_idx];
+            // Stage 3B: only power from sides actually at war with this one
+            // counts as its "enemy" - a faction present but at peace with
+            // `side_faction` neither deals nor takes damage from it, even in
+            // a region where a third pair *is* at war (mixed-stance battles
+            // are possible once treaties diverge factions' relationships).
+            let enemy_power: f32 = factions_present
+                .iter()
+                .enumerate()
+                .filter(|&(other_idx, &other_faction)| {
+                    other_idx != side_idx && world.diplomacy.is_at_war(side_faction, other_faction)
+                })
+                .map(|(other_idx, _)| power[other_idx])
+                .sum();
             if enemy_power <= 0.0 {
                 continue;
             }
@@ -533,7 +559,26 @@ pub fn tick_occupation(world: &mut World, events: &mut Vec<Event>) {
         let owner = world.region(region_id).owner;
         let present = &present_factions[i];
 
-        if present.is_empty() || present.contains(&owner) {
+        // Stage 3B (docs/phase3-spec.md "Ceasefire": "占領は発生しない",
+        // "MilitaryAccess": "占領は発生しない"): a foreign faction present
+        // only counts as a potential occupier if it's actually at war with
+        // `owner` *and* hasn't been granted transit rights here. A faction
+        // at peace (or holding `MilitaryAccess`) can sit in `owner`'s
+        // territory indefinitely without that presence ever starting an
+        // occupation - the default all-War scenario makes every present
+        // foreign faction eligible exactly as before, so existing tests are
+        // unaffected.
+        let eligible: Vec<FactionId> = present
+            .iter()
+            .copied()
+            .filter(|&f| {
+                f != owner
+                    && world.diplomacy.is_at_war(owner, f)
+                    && !world.diplomacy.has_treaty(owner, f, Treaty::MilitaryAccess)
+            })
+            .collect();
+
+        if present.contains(&owner) || eligible.is_empty() {
             let region = world.region_mut(region_id);
             // Stage 3A separatism (docs/phase3-spec.md "地方独立運動",
             // `politics::tick_separatism`): a core-faction reversion in
@@ -564,7 +609,7 @@ pub fn tick_occupation(world: &mut World, events: &mut Vec<Event>) {
             continue;
         }
 
-        let occupier = present[0];
+        let occupier = eligible[0];
         let region = world.region_mut(region_id);
         if region.occupier != Some(occupier) || region.occupation_kind != Some(OccupationKind::Military) {
             // A newly arrived occupier starts from zero: progress earned by

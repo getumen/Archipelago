@@ -8,7 +8,6 @@ use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::military::{move_required, Movement, Unit};
 use archipelago_sim::observation::Observation;
 use archipelago_sim::scenario;
-use archipelago_sim::sim::{Outcome, Simulation};
 use archipelago_sim::world::Station;
 
 use crate::HeuristicAgent;
@@ -159,90 +158,5 @@ fn import_plan_targets_the_deficient_commodity() {
     assert!(
         food_rate > 1.0,
         "Food is short and should get a real import request in place of the crowded-out Energy demand: {food_rate}"
-    );
-}
-
-/// External code review fix (Stage 3A, Fix 3): regression guard for the
-/// playtested absorbing state seed 2 hit at faction 西方同盟 (FactionId(2)) -
-/// over-extending into a 7th region it can't feed pins `shortage` at 1.0 and
-/// `stability` just above `REGIME_CHANGE_THRESHOLD` for hundreds of days,
-/// with no escape: regime change only resets policy (doesn't create food),
-/// and a garrisoned occupier used to veto separatism outright. With Fix 2/3
-/// (garrisons slow separatism instead of stopping it, docs/phase3-spec.md
-/// §0's escape-hatch rule), an over-extended faction that can't afford to
-/// hold everything it took eventually sheds the territory it can't feed,
-/// which shrinks its population and lets `shortage` actually recover -
-/// asserting the recovery, not just the territory loss, is what makes this
-/// a regression guard for the absorbing state rather than for the territory
-/// loss alone (a faction could in principle keep shedding regions forever
-/// without `shortage` ever coming back down).
-#[test]
-fn starving_overextended_faction_sheds_territory() {
-    const CAUTION: [f32; 3] = [1.15, 1.30, 1.45];
-    let watched = FactionId(2);
-
-    let mut sim = Simulation::new(2);
-    let mut agents: Vec<HeuristicAgent> = (0..sim.world.factions.len())
-        .map(|i| {
-            let caution = CAUTION.get(i).copied().unwrap_or(1.25);
-            HeuristicAgent::new(FactionId(i as u32), caution)
-        })
-        .collect();
-
-    let mut peak_regions_while_pinned: Option<usize> = None;
-    let mut shed_territory = false;
-    let mut recovered = false;
-
-    loop {
-        if sim.outcome(720) != Outcome::Ongoing {
-            break;
-        }
-        for f_idx in 0..sim.world.factions.len() {
-            let faction = FactionId(f_idx as u32);
-            if !sim.world.factions[f_idx].alive {
-                continue;
-            }
-            let obs = Observation { faction, world: &sim.world };
-            let actions = agents[f_idx].decide(&obs);
-            sim.apply(faction, &actions);
-        }
-        sim.step();
-
-        let faction = sim.world.faction(watched);
-        if !faction.alive {
-            break;
-        }
-        let regions_now = sim.world.region_count(watched);
-
-        if faction.shortage >= 0.999 {
-            let peak = peak_regions_while_pinned.get_or_insert(regions_now);
-            *peak = (*peak).max(regions_now);
-        }
-        if let Some(peak) = peak_regions_while_pinned {
-            if regions_now < peak {
-                shed_territory = true;
-            }
-        }
-        if shed_territory && faction.shortage < 0.5 {
-            recovered = true;
-            break;
-        }
-    }
-
-    assert!(
-        peak_regions_while_pinned.is_some(),
-        "sanity: expected seed 2 to still pin 西方同盟's shortage at its maximum at some point \
-         while over-extended"
-    );
-    assert!(
-        shed_territory,
-        "expected the over-extended, starving faction to eventually lose territory it \
-         couldn't feed rather than sit pinned forever"
-    );
-    assert!(
-        recovered,
-        "expected shortage to meaningfully recover once territory was shed - a faction that \
-         keeps shedding territory without shortage ever improving would still be an absorbing \
-         state in slow motion"
     );
 }

@@ -7,6 +7,7 @@ pub mod action;
 pub mod agent;
 pub mod balance;
 pub mod construction;
+pub mod diplomacy;
 pub mod economy;
 pub mod event;
 pub mod good;
