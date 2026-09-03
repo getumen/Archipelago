@@ -4,6 +4,7 @@
 use crate::balance::{INFRA_DAMAGE_SHARE, NODE_BASE, NODE_INFRA, NODE_PORT, WORKFORCE_SHARE};
 use crate::construction::Construction;
 use crate::good::{Good, GOOD_COUNT};
+use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::military::Unit;
 
@@ -133,6 +134,23 @@ pub struct Link {
     pub strait_zone: Option<SeaZoneId>,
 }
 
+/// Which system currently drives a region's shared `occupation`/`occupier`
+/// meter (Stage 3A external code review fix — Fix 2/3, docs/phase3-spec.md
+/// "地方独立運動"): `military::tick_occupation`'s real invasion progress, or
+/// `politics::tick_separatism`'s political drift toward the region's `core`
+/// faction. Both systems read and write the same two fields, so without an
+/// explicit marker a coincidence (the invader happens to be the same faction
+/// separatism was already drifting toward) can't be told apart from a
+/// genuine continuation — this is exactly what let a real invasion inherit
+/// separatist progress, or a stale separatist marker survive under a
+/// military occupier's decay logic. `None` (on `Region::occupation_kind`)
+/// means the meter is currently idle (`occupation == 0`, `occupier == None`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OccupationKind {
+    Military,
+    Separatist,
+}
+
 #[derive(Clone, Debug)]
 pub struct Region {
     pub id: RegionId,
@@ -150,6 +168,10 @@ pub struct Region {
     pub unrest: f32,
     pub occupation: f32,
     pub occupier: Option<FactionId>,
+    /// See `OccupationKind`'s doc: which of `military::tick_occupation` or
+    /// `politics::tick_separatism` currently owns `occupation`/`occupier`.
+    /// Kept in lockstep with `occupier` (`Some` iff `occupier.is_some()`).
+    pub occupation_kind: Option<OccupationKind>,
     pub links: Vec<Link>,
     /// War damage, `0..1` (Stage 2B, docs/phase2-spec.md "Stage 2B — インフラ
     /// と建設・戦災"): holding a region isn't the same as being able to use
@@ -331,6 +353,46 @@ pub struct Faction {
     /// input. Only `Munitions` and `Arms` are read by
     /// `logistics::distribute_supply`.
     pub logistics_priority: [f32; GOOD_COUNT],
+    /// Stage 3A (docs/phase3-spec.md "Stage 3A — 国内政治勢力", design.md
+    /// §11): support (`0..100`) for each of the seven domestic political
+    /// `Group`s, indexed by `Group::index()`. Updated by
+    /// `politics::tick_politics` with a target-approach model
+    /// (`balance::GROUP_ADAPT_RATE`) — never accumulated directly — so no
+    /// group can pin at a boundary it can't recover from.
+    pub group_support: [f32; GROUP_COUNT],
+    /// Fixed weight each `Group` carries in `stability`'s influence-weighted
+    /// average, indexed by `Group::index()`. Always sums to `1.0`; set once
+    /// at scenario build time and never changed by any Stage 3A system
+    /// (Stage 3C's national foci may adjust this later).
+    pub group_influence: [f32; GROUP_COUNT],
+    /// Today's Machinery output over its input-unconstrained potential,
+    /// `0..1` (`economy::tick_economy`) — the "生産（Machinery）が好調" signal
+    /// `politics::tick_politics` reads for Business's group-support target.
+    /// Kept as a ratio (not an absolute figure) so it stays meaningful
+    /// regardless of how much Machinery capacity a faction actually holds.
+    pub machinery_output_ratio: f32,
+    /// Stage 3A political events (docs/phase3-spec.md "政治イベント"): the
+    /// two fixed-duration ones. `0` means inactive; set to
+    /// `balance::STRIKE_DAYS`/`balance::REGIME_CHANGE_DAYS` on trigger and
+    /// counted down to `0` by `politics::tick_politics` — a real, spendable
+    /// duration, not a condition re-checked every tick, so each event
+    /// always runs its course once started (see their doc comments in
+    /// `balance.rs`).
+    pub strike_days: u32,
+    pub regime_change_days: u32,
+    /// Stage 3A political events (docs/phase3-spec.md "政治イベント"): the
+    /// three live conditions, re-evaluated from `group_support` every tick
+    /// by `politics::tick_politics` (no timer — they end the instant the
+    /// triggering group's support recovers above threshold). These flags
+    /// exist so systems elsewhere (`military::tick_recovery`,
+    /// `construction::tick_construction`, `economy::tick_economy`) can read
+    /// "is this currently in effect" without themselves depending on
+    /// `crate::group`, and so `politics::tick_politics` can detect the
+    /// rising edge to log an `Event` only once per episode rather than every
+    /// tick it stays active.
+    pub protest_active: bool,
+    pub mutiny_active: bool,
+    pub capital_flight_active: bool,
     pub alive: bool,
 }
 

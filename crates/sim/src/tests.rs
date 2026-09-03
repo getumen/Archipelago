@@ -2,13 +2,16 @@
 
 use crate::action::{self, Action, ActionError};
 use crate::balance::{
-    CIVILIAN_ENERGY_DEMAND_PER_POP, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
-    CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, IMPORT_PER_PORT, OCCUPATION_RATE,
-    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MIN, CONSTRUCTION_MACHINERY_PER_POINT,
+    CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT,
+    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS,
+    STRIKE_OUTPUT_MULT, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
 };
 use crate::construction::{self, Construction, Project};
 use crate::economy;
+use crate::event::Event;
 use crate::good::{Good, GOOD_COUNT};
+use crate::group::{Group, GROUP_COUNT};
 use crate::ids::{FactionId, RegionId, SeaZoneId};
 use crate::logistics;
 use crate::military;
@@ -150,8 +153,10 @@ fn unrest_recovers_after_shortage() {
     world.region_mut(capital).unrest = 100.0;
 
     let casualties = vec![0.0; world.factions.len()];
+    let region_delta = vec![0i32; world.factions.len()];
+    let mut events = Vec::new();
     for _ in 0..80 {
-        politics::tick_politics(&mut world, &casualties);
+        politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
     }
 
     let unrest = world.region(capital).unrest;
@@ -1978,4 +1983,473 @@ fn blockaded_faction_starves() {
          identical import plan and identical Machinery to pay for it: \
          open={shortage_open}, blockaded={shortage_blockaded}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3A — 国内政治勢力 (docs/phase3-spec.md "Stage 3A")
+// ---------------------------------------------------------------------------
+
+/// design.md §2's central claim, and the regression guard for this whole
+/// stage: a faction that keeps winning the war outright (net territorial
+/// gain, never a loss) can still see its government collapse if it keeps
+/// tightening conscription and rationing on its own population. Military
+/// and Government support both get a boost from every captured region, but
+/// Labor, Citizens and (via sustained unrest/shortage) Government and
+/// LocalGovernment support all suffer - and those five groups outweigh
+/// Military+Government's combined 0.40 influence share.
+#[test]
+fn winning_war_can_still_topple_government() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let start_regions = world.region_count(faction);
+
+    let mut targets: Vec<RegionId> = world
+        .regions
+        .iter()
+        .filter(|r| r.owner != faction)
+        .map(|r| r.id)
+        .collect();
+    targets.sort_by_key(|r| r.0);
+
+    let mut events = Vec::new();
+    let mut regime_changed = false;
+    let mut day = 0u32;
+    while day < 800 && !regime_changed {
+        // Every 40 days, capture one more region outright and never give
+        // any back - a faction that is unambiguously winning the war.
+        let mut region_delta = vec![0i32; world.factions.len()];
+        if day % 40 == 0 {
+            if let Some(target) = targets.pop() {
+                world.region_mut(target).owner = faction;
+                region_delta[faction.index()] = 1;
+            }
+        }
+
+        // Reapplied every tick: a regime change resets policy to its
+        // comfortable default, and the point of this test is that the
+        // government keeps squeezing anyway (and keeps paying for it).
+        {
+            let f = world.faction_mut(faction);
+            f.conscription = 1.0;
+            f.civilian_ration = CIVILIAN_RATION_MIN;
+            f.shortage = 0.9;
+        }
+        for r in world.regions_of(faction) {
+            world.region_mut(r).unrest = 95.0;
+        }
+
+        // Sustained daily war deaths despite winning - a real war still
+        // costs lives even while the front line only moves one way.
+        let casualties = vec![0.5f32, 0.0, 0.0];
+        politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::RegimeChange { faction: f } if *f == faction))
+        {
+            regime_changed = true;
+        }
+        day += 1;
+    }
+
+    assert!(
+        regime_changed,
+        "expected sustained conscription and rationing to eventually topple the government \
+         even while the faction keeps winning territory"
+    );
+    assert!(
+        world.region_count(faction) > start_regions,
+        "expected the faction to have gained territory, not lost it, before the government fell: \
+         start={start_regions}, end={}",
+        world.region_count(faction)
+    );
+}
+
+/// Support must move toward a target, not accumulate - so it recovers once
+/// the pressure driving it down eases, the same guarantee `unrest` already
+/// has. Regression guard for the failure this stage was warned about
+/// explicitly: an accumulating quantity that only ever falls would pin at a
+/// floor it can never leave.
+#[test]
+fn support_recovers_after_policy_relaxed() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let casualties = vec![0.0f32; world.factions.len()];
+    let region_delta = vec![0i32; world.factions.len()];
+    let mut events = Vec::new();
+
+    {
+        let f = world.faction_mut(faction);
+        f.conscription = 1.0;
+        f.civilian_ration = CIVILIAN_RATION_MIN;
+        f.shortage = 0.9;
+    }
+    for _ in 0..150 {
+        politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+    }
+    let squeezed_labor = world.faction(faction).group_support[Group::Labor.index()];
+    let squeezed_citizens = world.faction(faction).group_support[Group::Citizens.index()];
+    assert!(
+        squeezed_labor < 40.0 && squeezed_citizens < 40.0,
+        "sanity: sustained conscription+rationing should depress Labor/Citizens support: \
+         labor={squeezed_labor}, citizens={squeezed_citizens}"
+    );
+
+    {
+        let f = world.faction_mut(faction);
+        f.conscription = 0.2;
+        f.civilian_ration = 1.0;
+        f.shortage = 0.0;
+    }
+    for _ in 0..300 {
+        politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+    }
+    let recovered_labor = world.faction(faction).group_support[Group::Labor.index()];
+    let recovered_citizens = world.faction(faction).group_support[Group::Citizens.index()];
+
+    assert!(
+        recovered_labor > squeezed_labor + 15.0,
+        "expected Labor support to recover once conscription/rationing eased, not sit pinned: \
+         squeezed={squeezed_labor}, recovered={recovered_labor}"
+    );
+    assert!(
+        recovered_citizens > squeezed_citizens + 15.0,
+        "expected Citizens support to recover once conscription/rationing eased, not sit pinned: \
+         squeezed={squeezed_citizens}, recovered={recovered_citizens}"
+    );
+    assert!(
+        recovered_labor > 45.0 && recovered_citizens > 45.0,
+        "expected support to recover close to its unpressured baseline, not merely off its floor: \
+         labor={recovered_labor}, citizens={recovered_citizens}"
+    );
+}
+
+/// docs/phase3-spec.md "政権交代の扱い": a regime change resets policy
+/// (`conscription`/`civilian_ration`/`industry_priority`/
+/// `logistics_priority`/`import_plan`) and `war_support` to their scenario
+/// defaults, but must never touch territory, units, or stock - it's a
+/// penalty for the policy stance a faction built up, not a board-destroying
+/// one.
+#[test]
+fn regime_change_resets_policy_not_territory() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let default_faction = scenario::build_world().factions[faction.index()].clone();
+
+    let regions_before: Vec<FactionId> = world.regions.iter().map(|r| r.owner).collect();
+    let units_before: Vec<(f32, f32)> = world
+        .units
+        .iter()
+        .map(|u| (u.manpower, u.equipment))
+        .collect();
+    let stock_before = world.faction(faction).stock;
+
+    {
+        let f = world.faction_mut(faction);
+        f.conscription = 0.95;
+        f.civilian_ration = CIVILIAN_RATION_MIN;
+        f.industry_priority[Good::Munitions.index()] = 0.9;
+        f.industry_priority[Good::Machinery.index()] = 0.1;
+        f.logistics_priority[Good::Arms.index()] = 0.9;
+        f.logistics_priority[Good::Munitions.index()] = 0.1;
+        f.import_plan[Good::Food.index()] = 12.0;
+        f.war_support = 90.0;
+    }
+
+    let mut events = Vec::new();
+    let region_delta = vec![0i32; world.factions.len()];
+    let casualties = vec![0.5f32, 0.0, 0.0];
+    let mut regime_changed = false;
+    for _ in 0..300 {
+        {
+            let f = world.faction_mut(faction);
+            f.shortage = 0.95;
+        }
+        for r in world.regions_of(faction) {
+            world.region_mut(r).unrest = 95.0;
+        }
+        politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::RegimeChange { faction: f } if *f == faction))
+        {
+            regime_changed = true;
+            break;
+        }
+    }
+    assert!(
+        regime_changed,
+        "expected sustained hardship to trigger a regime change within 300 days"
+    );
+
+    let f = world.faction(faction);
+    assert_eq!(f.conscription, default_faction.conscription, "conscription must reset to default");
+    assert_eq!(
+        f.civilian_ration, default_faction.civilian_ration,
+        "civilian_ration must reset to default"
+    );
+    assert_eq!(
+        f.industry_priority, default_faction.industry_priority,
+        "industry_priority must reset to default"
+    );
+    assert_eq!(
+        f.logistics_priority, default_faction.logistics_priority,
+        "logistics_priority must reset to default"
+    );
+    assert_eq!(f.import_plan, default_faction.import_plan, "import_plan must reset to default");
+    assert_eq!(f.war_support, 50.0, "war_support must reset to 50");
+
+    let regions_after: Vec<FactionId> = world.regions.iter().map(|r| r.owner).collect();
+    assert_eq!(regions_after, regions_before, "regime change must not move any territory");
+    let units_after: Vec<(f32, f32)> = world
+        .units
+        .iter()
+        .map(|u| (u.manpower, u.equipment))
+        .collect();
+    assert_eq!(units_after, units_before, "regime change must not touch any unit");
+    assert_eq!(world.faction(faction).stock, stock_before, "regime change must not touch stock");
+}
+
+/// External code review fix (Stage 3A, Fix 1): `protest_active`/
+/// `mutiny_active`/`capital_flight_active` are computed earlier in the same
+/// `apply_political_events` pass, from *this tick's* freshly-updated
+/// `group_support` - if a regime change then resets every group's support
+/// to the 50 baseline (above every one of those events' thresholds) without
+/// also clearing the flags, they'd keep applying their effects
+/// (`military::tick_recovery`'s mutiny org-regen penalty,
+/// `economy::tick_economy`/`construction::tick_construction`'s capital-flight
+/// penalties) for one extra day against a condition that's no longer true.
+#[test]
+fn regime_change_clears_live_event_flags() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    // Support deep enough below every live-condition threshold (and low
+    // enough, weighted, to put `stability` under `REGIME_CHANGE_THRESHOLD`)
+    // that a single `GROUP_ADAPT_RATE`-sized step this tick can't lift it
+    // back out - so protest/mutiny/capital-flight are all still live at the
+    // moment regime change fires in this same tick.
+    world.faction_mut(faction).group_support = [5.0; GROUP_COUNT];
+    world.faction_mut(faction).regime_change_days = 0;
+
+    let mut events = Vec::new();
+    let region_delta = vec![0i32; world.factions.len()];
+    let casualties = vec![0.0f32; world.factions.len()];
+    politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::RegimeChange { faction: f } if *f == faction)),
+        "sanity: expected the deeply unpopular starting state to trigger a regime change this tick"
+    );
+
+    let f = world.faction(faction);
+    assert_eq!(f.group_support, [GROUP_SUPPORT_BASELINE; GROUP_COUNT]);
+    assert_eq!(f.stability, GROUP_SUPPORT_BASELINE);
+    assert!(!f.protest_active, "protest_active must not survive a regime change's support reset");
+    assert!(!f.mutiny_active, "mutiny_active must not survive a regime change's support reset");
+    assert!(
+        !f.capital_flight_active,
+        "capital_flight_active must not survive a regime change's support reset"
+    );
+}
+
+/// docs/phase3-spec.md "政治イベント": `Event::Strike` (Labor support below
+/// `STRIKE_THRESHOLD`) depresses non-Food industrial output for
+/// `STRIKE_DAYS`.
+#[test]
+fn strike_reduces_industrial_output() {
+    let build = |striking: bool| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                // Energy is deliberately abundant so it never binds Steel's
+                // output - only the strike multiplier (and efficiency,
+                // identical in both runs) should move the result.
+                region.capacity[Good::Energy.index()] = 1000.0;
+                region.capacity[Good::Steel.index()] = 10.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+            }
+        }
+        {
+            let f = world.faction_mut(faction);
+            f.stability = 100.0;
+            f.stock = [0.0; GOOD_COUNT];
+            // Ample so civilian Food/Machinery demand never competes with
+            // (or distorts) the Steel measurement below.
+            f.stock[Good::Food.index()] = 1_000_000.0;
+            f.stock[Good::Machinery.index()] = 1_000_000.0;
+            if striking {
+                f.strike_days = STRIKE_DAYS;
+            }
+        }
+        // Machinery/Munitions/Arms capacity stays zero, so nothing consumes
+        // the Steel this produces - the final stock is exactly this tick's
+        // Steel output.
+        economy::tick_economy(&mut world);
+        world.faction(faction).stock[Good::Steel.index()]
+    };
+
+    let steel_normal = build(false);
+    let steel_striking = build(true);
+
+    assert!(steel_normal > 0.0, "sanity: normal operation should produce some Steel: {steel_normal}");
+    assert!(
+        steel_striking < steel_normal * (STRIKE_OUTPUT_MULT + 0.05),
+        "expected an active strike to depress non-Food industrial output by roughly \
+         STRIKE_OUTPUT_MULT: normal={steel_normal}, striking={steel_striking}"
+    );
+}
+
+/// docs/phase3-spec.md "地方独立運動": an occupied region (`core != owner`)
+/// left with neglected LocalGovernment support - and no units defending it
+/// - drifts back to its core faction on its own.
+#[test]
+fn separatism_returns_occupied_region() {
+    let mut world = scenario::build_world();
+    let occupier = FactionId(1);
+    let core_faction = FactionId(0);
+    let region_id = RegionId(0);
+
+    world.region_mut(region_id).owner = occupier;
+    assert_eq!(
+        world.region(region_id).core,
+        core_faction,
+        "sanity: region 0's core stays faction 0 even though its owner just changed"
+    );
+
+    // Guarantee no unit of any faction sits in the occupied region -
+    // separatism only ever acts on a region nobody is physically contesting.
+    let capitals: Vec<RegionId> = world.factions.iter().map(|f| f.capital).collect();
+    for unit in world.units.iter_mut() {
+        if unit.station == Station::Region(region_id) {
+            unit.station = Station::Region(capitals[unit.owner.index()]);
+            unit.movement = None;
+        }
+    }
+
+    world.faction_mut(occupier).group_support[Group::LocalGovernment.index()] =
+        SEPARATISM_THRESHOLD - 5.0;
+
+    let mut events = Vec::new();
+    let mut reverted = false;
+    for _ in 0..100 {
+        politics::tick_separatism(&mut world, &mut events);
+        if world.region(region_id).owner == core_faction {
+            reverted = true;
+            break;
+        }
+    }
+
+    assert!(
+        reverted,
+        "expected a neglected occupied region to revert to its core faction via separatism"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Separatism { region, from, to }
+                if *region == region_id && *from == occupier && *to == core_faction
+        )),
+        "expected an Event::Separatism naming the reverted region to be logged"
+    );
+}
+
+/// External code review fix (Stage 3A, Fix 2/3): the owner's own garrison
+/// stationed in a region under active separatism must slow the drift, never
+/// veto it outright - the old code skipped `tick_separatism` entirely for
+/// any region with so much as one unit present, which let a garrison freeze
+/// the meter for free (docs/phase3-spec.md §0's absorbing-state rule). A
+/// garrison should cost something (the supply/manpower it ties down) rather
+/// than being a free, permanent political shield.
+#[test]
+fn garrison_slows_but_does_not_stop_separatism() {
+    let occupier = FactionId(1);
+    let region_id = RegionId(0);
+
+    let build = |garrison: bool| {
+        let mut world = scenario::build_world();
+        world.region_mut(region_id).owner = occupier;
+
+        // Clear out whatever units the scenario started in this region so
+        // the only unit present (if any) is the garrison this test adds.
+        let capitals: Vec<RegionId> = world.factions.iter().map(|f| f.capital).collect();
+        for unit in world.units.iter_mut() {
+            if unit.station == Station::Region(region_id) {
+                unit.station = Station::Region(capitals[unit.owner.index()]);
+                unit.movement = None;
+            }
+        }
+        if garrison {
+            let id = crate::ids::UnitId(world.units.len() as u32);
+            world.units.push(military::Unit {
+                id,
+                owner: occupier,
+                name: "Test Garrison".to_string(),
+                station: Station::Region(region_id),
+                movement: None,
+                manpower: 1.0,
+                equipment: UNIT_EQUIPMENT,
+                organization: 100.0,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_station: Station::Region(region_id),
+                experience: 0.0,
+                alive: true,
+            });
+        }
+
+        world.faction_mut(occupier).group_support[Group::LocalGovernment.index()] =
+            SEPARATISM_THRESHOLD - 5.0;
+
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            politics::tick_separatism(&mut world, &mut events);
+        }
+        world.region(region_id).occupation
+    };
+
+    let no_garrison = build(false);
+    let garrisoned = build(true);
+
+    assert!(
+        no_garrison > 0.0,
+        "sanity: separatism should advance in an undefended region: {no_garrison}"
+    );
+    assert!(garrisoned > 0.0, "expected a garrison to slow separatism, not stop it: {garrisoned}");
+    assert!(
+        garrisoned < no_garrison,
+        "expected separatism to advance slower with a garrison present than with none: \
+         garrisoned={garrisoned} no_garrison={no_garrison}"
+    );
+}
+
+/// docs/phase3-spec.md "安定度の再定義": `stability` must always equal the
+/// influence-weighted average of `group_support`, not an independently
+/// tracked variable.
+#[test]
+fn stability_is_weighted_group_support() {
+    let mut world = scenario::build_world();
+    let casualties = vec![0.0f32; world.factions.len()];
+    let region_delta = vec![0i32; world.factions.len()];
+    let mut events = Vec::new();
+    politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+
+    for faction in &world.factions {
+        let expected: f32 = (0..GROUP_COUNT)
+            .map(|g| faction.group_influence[g] * faction.group_support[g])
+            .sum();
+        assert!(
+            (faction.stability - expected).abs() < 1e-3,
+            "stability should equal the influence-weighted average of group_support for \
+             faction {}: stability={}, expected={expected}",
+            faction.id.0,
+            faction.stability
+        );
+    }
 }

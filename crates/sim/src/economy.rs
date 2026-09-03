@@ -38,10 +38,11 @@
 //! 7. `Arms` is capped by what's left of the `Machinery` and `Steel` stock.
 
 use crate::balance::{
-    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
-    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP, CONSCRIPT_RATE,
-    MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL, MANPOWER_DEMOBILIZATION_RATE,
-    MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL, STEEL_INPUT_ENERGY,
+    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP,
+    CONSCRIPT_RATE, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL, MANPOWER_DEMOBILIZATION_RATE,
+    MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL, REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY,
+    STRIKE_OUTPUT_MULT,
 };
 use crate::good::{Good, ALL_GOODS, GOOD_COUNT};
 use crate::world::World;
@@ -107,9 +108,32 @@ pub fn tick_economy(world: &mut World) {
         let f = faction.id.index();
 
         let stability_mult = 0.6 + 0.4 * (faction.stability / 100.0);
+        // Stage 3A political events (docs/phase3-spec.md "政治イベント"):
+        // `Event::Strike` depresses every non-Food commodity's potential
+        // (a labor strike, not a farming one); `Event::RegimeChange`
+        // depresses every commodity including Food (the whole economy is
+        // disrupted, not just industry) for its own fixed duration. Both are
+        // read as a live "is the event's timer still running" check, not
+        // recomputed from group support here - `politics::tick_politics`
+        // owns triggering and counting them down.
+        let strike_mult = if faction.strike_days > 0 { STRIKE_OUTPUT_MULT } else { 1.0 };
+        let regime_change_mult = if faction.regime_change_days > 0 {
+            REGIME_CHANGE_OUTPUT_MULT
+        } else {
+            1.0
+        };
         let mut pot = potential[f];
-        for v in pot.iter_mut() {
-            *v *= stability_mult;
+        for (idx, v) in pot.iter_mut().enumerate() {
+            *v *= stability_mult * regime_change_mult;
+            if idx != Good::Food.index() {
+                *v *= strike_mult;
+            }
+        }
+        // `Event::CapitalFlight` narrows further: only Machinery output is
+        // hit (docs/phase3-spec.md: "建設速度と Machinery 生産に係数" -
+        // construction's own share is applied in `construction.rs`).
+        if faction.capital_flight_active {
+            pot[Good::Machinery.index()] *= CAPITAL_FLIGHT_MACHINERY_MULT;
         }
 
         let ration = faction.civilian_ration;
@@ -195,6 +219,18 @@ pub fn tick_economy(world: &mut World) {
             .min(input_limit(steel_budget_machinery, MACHINERY_INPUT_STEEL))
             .min(input_limit(energy_budget_machinery, MACHINERY_INPUT_ENERGY))
             .max(0.0);
+        // Stage 3A (docs/phase3-spec.md "生産（Machinery）が好調"): how much
+        // of what was actually achievable this tick (`pot[Machinery]`,
+        // already net of the stability/strike/regime-change/capital-flight
+        // multipliers above) the input-constrained chain actually delivered
+        // - `politics::tick_politics` reads this for Business's group-support
+        // target. `0.0` (not "no signal") when there's no potential to speak
+        // of, since a faction producing nothing has nothing to feel good about.
+        faction.machinery_output_ratio = if pot[Good::Machinery.index()] > 0.0 {
+            (actual_machinery / pot[Good::Machinery.index()]).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let actual_munitions = pot[Good::Munitions.index()]
             .min(input_limit(steel_budget_munitions, MUNITIONS_INPUT_STEEL))
             .min(input_limit(energy_budget_munitions, MUNITIONS_INPUT_ENERGY))

@@ -10,11 +10,13 @@ use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
     ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
-    CIVILIAN_FOOD_DEMAND_PER_POP, COMBAT_SUPPLY_MULT, MACHINERY_INPUT_STEEL,
-    MUNITIONS_INPUT_STEEL, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
+    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT, MACHINERY_INPUT_STEEL,
+    MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
+    STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
 };
 use archipelago_sim::construction::Project;
 use archipelago_sim::good::Good;
+use archipelago_sim::group::Group;
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use archipelago_sim::military::Unit;
 use archipelago_sim::naval;
@@ -126,6 +128,31 @@ const NAVY_MIN_FLEETS: f32 = 2.0;
 /// reserve.
 const NAVY_ENGAGE_MARGIN: f32 = 0.6;
 
+/// Stage 3A AI (docs/phase3-spec.md "AI" under "Stage 3A"): how far above a
+/// political event's own threshold (`STRIKE_THRESHOLD`/`PROTEST_THRESHOLD`/
+/// `MUTINY_THRESHOLD`/`REGIME_CHANGE_THRESHOLD`) the agent starts reacting -
+/// it eases off *before* the event actually fires, not after, since waiting
+/// for the event itself means the damage (a strike, a mutiny, a coup) has
+/// already landed.
+const POLITICAL_SUPPORT_MARGIN: f32 = 6.0;
+/// `conscription` ceiling the agent imposes once Labor or Citizens support
+/// is within `POLITICAL_SUPPORT_MARGIN` of triggering `Event::Strike`/
+/// `Event::Protest` - overrides whatever `set_policy`'s manpower-driven
+/// tiers would otherwise pick.
+const POLITICAL_CONSCRIPTION_CEILING: f32 = 0.3;
+/// `industry_priority` weight given to Munitions (the Arms-leaning side of
+/// the shared Steel/Energy budget - see `GROUP_ARMS_LEAN_*` in
+/// `balance.rs`) when Military support is under political pressure
+/// (Machinery gets `1.0 -` this).
+const POLITICAL_ARMS_LEAN_WEIGHT: f32 = 0.75;
+/// `offensive()`/`naval_ops()` `caution` multiplier applied when `stability`
+/// is within `POLITICAL_SUPPORT_MARGIN` of `REGIME_CHANGE_THRESHOLD`
+/// (docs/phase3-spec.md: "軍事行動より内政を優先する（攻勢の caution を一時
+/// 的に引き上げる）") - a higher `caution` makes the agent wait for a bigger
+/// force-ratio edge before committing to a new offensive, without touching
+/// units already under way.
+const POLITICAL_CAUTION_BOOST: f32 = 1.35;
+
 /// Decides for one faction every `period` days (offset by faction id so the
 /// three AIs don't all act on the same day), per mvp-spec.md §7.
 pub struct HeuristicAgent {
@@ -171,8 +198,20 @@ impl Agent for HeuristicAgent {
         recruit(self.faction, obs, &mut actions);
         naval_recruit(self.faction, obs, &mut actions);
         build(self.faction, obs, &mut actions);
-        offensive(self.faction, self.caution, obs, &mut actions);
-        naval_ops(self.faction, self.caution, obs, &mut actions);
+
+        // Stage 3A AI (docs/phase3-spec.md: "stability が REGIME_CHANGE_THRESHOLD
+        // に近いときは、軍事行動より内政を優先する"): raise the force-ratio
+        // bar for launching a *new* offensive when the government is close
+        // to falling, rather than spending what's left of its support on a
+        // war it might not survive to finish.
+        let stability = obs.world.faction(self.faction).stability;
+        let caution = if stability < REGIME_CHANGE_THRESHOLD + POLITICAL_SUPPORT_MARGIN {
+            self.caution * POLITICAL_CAUTION_BOOST
+        } else {
+            self.caution
+        };
+        offensive(self.faction, caution, obs, &mut actions);
+        naval_ops(self.faction, caution, obs, &mut actions);
 
         let already_moved: BTreeSet<UnitId> = actions
             .iter()
@@ -212,7 +251,7 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
     let manpower = f.manpower;
     let at_unit_cap = own_unit_count(obs, Domain::Land) as f32
         >= unit_cap(faction, obs) * STOP_CONSCRIPTION_UNIT_CAP_FRACTION;
-    let conscription = if manpower < 5.0 {
+    let conscription: f32 = if manpower < 5.0 {
         0.9
     } else if manpower > CONSCRIPTION_THROTTLE_MANPOWER {
         // A large pool with no unit-cap headroom left to spend it on is
@@ -223,6 +262,19 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
         if at_unit_cap { 0.0 } else { 0.15 }
     } else {
         0.6
+    };
+
+    // Stage 3A AI (docs/phase3-spec.md: "Labor か Citizens が閾値に近づいたら
+    // civilian_ration を戻し、conscription を下げる"): react before
+    // `Event::Strike`/`Event::Protest` actually fires, not after.
+    let labor_near = f.group_support[Group::Labor.index()] < STRIKE_THRESHOLD + POLITICAL_SUPPORT_MARGIN;
+    let citizens_near =
+        f.group_support[Group::Citizens.index()] < PROTEST_THRESHOLD + POLITICAL_SUPPORT_MARGIN;
+    let political_squeeze = labor_near || citizens_near;
+    let conscription = if political_squeeze {
+        conscription.min(POLITICAL_CONSCRIPTION_CEILING)
+    } else {
+        conscription
     };
     actions.push(Action::SetConscription(conscription));
 
@@ -251,7 +303,15 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
     let steel_limited_arms_days = f.stock[Good::Steel.index()] / ARMS_INPUT_STEEL;
     let arms_blocked_on_machinery = machinery_limited_arms_days < steel_limited_arms_days;
 
-    let (machinery_weight, munitions_weight) = if munitions_running_low {
+    // Stage 3A AI (docs/phase3-spec.md: "Military が低ければ Arms 寄りに
+    // industry_priority を振る"): a Military group nearing `Event::Mutiny`
+    // overrides the ordinary Munitions-stockpile/Machinery-bottleneck
+    // reasoning above - keeping the army happy takes priority over either.
+    let military_near =
+        f.group_support[Group::Military.index()] < MUTINY_THRESHOLD + POLITICAL_SUPPORT_MARGIN;
+    let (machinery_weight, munitions_weight) = if military_near {
+        (1.0 - POLITICAL_ARMS_LEAN_WEIGHT, POLITICAL_ARMS_LEAN_WEIGHT)
+    } else if munitions_running_low {
         (1.0 - MUNITIONS_FOCUSED_WEIGHT, MUNITIONS_FOCUSED_WEIGHT)
     } else if arms_blocked_on_machinery {
         (MACHINERY_FOCUSED_WEIGHT, 1.0 - MACHINERY_FOCUSED_WEIGHT)
@@ -273,6 +333,10 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
     } else {
         1.0
     };
+    // Stage 3A AI: restoring full rationing takes priority over the war
+    // economy's own appetite once Labor/Citizens support is under political
+    // pressure - the same override `conscription` above gets.
+    let ration = if political_squeeze { CIVILIAN_RATION_MAX } else { ration };
     actions.push(Action::SetCivilianRation(ration));
 }
 

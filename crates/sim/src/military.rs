@@ -5,15 +5,16 @@ use crate::balance::{
     ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
     CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE, DEVASTATION_PER_COMBAT_DAMAGE,
     EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, FLEET_MOVE_DAYS, MANPOWER_LOSS_PER_DAMAGE,
-    MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN, OCCUPATION_DECAY, OCCUPATION_RATE, ORG_DAMAGE_MULT,
-    ORG_MARCH_DRAIN, ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
-    UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN, WAR_SUPPORT_LOSS_PENALTY,
+    MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN, MUTINY_ORG_REGEN_MULT, OCCUPATION_DECAY,
+    OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN, ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR,
+    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN,
+    WAR_SUPPORT_LOSS_PENALTY,
 };
 use crate::event::Event;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::naval;
 use crate::rng::Rng;
-use crate::world::{Region, Station, Terrain, World};
+use crate::world::{OccupationKind, Region, Station, Terrain, World};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Movement {
@@ -334,6 +335,12 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
         manpower: f32,
     }
 
+    // Stage 3A (docs/phase3-spec.md "軍部の不服従": "全部隊の組織率回復に係
+    // 数"): read once per faction, keyed by index like `World::factions`, so
+    // `tick_recovery` doesn't need to know about `crate::group` at all -
+    // `politics::tick_politics` owns deciding whether mutiny is active.
+    let mutiny: Vec<bool> = world.factions.iter().map(|f| f.mutiny_active).collect();
+
     let mut deltas = Vec::new();
     for unit in &world.units {
         if !unit.alive {
@@ -356,7 +363,8 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
                 Station::Region(r) => world.region(r).effective_infrastructure(),
                 Station::Sea(_) => 1.0,
             };
-            organization += ORG_REGEN * (0.3 + 0.7 * unit.supply) * (0.6 + 0.4 * infra);
+            let mutiny_mult = if mutiny[unit.owner.index()] { MUTINY_ORG_REGEN_MULT } else { 1.0 };
+            organization += ORG_REGEN * (0.3 + 0.7 * unit.supply) * (0.6 + 0.4 * infra) * mutiny_mult;
         }
         if !is_fighting {
             morale += MORALE_REGEN * unit.supply;
@@ -527,27 +535,55 @@ pub fn tick_occupation(world: &mut World, events: &mut Vec<Event>) {
 
         if present.is_empty() || present.contains(&owner) {
             let region = world.region_mut(region_id);
-            region.occupation = (region.occupation - OCCUPATION_DECAY).max(0.0);
-            if region.occupation == 0.0 {
-                region.occupier = None;
+            // Stage 3A separatism (docs/phase3-spec.md "地方独立運動",
+            // `politics::tick_separatism`): a core-faction reversion in
+            // progress is a *political* drift, not "nobody is contesting
+            // this region" in the ordinary military sense decay here
+            // represents — it must not be eaten by that decay just because
+            // no foreign army is physically present (or only the owner's own
+            // garrison is), or a political force with no troops to send
+            // could never overcome it. External code review fix (Fix 2/3):
+            // recognized via `OccupationKind` rather than the structural
+            // `occupier == core != owner` check this used to use — that
+            // structural check couldn't tell a genuine separatist marker
+            // apart from a military occupier that happened to *also* be
+            // `core` (see `OccupationKind`'s doc), which let a real invasion
+            // by `core` silently inherit separatist progress instead of
+            // starting fresh below. `politics.rs` owns this region's
+            // occupation meter — including scaling its own rate down for a
+            // present owner garrison, see `politics::separatist_rate` — for
+            // as long as `occupation_kind` says `Separatist`.
+            let separatist_advance = region.occupation_kind == Some(OccupationKind::Separatist);
+            if !separatist_advance {
+                region.occupation = (region.occupation - OCCUPATION_DECAY).max(0.0);
+                if region.occupation == 0.0 {
+                    region.occupier = None;
+                    region.occupation_kind = None;
+                }
             }
             continue;
         }
 
         let occupier = present[0];
         let region = world.region_mut(region_id);
-        if region.occupier != Some(occupier) {
+        if region.occupier != Some(occupier) || region.occupation_kind != Some(OccupationKind::Military) {
             // A newly arrived occupier starts from zero: progress earned by
-            // a previous occupying faction must not carry over to this one.
+            // a previous occupying faction — or by political separatism
+            // drifting toward the same faction (External code review fix,
+            // Fix 2: an actual invading army must never get a head start off
+            // a political marker just because it happens to share the
+            // target faction) — must not carry over to this one.
             region.occupation = 0.0;
         }
         region.occupier = Some(occupier);
+        region.occupation_kind = Some(OccupationKind::Military);
         region.occupation += OCCUPATION_RATE;
 
         if region.occupation >= 100.0 {
             region.owner = occupier;
             region.occupation = 0.0;
             region.occupier = None;
+            region.occupation_kind = None;
             region.unrest += CAPTURE_UNREST;
             // A region changing hands is a war-damage spike of its own
             // (looting, sabotage, the fighting that won it) on top of

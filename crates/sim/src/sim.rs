@@ -77,6 +77,15 @@ impl Simulation {
         logistics::distribute_supply(&mut self.world);
         military::tick_movement(&mut self.world);
 
+        // Stage 3A (docs/phase3-spec.md "領土を得た"/"領土を失った"): snapshot
+        // each faction's owned-region count before occupation resolves so
+        // `politics::tick_politics` can see today's net territorial change.
+        // Only `military::tick_occupation` below can flip a region's owner
+        // within a single tick.
+        let region_count_before: Vec<usize> = (0..self.world.factions.len())
+            .map(|i| self.world.region_count(FactionId(i as u32)))
+            .collect();
+
         let land_report = military::tick_combat(&mut self.world, &mut self.rng, &mut events);
         let naval_report = naval::tick_naval_combat(&mut self.world, &mut self.rng, &mut events);
         // Stage 2D: land and naval combat resolve independently (different
@@ -98,7 +107,14 @@ impl Simulation {
 
         military::tick_recovery(&mut self.world, &fought, &mut events);
         military::tick_occupation(&mut self.world, &mut events);
-        politics::tick_politics(&mut self.world, &casualties);
+
+        let region_delta: Vec<i32> = (0..self.world.factions.len())
+            .map(|i| {
+                let after = self.world.region_count(FactionId(i as u32)) as i32;
+                after - region_count_before[i] as i32
+            })
+            .collect();
+        politics::tick_politics(&mut self.world, &casualties, &region_delta, &mut events);
         // Runs after politics so it sees today's freshly computed
         // unrest/stability, per the Stage 2B recovery formula.
         construction::tick_devastation_recovery(&mut self.world);

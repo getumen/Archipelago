@@ -33,6 +33,45 @@ pub enum Event {
     FactionEliminated {
         faction: FactionId,
     },
+    /// Stage 3A (docs/phase3-spec.md "政治イベント"): Labor support fell
+    /// below `balance::STRIKE_THRESHOLD`, depressing industrial output for
+    /// `balance::STRIKE_DAYS`.
+    Strike {
+        faction: FactionId,
+    },
+    /// Citizens support fell below `balance::PROTEST_THRESHOLD`: every
+    /// owned region's unrest target is elevated for as long as this holds.
+    Protest {
+        faction: FactionId,
+    },
+    /// Military support fell below `balance::MUTINY_THRESHOLD`: unit
+    /// organization recovery is reduced for as long as this holds.
+    Mutiny {
+        faction: FactionId,
+    },
+    /// Business support fell below `balance::CAPITAL_FLIGHT_THRESHOLD`:
+    /// construction throughput and Machinery output are reduced for as long
+    /// as this holds.
+    CapitalFlight {
+        faction: FactionId,
+    },
+    /// `stability` fell below `balance::REGIME_CHANGE_THRESHOLD`: policies
+    /// reset to their scenario defaults, war support and every group's
+    /// support reset to 50, and production is depressed for
+    /// `balance::REGIME_CHANGE_DAYS`. Territory, units and stock are
+    /// untouched (docs/phase3-spec.md "政権交代の扱い").
+    RegimeChange {
+        faction: FactionId,
+    },
+    /// `region`'s owner's LocalGovernment support fell below
+    /// `balance::SEPARATISM_THRESHOLD` while the region sat occupied
+    /// (`core != owner`) with no units present: it peacefully reverted from
+    /// `from` back to its original `to` (== `region`'s `core`).
+    Separatism {
+        region: RegionId,
+        from: FactionId,
+        to: FactionId,
+    },
 }
 
 impl fmt::Display for Event {
@@ -86,6 +125,30 @@ impl fmt::Display for Event {
             Event::FactionEliminated { faction } => {
                 write!(f, "faction {} eliminated", faction.0)
             }
+            Event::Strike { faction } => {
+                write!(f, "strike begins in faction {} (industrial output reduced)", faction.0)
+            }
+            Event::Protest { faction } => {
+                write!(f, "protests begin in faction {} (unrest rising)", faction.0)
+            }
+            Event::Mutiny { faction } => write!(
+                f,
+                "military insubordination in faction {} (organization recovery reduced)",
+                faction.0
+            ),
+            Event::CapitalFlight { faction } => write!(
+                f,
+                "capital flight in faction {} (construction and Machinery output reduced)",
+                faction.0
+            ),
+            Event::RegimeChange { faction } => {
+                write!(f, "regime change in faction {} (policies reset)", faction.0)
+            }
+            Event::Separatism { region, from, to } => write!(
+                f,
+                "region {} reverts from faction {} to faction {} via separatism",
+                region.0, from.0, to.0
+            ),
         }
     }
 }

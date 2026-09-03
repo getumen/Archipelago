@@ -10,6 +10,7 @@ pub mod construction;
 pub mod economy;
 pub mod event;
 pub mod good;
+pub mod group;
 pub mod ids;
 pub mod logistics;
 pub mod military;

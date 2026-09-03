@@ -131,9 +131,6 @@ pub const WAR_SUPPORT_CASUALTY_MULT: f32 = 5.0;
 pub const WAR_SUPPORT_CAPTURE_GAIN: f32 = 3.0;
 pub const WAR_SUPPORT_LOSS_PENALTY: f32 = 4.0;
 
-/// Daily rate at which `stability` closes the gap to its target value.
-pub const STABILITY_ADAPT_RATE: f32 = 0.02;
-
 /// Manpower floor below which a unit is considered destroyed.
 pub const UNIT_DEATH_MANPOWER: f32 = 0.05;
 /// Supply ratio below which unsupplied attrition kicks in.
@@ -282,6 +279,227 @@ pub const NAVAL_DAMAGE: f32 = 8.0;
 /// import on and off; a faction needs a clear majority of the zone's naval
 /// power to choke it.
 pub const BLOCKADE_CONTROL_THRESHOLD: f32 = 0.6;
+
+// ---------------------------------------------------------------------------
+// Stage 3A — 国内政治勢力 (docs/phase3-spec.md "Stage 3A"): the seven
+// `Group`s' support, `stability`'s redefinition as their influence-weighted
+// average, and the six political events. Every situational contribution
+// below is a *bounded* term added to a group's target support, never a raw
+// accumulation onto `support` itself — the same target-approach discipline
+// `UNREST_ADAPT_RATE` already established, now applied to something with
+// far more simultaneous inputs.
+// ---------------------------------------------------------------------------
+
+/// Daily rate at which each `Faction::group_support[g]` closes the gap to
+/// its freshly recomputed target (`politics::tick_politics`) — the same
+/// target-approach shape as `UNREST_ADAPT_RATE`, so a
+/// group's support can always recover once the pressure driving it down
+/// eases, and never pins at 0 or 100 the way a raw accumulator would.
+pub const GROUP_ADAPT_RATE: f32 = 0.04;
+
+/// The target every group's support gravitates to before any situational
+/// contribution is added (docs/phase3-spec.md "支持の更新": `target[g] = 50 +
+/// Σ...`). Also `Faction::stability`'s value immediately after
+/// `Event::RegimeChange` resets every group to this baseline (a uniform
+/// reset makes the influence-weighted `stability` land exactly here too,
+/// since `Faction::group_influence` always sums to 1.0).
+pub const GROUP_SUPPORT_BASELINE: f32 = 50.0;
+
+/// `conscription` (0..1) contribution: Military gains, Labor and Citizens
+/// lose, scaled linearly by the policy's own value.
+pub const GROUP_CONSCRIPTION_MILITARY_BONUS: f32 = 12.0;
+pub const GROUP_CONSCRIPTION_LABOR_PENALTY: f32 = 8.0;
+pub const GROUP_CONSCRIPTION_CITIZENS_PENALTY: f32 = 6.0;
+
+/// `civilian_ration` being low (docs/phase3-spec.md: "civilian_ration が低
+/// い") contribution, driven by how far the ration sits below
+/// `CIVILIAN_RATION_MAX` relative to its full `CIVILIAN_RATION_MIN..MAX`
+/// range (0 at full ration, 1 at the floor) — Military gains, Citizens lose
+/// heavily (the spec's "−−"), Labor loses moderately.
+pub const GROUP_RATION_MILITARY_BONUS: f32 = 8.0;
+pub const GROUP_RATION_CITIZENS_PENALTY: f32 = 16.0;
+pub const GROUP_RATION_LABOR_PENALTY: f32 = 6.0;
+
+/// `industry_priority` leaning toward war matériel (docs/phase3-spec.md:
+/// "industry_priority が Arms 寄り"). `industry_priority` has no direct
+/// `Arms` weight to read (Arms output is capped by leftover Machinery/Steel
+/// stock, not a contended input share — see `economy::tick_economy`), so
+/// this reads the closest real signal: how much more of the shared Steel/
+/// Energy budget is steered toward `Munitions` (war matériel) than toward
+/// `Machinery` (civilian/industrial goods), clamped to `0..1` since only a
+/// *positive* lean toward war production should count. Military and
+/// Business gain, Citizens lose.
+pub const GROUP_ARMS_LEAN_MILITARY_BONUS: f32 = 6.0;
+pub const GROUP_ARMS_LEAN_BUSINESS_BONUS: f32 = 5.0;
+pub const GROUP_ARMS_LEAN_CITIZENS_PENALTY: f32 = 5.0;
+
+/// `Faction::shortage` (0..1) contribution: Citizens lose heavily (the
+/// spec's "−−"), Labor and Government lose moderately.
+pub const GROUP_SHORTAGE_CITIZENS_PENALTY: f32 = 20.0;
+pub const GROUP_SHORTAGE_LABOR_PENALTY: f32 = 10.0;
+pub const GROUP_SHORTAGE_GOVERNMENT_PENALTY: f32 = 8.0;
+
+/// Average owned-region `unrest` (0..100, read as a `0..1` fraction)
+/// contribution: LocalGovernment loses heavily (the spec's "−−", it answers
+/// for local order directly), Government loses moderately.
+pub const GROUP_UNREST_LOCALGOV_PENALTY: f32 = 22.0;
+pub const GROUP_UNREST_GOVERNMENT_PENALTY: f32 = 10.0;
+
+/// Average owned-region `devastation` (0..1) contribution: LocalGovernment
+/// and Business both lose — war damage is a local-administration and an
+/// economic problem before it's a national-government one.
+pub const GROUP_DEVASTATION_LOCALGOV_PENALTY: f32 = 10.0;
+pub const GROUP_DEVASTATION_BUSINESS_PENALTY: f32 = 12.0;
+
+/// Normalizer for the day's manpower casualties (docs/phase3-spec.md: "そ
+/// の日の戦死が多い"), in the same 万人/day units `WAR_SUPPORT_CASUALTY_MULT`
+/// already uses — the daily loss that maxes out this contribution's `0..1`
+/// factor. Set to half a fresh unit's full `UNIT_MANPOWER` (1.0) so a single
+/// hard-fought battle's losses are already a meaningful jolt, not something
+/// that needs a multi-unit wipeout to register.
+pub const GROUP_CASUALTY_NORM: f32 = 0.5;
+pub const GROUP_CASUALTY_MILITARY_PENALTY: f32 = 10.0;
+pub const GROUP_CASUALTY_CITIZENS_PENALTY: f32 = 8.0;
+pub const GROUP_CASUALTY_GOVERNMENT_PENALTY: f32 = 6.0;
+
+/// Normalizer for the day's net region-count change (docs/phase3-spec.md:
+/// "領土を得た"/"領土を失った"): the single-region flip that already maxes
+/// out the `0..1` gain/loss factor — territory rarely changes hands faster
+/// than one region at a time in a single tick, so this is a ceiling, not a
+/// typical case.
+pub const GROUP_TERRITORY_DELTA_CAP: f32 = 1.0;
+pub const GROUP_TERRITORY_GAIN_MILITARY_BONUS: f32 = 6.0;
+pub const GROUP_TERRITORY_GAIN_GOVERNMENT_BONUS: f32 = 6.0;
+pub const GROUP_TERRITORY_LOSS_MILITARY_PENALTY: f32 = 8.0;
+/// The spec's "−−" for a territorial loss: Government answers for losing
+/// ground more harshly than Military does.
+pub const GROUP_TERRITORY_LOSS_GOVERNMENT_PENALTY: f32 = 14.0;
+
+/// `stock[Arms]` being ample (docs/phase3-spec.md: "stock[Arms] が潤沢")
+/// contribution: normalized against a multiple of `UNIT_EQUIPMENT` (a full
+/// unit's equipment draw) so the term reads as "how many fresh units' worth
+/// of Arms are sitting in reserve," capped at `0..1`.
+pub const GROUP_ARMS_STOCK_MARGIN: f32 = 3.0;
+pub const GROUP_ARMS_STOCK_MILITARY_BONUS: f32 = 6.0;
+
+/// Machinery production running well (docs/phase3-spec.md: "生産（Machinery）
+/// が好調") contribution: `Faction::machinery_output_ratio` (today's actual
+/// Machinery output over its input-unconstrained potential, already `0..1`)
+/// scaled straight through — Business gains when the chain isn't
+/// input-starved.
+pub const GROUP_MACHINERY_GOOD_BUSINESS_BONUS: f32 = 6.0;
+
+/// Stage 3A political events (docs/phase3-spec.md "政治イベント"): support
+/// thresholds below which each event triggers, and the effect sizes/
+/// durations each one applies. Every one of these is designed to be
+/// recoverable — a live condition re-evaluated every tick (Protest, Mutiny,
+/// CapitalFlight, Separatism) ends the instant support crosses back above
+/// threshold, and a fixed-duration event (Strike, RegimeChange) always ends
+/// on its own after its day count, even if it can start again right after.
+
+/// Labor support threshold for `Event::Strike`.
+pub const STRIKE_THRESHOLD: f32 = 38.0;
+/// Fixed duration `Event::Strike` depresses industrial output for, once
+/// triggered — a real strike doesn't end the instant Labor support ticks
+/// back over the threshold; it runs its course.
+pub const STRIKE_DAYS: u32 = 15;
+/// Multiplier applied to every non-`Food` commodity's potential output
+/// while a strike is active (`economy::tick_economy`) — `Food` is exempted
+/// because a labor strike is an industrial-workforce action, not a farming
+/// one.
+pub const STRIKE_OUTPUT_MULT: f32 = 0.7;
+
+/// Citizens support threshold for `Event::Protest`.
+pub const PROTEST_THRESHOLD: f32 = 38.0;
+/// Extra unrest-target pressure (`politics::tick_politics`, same units as
+/// `UNREST_SHORTAGE_PRESSURE`/`UNREST_SUPPLY_PRESSURE`) applied to every
+/// region a faction under active protest owns, for as long as Citizens
+/// support stays below `PROTEST_THRESHOLD`.
+pub const PROTEST_UNREST_BONUS: f32 = 15.0;
+
+/// Military support threshold for `Event::Mutiny`.
+pub const MUTINY_THRESHOLD: f32 = 32.0;
+/// Multiplier applied to `ORG_REGEN` (`military::tick_recovery`) for every
+/// unit owned by a faction under active mutiny, for as long as Military
+/// support stays below `MUTINY_THRESHOLD`.
+pub const MUTINY_ORG_REGEN_MULT: f32 = 0.4;
+
+/// Business support threshold for `Event::CapitalFlight`.
+pub const CAPITAL_FLIGHT_THRESHOLD: f32 = 32.0;
+/// Multiplier applied to a faction's construction throughput
+/// (`construction::tick_construction`) while capital flight is active.
+pub const CAPITAL_FLIGHT_CONSTRUCTION_MULT: f32 = 0.5;
+/// Multiplier applied to Machinery's potential output
+/// (`economy::tick_economy`) while capital flight is active.
+pub const CAPITAL_FLIGHT_MACHINERY_MULT: f32 = 0.7;
+
+/// `stability` threshold for `Event::RegimeChange`.
+pub const REGIME_CHANGE_THRESHOLD: f32 = 40.0;
+/// Fixed duration the post-coup production disruption lasts, and the
+/// cooldown before a *new* regime change can trigger for the same faction —
+/// consecutive collapses are possible if the underlying squeeze continues,
+/// but never faster than once every `REGIME_CHANGE_DAYS`.
+pub const REGIME_CHANGE_DAYS: u32 = 30;
+/// Multiplier applied to *every* commodity's potential output (including
+/// `Food` — unlike `STRIKE_OUTPUT_MULT`, a change of government disrupts the
+/// whole economy, not just industrial labor) while the post-coup disruption
+/// is in effect.
+pub const REGIME_CHANGE_OUTPUT_MULT: f32 = 0.75;
+
+/// LocalGovernment support threshold for `Event::Separatism` (checked
+/// against the *occupying* faction's own LocalGovernment support, for each
+/// region it holds where `core != owner`).
+pub const SEPARATISM_THRESHOLD: f32 = 42.0;
+/// Daily progress (docs/phase3-spec.md: "occupation が core 勢力に向かって進
+/// む"), added to `Region::occupation` toward reverting to `Region::core`,
+/// while separatism is active in an occupied region with no units of any
+/// faction physically present (see `politics::tick_separatism`). Kept below
+/// `OCCUPATION_RATE` — this is a political drift, not a military conquest.
+pub const SEPARATISM_RATE: f32 = 4.0;
+/// Daily recovery of that same progress once LocalGovernment support climbs
+/// back above `SEPARATISM_THRESHOLD` — the same recoverability every other
+/// Stage 3A event guarantees.
+pub const SEPARATISM_DECAY: f32 = 4.0;
+
+/// External code review fix (Stage 3A, Fix 2/3): a garrison the owner keeps
+/// stationed in a region under active separatism no longer vetoes the drift
+/// outright (the old behaviour let holding *any* garrison there freeze the
+/// meter completely, which — combined with Fix 3's playtested absorbing
+/// state, docs/phase3-spec.md §0 — meant an over-extended faction could hold
+/// a hostile, starving region forever for free). Instead
+/// `politics::tick_separatism` scales `SEPARATISM_RATE` down by how strong
+/// that garrison is *relative to the region's population and unrest* — a
+/// small garrison in a big, restless region barely slows the drift; a large
+/// one in a small, calm region can suppress it close to (but never all the
+/// way to) a standstill. `garrison_power` is the owner's own units'
+/// `combat_power()` summed in the region (zero when none are present, which
+/// is exactly the old fully-unsuppressed case: `SEPARATISM_GARRISON_POP_NORM`
+/// and the unrest term below both multiply a zero garrison to zero
+/// suppression, so `separatist_returns_occupied_region`'s no-garrison timing
+/// is unchanged).
+///
+/// `suppression = (garrison_power / (population * (1 +
+/// unrest/100 * SEPARATISM_UNREST_GARRISON_MULT) * SEPARATISM_GARRISON_POP_NORM))
+/// .clamp(0, SEPARATISM_GARRISON_MAX_SUPPRESSION)`, and the effective daily
+/// rate is `SEPARATISM_RATE * (1 - suppression)`. Sized so a couple of
+/// full-strength units (`combat_power` on the order of 0.5-1.0 each) meaningfully
+/// suppress separatism in one of the map's smaller regions (population in the
+/// low hundreds) but barely register against one of its largest urban
+/// centers (population in the thousands) — holding down a big, hostile
+/// population takes a correspondingly bigger garrison, with the manpower/
+/// supply cost that implies (design.md §9's trade-off, not a free lever).
+pub const SEPARATISM_GARRISON_POP_NORM: f32 = 0.002;
+/// How much each point of regional `unrest` (0..100) raises the effective
+/// population a garrison must suppress, at `unrest == 100` scaling it up by
+/// this fraction (docs/phase3-spec.md's target-approach discipline: a
+/// restless population is harder to hold down than a calm one of the same
+/// size).
+pub const SEPARATISM_UNREST_GARRISON_MULT: f32 = 1.0;
+/// Ceiling on how much a garrison can suppress the separatist drift rate —
+/// never 1.0, so holding a region against separatism is always eventually
+/// contested by *something*, per Fix 3's "slow, not stop" mandate and the
+/// project's standing rule against absorbing states (docs/phase3-spec.md §0).
+pub const SEPARATISM_GARRISON_MAX_SUPPRESSION: f32 = 0.85;
 
 /// External code review fix (Stage 2D): floor on `naval::strait_factor`
 /// (`1 - enemy_control_max`) when it is applied to a crossing's per-tick

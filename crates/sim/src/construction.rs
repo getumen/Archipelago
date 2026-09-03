@@ -7,8 +7,8 @@
 //! `military::tick_occupation`).
 
 use crate::balance::{
-    CAPACITY_STEP, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
-    CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_REQUIRED_INFRASTRUCTURE,
+    CAPACITY_STEP, CAPITAL_FLIGHT_CONSTRUCTION_MULT, CONSTRUCTION_MACHINERY_PER_POINT,
+    CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_REQUIRED_INFRASTRUCTURE,
     CONSTRUCTION_REQUIRED_PORT, CONSTRUCTION_REQUIRED_REPAIR, CONSTRUCTION_STEEL_PER_POINT,
     DEVASTATION_RECOVERY, INFRA_STEP, PORT_STEP, REPAIR_STEP,
 };
@@ -72,12 +72,21 @@ pub fn tick_construction(world: &mut World) {
         };
         let owner = world.regions[i].owner;
 
+        // Stage 3A (docs/phase3-spec.md "資本逃避": "建設速度と Machinery 生
+        // 産に係数"): a faction under active capital flight builds slower -
+        // read before the mutable borrow below.
+        let rate = if world.faction(owner).capital_flight_active {
+            CONSTRUCTION_RATE * CAPITAL_FLIGHT_CONSTRUCTION_MULT
+        } else {
+            CONSTRUCTION_RATE
+        };
+
         // Cap the attempted progress at what's actually left to invest, so a
         // completing tick doesn't buy (and pay for) more than the project
         // needs — its total cost must equal `required *
         // CONSTRUCTION_*_PER_POINT` exactly, regardless of how progress was
         // spread across ticks.
-        let attempted = CONSTRUCTION_RATE.min(constr.required - constr.invested);
+        let attempted = rate.min(constr.required - constr.invested);
         let machinery_cost = attempted * CONSTRUCTION_MACHINERY_PER_POINT;
         let steel_cost = attempted * CONSTRUCTION_STEEL_PER_POINT;
 

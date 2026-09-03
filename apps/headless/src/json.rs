@@ -5,6 +5,7 @@
 
 use archipelago_sim::construction::{Construction, Project};
 use archipelago_sim::good::ALL_GOODS;
+use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::{Domain, Station, World};
 
@@ -12,6 +13,16 @@ use archipelago_sim::world::{Domain, Station, World};
 /// `Good::key()`, e.g. `{"food":1.0,"energy":2.0,...}`.
 fn good_object(values: &[f32]) -> String {
     let items: Vec<String> = ALL_GOODS
+        .iter()
+        .map(|g| format!("{}:{}", string(g.key()), number(values[g.index()])))
+        .collect();
+    format!("{{{}}}", items.join(","))
+}
+
+/// Renders a `[f32; GROUP_COUNT]`-shaped array as a JSON object keyed by
+/// `Group::key()` (Stage 3A), e.g. `{"government":60.0,...}`.
+fn group_object(values: &[f32]) -> String {
+    let items: Vec<String> = ALL_GROUPS
         .iter()
         .map(|g| format!("{}:{}", string(g.key()), number(values[g.index()])))
         .collect();
@@ -110,7 +121,7 @@ fn serialize_factions(world: &World) -> String {
                 .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Sea)
                 .count();
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
@@ -129,6 +140,13 @@ fn serialize_factions(world: &World) -> String {
                 number(f.supply_ratio),
                 good_object(&f.import_plan),
                 good_object(&f.logistics_priority),
+                group_object(&f.group_support),
+                group_object(&f.group_influence),
+                f.strike_days,
+                f.regime_change_days,
+                f.protest_active,
+                f.mutiny_active,
+                f.capital_flight_active,
             )
         })
         .collect();

@@ -5,6 +5,7 @@
 
 use archipelago_sim::event::Event;
 use archipelago_sim::good::{Good, ALL_GOODS};
+use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::{Domain, Station, World};
 
@@ -76,6 +77,29 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
         Event::FactionEliminated { faction } => {
             format!("敗北: {} が全領土を失い脱落", world.faction(*faction).name)
         }
+        Event::Strike { faction } => {
+            format!("ストライキ: {} で労働者がストライキ開始 (工業生産低下)", world.faction(*faction).name)
+        }
+        Event::Protest { faction } => {
+            format!("デモ: {} で市民デモが拡大 (治安悪化)", world.faction(*faction).name)
+        }
+        Event::Mutiny { faction } => {
+            format!("軍部不服従: {} で軍の統制が乱れる (組織率回復低下)", world.faction(*faction).name)
+        }
+        Event::CapitalFlight { faction } => format!(
+            "資本逃避: {} で資本が流出 (建設・機械生産低下)",
+            world.faction(*faction).name
+        ),
+        Event::RegimeChange { faction } => format!(
+            "政権交代: {} で政権が崩壊、政策が既定値に戻る",
+            world.faction(*faction).name
+        ),
+        Event::Separatism { region, from, to } => format!(
+            "地方独立運動: {} が {} から {} へ復帰",
+            world.region(*region).name,
+            world.faction(*from).name,
+            world.faction(*to).name
+        ),
     };
     println!("[day {day:4}] {line}");
 }
@@ -118,6 +142,14 @@ pub fn print_faction_table(world: &World) {
             .map(|g| format!("{}={:.1}", g.label(), faction.stock[g.index()]))
             .collect();
         println!("  {}  在庫: {}", pad_right("", 8), stock_line.join(" "));
+
+        // Stage 3A (docs/phase3-spec.md "Stage 3A"): support for each of the
+        // seven domestic political groups.
+        let group_line: Vec<String> = ALL_GROUPS
+            .iter()
+            .map(|g| format!("{}={:.1}", g.label(), faction.group_support[g.index()]))
+            .collect();
+        println!("  {}  支持: {}", pad_right("", 8), group_line.join(" "));
 
         // Stage 2C (docs/phase2-spec.md "Stage 2C"): import plan (what the
         // faction is asking to bring in) and the total actually landed

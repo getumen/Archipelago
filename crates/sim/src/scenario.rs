@@ -5,6 +5,7 @@
 //! Kanto/Tokai are the nation's Machinery hub and losing them chokes Arms.
 
 use crate::good::GOOD_COUNT;
+use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::military::Unit;
 use crate::world::{Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, World};
@@ -94,22 +95,36 @@ const FACTION_MANPOWER: f32 = 12.0;
 /// `supplies`/`equipment` starting values; the upstream goods start with a
 /// modest buffer so the chain isn't starved on day one.
 const FACTION_STOCK: [f32; GOOD_COUNT] = [200.0, 100.0, 80.0, 40.0, 400.0, 250.0];
-const FACTION_CONSCRIPTION: f32 = 0.5;
+/// `pub(crate)`, not private: Stage 3A regime change
+/// (`politics::apply_political_events`, docs/phase3-spec.md "政権交代の扱
+/// い") resets a faction's policy back to exactly these same starting
+/// values rather than duplicating them as separate balance constants that
+/// could drift out of sync with what a fresh faction actually starts at.
+pub(crate) const FACTION_CONSCRIPTION: f32 = 0.5;
 /// Initial industry priority: an even three-way split of Energy between
 /// Steel, Machinery and Munitions, and an even split of Steel between
 /// Machinery and Munitions - the goods that contend for shared Energy/Steel
 /// input in Stage 2A (see `economy::tick_economy`).
-const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.5, 0.5, 0.5, 0.0];
+pub(crate) const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.5, 0.5, 0.5, 0.0];
 /// Initial import plan (Stage 2C): no imports requested until an agent or
 /// player sets one via `Action::SetImportPlan`.
-const FACTION_IMPORT_PLAN: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+pub(crate) const FACTION_IMPORT_PLAN: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 /// Initial logistics priority (Stage 2C): an even split of the shared
 /// regional throughput between Munitions and Arms delivery, the same
 /// even-split convention `FACTION_INDUSTRY_PRIORITY` uses for its contended
 /// inputs.
-const FACTION_LOGISTICS_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.5, 0.5];
+pub(crate) const FACTION_LOGISTICS_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.5, 0.5];
 const FACTION_WAR_SUPPORT: f32 = 60.0;
 const FACTION_STABILITY: f32 = 80.0;
+/// Stage 3A (docs/phase3-spec.md "Stage 3A": "初期値は全勢力共通で支持 60"):
+/// every `Group` starts at the same support level regardless of influence.
+const FACTION_GROUP_SUPPORT: [f32; GROUP_COUNT] = [60.0; GROUP_COUNT];
+/// Stage 3A fixed influence weights, in `Group::index()` order (Government,
+/// LocalGovernment, Bureaucracy, Military, Business, Labor, Citizens) per
+/// docs/phase3-spec.md's "初期値は... 影響力は Government 0.20 /
+/// LocalGovernment 0.10 / Bureaucracy 0.10 / Military 0.20 / Business 0.15 /
+/// Labor 0.10 / Citizens 0.15" — sums to exactly `1.0`.
+const FACTION_GROUP_INFLUENCE: [f32; GROUP_COUNT] = [0.20, 0.10, 0.10, 0.20, 0.15, 0.10, 0.15];
 
 const UNITS_PER_FACTION: usize = 3;
 
@@ -141,6 +156,7 @@ pub fn build_world() -> World {
             unrest: 0.0,
             occupation: 0.0,
             occupier: None,
+            occupation_kind: None,
             links: Vec::new(),
             devastation: 0.0,
             construction: None,
@@ -193,6 +209,14 @@ pub fn build_world() -> World {
             supply_ratio: 1.0,
             import_plan: FACTION_IMPORT_PLAN,
             logistics_priority: FACTION_LOGISTICS_PRIORITY,
+            group_support: FACTION_GROUP_SUPPORT,
+            group_influence: FACTION_GROUP_INFLUENCE,
+            machinery_output_ratio: 0.0,
+            strike_days: 0,
+            regime_change_days: 0,
+            protest_active: false,
+            mutiny_active: false,
+            capital_flight_active: false,
             alive: true,
         })
         .collect();

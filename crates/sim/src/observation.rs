@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 
 use crate::good::GOOD_COUNT;
+use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::world::World;
 
@@ -19,8 +20,9 @@ pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2 + 2;
 pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 
 /// Faction-scalar field count in `Observation::encode()`: `manpower`,
-/// `stock[GOOD_COUNT]`, `war_support`, `stability`, `unit_count`.
-pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT;
+/// `stock[GOOD_COUNT]`, `war_support`, `stability`,
+/// `group_support[GROUP_COUNT]` (Stage 3A), `unit_count`.
+pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT;
 
 /// Fixed total length of `Observation::encode()`'s output for the MVP map
 /// (`scenario::REGION_COUNT` regions, `scenario::SEA_ZONE_COUNT` sea zones).
@@ -132,7 +134,8 @@ impl<'a> Observation<'a> {
     /// construction_progress, import_flow, node_throughput]`, then
     /// per-sea-zone (Stage 2D) `[own_control, enemy_control_max, own_power,
     /// enemy_power]`, then faction scalars `[manpower, stock[GOOD_COUNT]...,
-    /// war_support, stability, unit_count]`. `construction_progress` is
+    /// war_support, stability, group_support[GROUP_COUNT]..., unit_count]`
+    /// (Stage 3A adds `group_support`). `construction_progress` is
     /// `invested / required` in `0..=1`, or `0.0` when no project is in
     /// progress. `import_flow`/`node_throughput` are Stage 2C's per-port
     /// import volume and per-node supply throughput cap
@@ -173,6 +176,9 @@ impl<'a> Observation<'a> {
         }
         out.push(faction.war_support);
         out.push(faction.stability);
+        for g in 0..GROUP_COUNT {
+            out.push(faction.group_support[g]);
+        }
         out.push(self.own_units().len() as f32);
         debug_assert_eq!(out.len(), ENCODING_LEN);
         out
