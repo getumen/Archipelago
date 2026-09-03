@@ -1,0 +1,5 @@
+# Only needed to run python/tests/ - not a runtime dependency of env/
+# itself (that stays pinned to gymnasium + numpy in requirements.txt, per
+# docs/phase5-spec.md "Stage 5B" -> "依存は gymnasium と numpy のみ").
+-r requirements.txt
+pytest==9.1.1
