@@ -5,11 +5,12 @@ use crate::balance::{
     CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
     CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
     CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR,
-    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS,
-    STRIKE_OUTPUT_MULT, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
+    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE,
+    SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, TREATY_ACCEPT_OPINION_BONUS,
+    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
 };
 use crate::construction::{self, Construction, Project};
-use crate::diplomacy::{self, Treaty};
+use crate::diplomacy::{self, Treaty, TreatyTerm};
 use crate::economy;
 use crate::event::Event;
 use crate::focus::{self, NationalFocus};
@@ -3577,3 +3578,297 @@ fn rapid_focus_switching_gains_no_advantage() {
     assert_eq!(focus::active(world_single.faction(f)), Some(NationalFocus::Technocracy));
 }
 
+
+/// Stage 4B (docs/phase4-spec.md "Stage 4B の受け入れ基準":
+/// "llm_cannot_bypass_treaty_validation"): an interpretation that says
+/// "accept" is not the same thing as the deal taking effect - every
+/// `TreatyTerm` is re-validated against the *current* board regardless of
+/// what the recipient's agent (LLM or otherwise) decided, exactly the way
+/// `apply_accept_treaty` already revalidates a treaty proposal. Covers both
+/// of the spec's own example shapes: a region that doesn't exist at all, and
+/// one that exists but the proposer doesn't own.
+#[test]
+fn llm_cannot_bypass_treaty_validation() {
+    // Shape 1: cede a region id that is out of range entirely.
+    {
+        let mut world = scenario::build_world();
+        let a = FactionId(0);
+        let b = FactionId(1);
+        action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+            to: b,
+            text: "give me your land".to_string(),
+        })
+        .unwrap();
+
+        let owners_before: Vec<FactionId> = world.regions.iter().map(|r| r.owner).collect();
+        let result = action::apply_action(
+            &mut world,
+            b,
+            Action::RespondToNaturalLanguageProposal {
+                from: a,
+                terms: vec![TreatyTerm::Cede { region: RegionId(9_999) }],
+                accept: true,
+            },
+        );
+        assert_eq!(result, Ok(()), "answering a proposal is itself always a well-formed action");
+        let owners_after: Vec<FactionId> = world.regions.iter().map(|r| r.owner).collect();
+        assert_eq!(
+            owners_before, owners_after,
+            "a term naming a nonexistent region must never change the board, even though the \
+             recipient's interpretation said \"accept\""
+        );
+        assert!(
+            world.diplomacy.find_pending_nl(a, b).is_none(),
+            "the proposal must still be consumed even though the deal didn't take effect"
+        );
+    }
+
+    // Shape 2: cede a region that exists, but the proposer doesn't own.
+    {
+        let mut world = scenario::build_world();
+        let a = FactionId(0); // owns regions 0..=3
+        let b = FactionId(1);
+        let not_owned_by_a = RegionId(4); // owned by faction 1, not faction 0
+        assert_ne!(world.region(not_owned_by_a).owner, a);
+
+        action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+            to: b,
+            text: "I'll cede land I don't actually hold".to_string(),
+        })
+        .unwrap();
+
+        let owner_before = world.region(not_owned_by_a).owner;
+        action::apply_action(
+            &mut world,
+            b,
+            Action::RespondToNaturalLanguageProposal {
+                from: a,
+                terms: vec![TreatyTerm::Cede { region: not_owned_by_a }],
+                accept: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            world.region(not_owned_by_a).owner, owner_before,
+            "a term ceding a region the proposer doesn't own must never change its owner"
+        );
+    }
+}
+
+/// External code review fix (`apply_treaty_terms`'s doc: batch validation
+/// must be cumulative, not "validate every term against the unchanged world,
+/// then apply them all"): two `Deliver` terms that each individually fit
+/// inside the proposer's stock, but together overdraw it, must be rejected
+/// as a whole - never partially applied, and never allowed to drive the
+/// stock negative.
+#[test]
+fn duplicate_deliver_terms_cannot_overdraw_stock() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+    world.faction_mut(a).stock[Good::Steel.index()] = 100.0;
+    let stock_before_a = world.faction(a).stock[Good::Steel.index()];
+    let stock_before_b = world.faction(b).stock[Good::Steel.index()];
+
+    action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+        to: b,
+        text: "here, take some steel".to_string(),
+    })
+    .unwrap();
+
+    let result = action::apply_action(
+        &mut world,
+        b,
+        Action::RespondToNaturalLanguageProposal {
+            from: a,
+            terms: vec![
+                TreatyTerm::Deliver { good: Good::Steel, amount: 75.0 },
+                TreatyTerm::Deliver { good: Good::Steel, amount: 75.0 },
+            ],
+            accept: true,
+        },
+    );
+    assert_eq!(result, Ok(()), "answering a proposal is itself always a well-formed action");
+    assert_eq!(
+        world.faction(a).stock[Good::Steel.index()], stock_before_a,
+        "two Delivers that each individually fit but together overdraw the proposer's stock must \
+         leave the stock completely unchanged, never negative and never partially spent"
+    );
+    assert_eq!(
+        world.faction(b).stock[Good::Steel.index()], stock_before_b,
+        "the recipient must not receive anything from a batch that was rejected as a whole"
+    );
+}
+
+/// External code review fix: an exact duplicate `Sign(treaty)` term in one
+/// response must not pay `TREATY_ACCEPT_OPINION_BONUS` twice for a single
+/// signing - see `apply_treaty_terms`'s doc on why `Sign` is deduplicated
+/// (idempotent, like re-proposing an already-pending treaty) rather than
+/// treated as a second concession.
+#[test]
+fn duplicate_sign_terms_pay_bonus_once() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+    action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+        to: b,
+        text: "let's have peace".to_string(),
+    })
+    .unwrap();
+
+    let opinion_before_ab = world.diplomacy.opinion(a, b);
+    let opinion_before_ba = world.diplomacy.opinion(b, a);
+    action::apply_action(&mut world, b, Action::RespondToNaturalLanguageProposal {
+        from: a,
+        terms: vec![TreatyTerm::Sign(Treaty::Ceasefire), TreatyTerm::Sign(Treaty::Ceasefire)],
+        accept: true,
+    })
+    .unwrap();
+
+    assert_eq!(
+        world.diplomacy.stance(a, b),
+        crate::diplomacy::Stance::Ceasefire,
+        "the treaty should still take effect exactly once"
+    );
+    assert_eq!(
+        world.diplomacy.opinion(a, b), opinion_before_ab + TREATY_ACCEPT_OPINION_BONUS,
+        "a duplicated Sign term in one response must pay the acceptance bonus exactly once, not twice"
+    );
+    assert_eq!(
+        world.diplomacy.opinion(b, a), opinion_before_ba + TREATY_ACCEPT_OPINION_BONUS,
+        "the bonus must be paid exactly once on the other side too"
+    );
+}
+
+/// External code review fix: a batch mixing one otherwise-valid term with
+/// one genuinely infeasible term must change nothing at all - not even the
+/// valid term applies. The same all-or-nothing guarantee
+/// `llm_cannot_bypass_treaty_validation` checks for a single bad term,
+/// extended to a mixed batch to confirm cumulative validation doesn't let a
+/// later failure leave an earlier term's effects in place.
+#[test]
+fn conflicting_terms_are_rejected_atomically() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0); // owns regions 0..=3
+    let b = FactionId(1);
+    let not_owned_by_a = RegionId(4); // owned by faction 1, not faction 0
+    assert_ne!(world.region(not_owned_by_a).owner, a);
+
+    action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+        to: b,
+        text: "peace, plus land I don't actually own".to_string(),
+    })
+    .unwrap();
+
+    let stance_before = world.diplomacy.stance(a, b);
+    let opinion_before_ab = world.diplomacy.opinion(a, b);
+    let opinion_before_ba = world.diplomacy.opinion(b, a);
+    let owner_before = world.region(not_owned_by_a).owner;
+
+    action::apply_action(&mut world, b, Action::RespondToNaturalLanguageProposal {
+        from: a,
+        terms: vec![TreatyTerm::Sign(Treaty::Ceasefire), TreatyTerm::Cede { region: not_owned_by_a }],
+        accept: true,
+    })
+    .unwrap();
+
+    assert_eq!(
+        world.diplomacy.stance(a, b), stance_before,
+        "the otherwise-valid Sign term must not apply when a later term in the same batch is invalid"
+    );
+    assert_eq!(world.diplomacy.opinion(a, b), opinion_before_ab, "no bonus must be paid when the batch is rejected");
+    assert_eq!(world.diplomacy.opinion(b, a), opinion_before_ba);
+    assert_eq!(
+        world.region(not_owned_by_a).owner, owner_before,
+        "the invalid Cede term must not change ownership either"
+    );
+}
+
+/// One more abuse-resistance guard beyond the spec's three named Stage 4B
+/// tests (docs/phase3-spec.md §0, and the same shapes already fixed for
+/// Stage 3B's structured `ProposeTreaty`): repeated natural-language
+/// proposals must not be spammable to keep a proposal alive, flood the event
+/// log, or re-harvest `TREATY_ACCEPT_OPINION_BONUS` by resubmitting the same
+/// deal.
+#[test]
+fn repeated_natural_language_proposals_cannot_farm_opinion_or_flood_events() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+        to: b,
+        text: "let's talk".to_string(),
+    })
+    .unwrap();
+
+    // Spamming more proposals to the same target while one is outstanding
+    // must all be rejected outright - no stacking, no TTL refresh.
+    for _ in 0..10 {
+        assert!(
+            action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+                to: b,
+                text: "let's talk again".to_string(),
+            })
+            .is_err(),
+            "a repeat ProposeInNaturalLanguage while one is already pending must be rejected"
+        );
+    }
+    assert_eq!(
+        world.diplomacy.pending_nl.len(), 1,
+        "spamming ProposeInNaturalLanguage must never queue more than one outstanding proposal"
+    );
+
+    let mut events = Vec::new();
+    diplomacy::tick_diplomacy(&mut world, &mut events);
+    let proposed_count = events.iter().filter(|e| matches!(e, Event::NaturalLanguageProposed { .. })).count();
+    assert_eq!(proposed_count, 1, "only the first proposal should ever have reached the event log");
+
+    // Accept a Sign(Ceasefire) term - the opinion-bearing path.
+    let opinion_before = world.diplomacy.opinion(a, b);
+    action::apply_action(&mut world, b, Action::RespondToNaturalLanguageProposal {
+        from: a,
+        terms: vec![TreatyTerm::Sign(Treaty::Ceasefire)],
+        accept: true,
+    })
+    .unwrap();
+    let opinion_after_first = world.diplomacy.opinion(a, b);
+    assert!(opinion_after_first > opinion_before, "a genuinely accepted Sign term should raise opinion once");
+
+    // Immediately trying to re-propose (to farm the bonus again) must be
+    // blocked by the cooldown `respond_nl` just spent.
+    assert!(
+        action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+            to: b,
+            text: "let's sign peace again".to_string(),
+        })
+        .is_err(),
+        "re-proposing right after a response must be blocked by NL_PROPOSAL_COOLDOWN_DAYS"
+    );
+
+    // Once the cooldown has fully elapsed, a fresh proposal is allowed again,
+    // but the treaty is already active - a second Sign(Ceasefire) attempt
+    // must fail validation and must not pay the bonus a second time.
+    let mut events2 = Vec::new();
+    for _ in 0..NL_PROPOSAL_COOLDOWN_DAYS {
+        diplomacy::tick_diplomacy(&mut world, &mut events2);
+    }
+    action::apply_action(&mut world, a, Action::ProposeInNaturalLanguage {
+        to: b,
+        text: "let's sign peace once more".to_string(),
+    })
+    .unwrap();
+    let opinion_before_second_response = world.diplomacy.opinion(a, b);
+    action::apply_action(&mut world, b, Action::RespondToNaturalLanguageProposal {
+        from: a,
+        terms: vec![TreatyTerm::Sign(Treaty::Ceasefire)],
+        accept: true,
+    })
+    .unwrap();
+    let opinion_after_second_response = world.diplomacy.opinion(a, b);
+    assert_eq!(
+        opinion_before_second_response, opinion_after_second_response,
+        "signing an already-active treaty a second time via natural language must not grant the \
+         acceptance bonus again"
+    );
+}

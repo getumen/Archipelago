@@ -34,13 +34,14 @@
 
 use crate::balance::{
     ALLIANCE_BREAK_OPINION_PENALTY, DECLARE_WAR_OPINION_PENALTY, FOCUS_ALLIANCE_OPINION_RECOVERY_MULT,
-    MINOR_TREATY_BREAK_OPINION_PENALTY, NON_AGGRESSION_BREAK_OPINION_PENALTY,
-    NON_AGGRESSION_NOTICE_DAYS, OPINION_DECAY_RATE, PROPOSAL_TTL_DAYS, TREATY_ACCEPT_OPINION_BONUS,
-    TREATY_COOLDOWN_DAYS,
+    MINOR_TREATY_BREAK_OPINION_PENALTY, NL_PROPOSAL_COOLDOWN_DAYS, NL_PROPOSAL_TTL_DAYS,
+    NON_AGGRESSION_BREAK_OPINION_PENALTY, NON_AGGRESSION_NOTICE_DAYS, OPINION_DECAY_RATE,
+    PROPOSAL_TTL_DAYS, TREATY_ACCEPT_OPINION_BONUS, TREATY_COOLDOWN_DAYS,
 };
 use crate::event::Event;
 use crate::focus::{self, NationalFocus};
-use crate::ids::FactionId;
+use crate::good::Good;
+use crate::ids::{FactionId, RegionId};
 use crate::world::World;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,6 +137,64 @@ impl Treaty {
     }
 }
 
+/// Stage 4B (docs/phase4-spec.md "Stage 4B — 自然言語外交"): the structured
+/// shape every natural-language proposal must collapse into before it can
+/// touch the board. An LLM (or, for a `HeuristicAgent` recipient, keyword
+/// extraction - both live in `archipelago-agents`, never in this crate)
+/// interprets `Action::ProposeInNaturalLanguage`'s free-text `text` into a
+/// `Vec<TreatyTerm>` plus an accept/reject verdict, then hands that back as
+/// `Action::RespondToNaturalLanguageProposal` - the *only* thing this crate
+/// ever validates or applies is that structured `Vec<TreatyTerm>`, never the
+/// text itself (design.md §13: "LLM はゲームルールそのものを決定するもので
+/// はない"). See `apply_treaty_terms` for the validation every term goes
+/// through, and its doc for why the whole deal is atomic (all terms valid,
+/// or none applied).
+///
+/// Every term reads as a concession *by the proposer* (`Action::
+/// ProposeInNaturalLanguage`'s sender) toward the recipient, except `Sign`,
+/// which is the same mutual grant/stance change `Action::AcceptTreaty`
+/// already produces - so "offer to withdraw in exchange for port access"
+/// (design.md §12's worked example) is exactly `[Withdraw{from: ...},
+/// Sign(Treaty::PortAccess)]`: the withdrawal is the proposer's own
+/// concession, and `PortAccess` being a symmetric grant is what satisfies
+/// "recognize our port rights" without needing an asymmetric grant term of
+/// its own.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TreatyTerm {
+    /// Sign `Treaty` between the proposer and the recipient - identical
+    /// effect to `Action::AcceptTreaty` (stance change or mutual grant, plus
+    /// `TREATY_ACCEPT_OPINION_BONUS` both ways), and gated by the exact same
+    /// "not already active" / cooldown checks so this can never be used to
+    /// dodge `TREATY_COOLDOWN_DAYS` by going through natural language
+    /// instead of `Action::ProposeTreaty`.
+    Sign(Treaty),
+    /// The proposer withdraws from `from`, which must currently be foreign
+    /// soil under the proposer's own control (`owner == proposer`, `core !=
+    /// proposer`) - it reverts to `from`'s `core` owner, not necessarily the
+    /// recipient of this proposal.
+    Withdraw { from: RegionId },
+    /// The proposer cedes `region`, which it must currently own, to the
+    /// recipient outright.
+    Cede { region: RegionId },
+    /// The proposer transfers `amount` of `good` from its own stock to the
+    /// recipient's.
+    Deliver { good: Good, amount: f32 },
+}
+
+/// A natural-language proposal awaiting the target faction's own agent
+/// (LLM-backed or keyword-fallback) to interpret it into `TreatyTerm`s and
+/// answer via `Action::RespondToNaturalLanguageProposal`
+/// (docs/phase4-spec.md "Stage 4B"). Deliberately not merged into
+/// `PendingProposal` - a natural-language offer has no `Treaty` yet (that's
+/// exactly what interpretation produces) and carries free text instead.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PendingNlProposal {
+    pub from: FactionId,
+    pub to: FactionId,
+    pub text: String,
+    pub ttl: u32,
+}
+
 /// A proposal awaiting the target faction's `Action::AcceptTreaty`/
 /// `RejectTreaty`, visible to `to` (and, for bookkeeping, `from`) through
 /// `Observation::encode()` and `Diplomacy::pending`. Expires unanswered once
@@ -185,6 +244,25 @@ pub struct Diplomacy {
     /// `action::apply_propose_treaty`.
     pub pending: Vec<PendingProposal>,
     pending_breaks: Vec<PendingBreak>,
+    /// Stage 4B (docs/phase4-spec.md "Stage 4B"): outstanding natural-
+    /// language proposals, in the order they were made - the free-text
+    /// counterpart of `pending`. At most one outgoing proposal per ordered
+    /// `(from, to)` pair at a time (`action::apply_propose_nl`), exactly
+    /// like `pending`.
+    pub pending_nl: Vec<PendingNlProposal>,
+    /// `nl_cooldown[from.index() * n + to.index()]`: days left before
+    /// `Action::ProposeInNaturalLanguage` will accept a new proposal from
+    /// `from` to `to` again, set whenever an outstanding one is answered
+    /// (accepted or rejected, `diplomacy::respond_nl`) or expires unanswered
+    /// (`tick_diplomacy`) - the same "spend a real, decrementing budget"
+    /// guard `Diplomacy::cooldown` gives ordinary treaty proposals, so this
+    /// path can't be spammed to flood the event log or repeatedly re-roll
+    /// the recipient's interpretation for free (docs/phase3-spec.md §0).
+    /// Deliberately one-directional (unlike `cooldown`, which is mirrored):
+    /// a natural-language proposal itself has no symmetric "treaty kind" to
+    /// key off, and `pending_nl`/`find_pending_nl` are already ordered-pair
+    /// specific in exactly the same way.
+    nl_cooldown: Vec<u32>,
     /// Events emitted by action appliers the instant a treaty is proposed,
     /// accepted, rejected or broken (`action.rs`'s Stage 3B appliers push
     /// here, since `action::apply_action` has no `&mut Vec<Event>` of its
@@ -206,6 +284,8 @@ impl Diplomacy {
             cooldown: vec![0u32; n * n * TREATY_COUNT],
             pending: Vec::new(),
             pending_breaks: Vec::new(),
+            pending_nl: Vec::new(),
+            nl_cooldown: vec![0u32; n * n],
             log: Vec::new(),
         }
     }
@@ -298,6 +378,23 @@ impl Diplomacy {
         self.pending.iter().position(|p| p.from == from && p.to == to)
     }
 
+    /// The index into `pending_nl` of an outstanding `from -> to`
+    /// natural-language proposal, if any.
+    pub fn find_pending_nl(&self, from: FactionId, to: FactionId) -> Option<usize> {
+        self.pending_nl.iter().position(|p| p.from == from && p.to == to)
+    }
+
+    /// Days left before `from` may propose a natural-language deal to `to`
+    /// again (see `nl_cooldown`'s doc).
+    pub fn nl_cooldown(&self, from: FactionId, to: FactionId) -> u32 {
+        self.nl_cooldown[self.idx(from, to)]
+    }
+
+    fn set_nl_cooldown(&mut self, from: FactionId, to: FactionId, days: u32) {
+        let i = self.idx(from, to);
+        self.nl_cooldown[i] = days;
+    }
+
     pub fn pending_break(&self, a: FactionId, b: FactionId) -> Option<PendingBreak> {
         self.pending_breaks
             .iter()
@@ -375,6 +472,176 @@ pub(crate) fn accept(world: &mut World, a: FactionId, b: FactionId, treaty: Trea
 
 pub(crate) fn reject(world: &mut World, from: FactionId, to: FactionId, treaty: Treaty) {
     world.diplomacy.log.push(Event::TreatyRejected { from, to, treaty });
+}
+
+/// Applies `Action::ProposeInNaturalLanguage`'s validated request - the
+/// free-text counterpart of `propose`. `action::apply_propose_nl` already
+/// rejects a repeat attempt while one is outstanding or on cooldown, so this
+/// only ever runs for a genuinely new proposal.
+pub(crate) fn propose_nl(world: &mut World, from: FactionId, to: FactionId, text: String) {
+    world.diplomacy.log.push(Event::NaturalLanguageProposed { from, to, text: text.clone() });
+    world.diplomacy.pending_nl.push(PendingNlProposal { from, to, text, ttl: NL_PROPOSAL_TTL_DAYS });
+}
+
+/// Applies `Action::RespondToNaturalLanguageProposal`'s validated request -
+/// `action::apply_respond_nl` has already consumed the matching
+/// `PendingNlProposal` before calling in here. Always spends a fresh
+/// `NL_PROPOSAL_COOLDOWN_DAYS` cooldown on this `(from, to)` pair regardless
+/// of outcome (accepted, rejected, or accepted-but-invalid) - the same
+/// "answering a proposal costs a real, decrementing slot" guard
+/// `tick_diplomacy`'s expiry path also spends, so a proposer can't force a
+/// tighter retry loop than a genuinely un-interested recipient would allow
+/// just by getting an instant rejection instead of letting one expire.
+///
+/// `accept_deal == true` does **not** mean the deal takes effect - see
+/// `apply_treaty_terms`'s doc: every term must independently validate
+/// against the *current* world, so an interpretation (LLM or keyword) that
+/// says "accept" but names an infeasible term (a region the proposer
+/// doesn't hold, more of a good than it has in stock, ...) still produces no
+/// change to the board, only `Event::NaturalLanguageTermsInvalid`.
+pub(crate) fn respond_nl(
+    world: &mut World,
+    from: FactionId,
+    to: FactionId,
+    terms: &[TreatyTerm],
+    accept_deal: bool,
+) {
+    world.diplomacy.set_nl_cooldown(from, to, NL_PROPOSAL_COOLDOWN_DAYS);
+    if !accept_deal {
+        world.diplomacy.log.push(Event::NaturalLanguageRejected { from, to });
+        return;
+    }
+    if apply_treaty_terms(world, from, to, terms) {
+        world.diplomacy.log.push(Event::NaturalLanguageAccepted { from, to });
+    } else {
+        world.diplomacy.log.push(Event::NaturalLanguageTermsInvalid { from, to });
+    }
+}
+
+/// The only place a `Vec<TreatyTerm>` ever touches the board
+/// (docs/phase4-spec.md "Stage 4B": "自然言語のまま盤面に効くことは決してな
+/// い"). All-or-nothing on purpose - the same atomicity
+/// `action::apply_accept_treaty` gets from being one `Action`, extended to a
+/// whole natural-language deal so a recipient (or a hostile LLM response)
+/// can never cherry-pick "accept the feasible half of the deal, discard the
+/// rest" by bundling one valid term with one invalid one. Returns whether
+/// the deal was applied.
+///
+/// External code review fix: the previous implementation validated every
+/// term against the *unchanged* world and only afterwards applied all of
+/// them, so a batch could pass validation and still produce impossible
+/// state - two `Deliver` terms that each individually fit inside the
+/// proposer's stock but together overdraw it (leaving a negative stock), or
+/// two identical `Sign(treaty)` terms that each individually see the treaty
+/// as not-yet-active and so both "pass", paying
+/// `TREATY_ACCEPT_OPINION_BONUS` twice for one signing. Since the terms come
+/// from an LLM's (or a hostile actor's) interpretation of free text, this is
+/// exactly the "an optimiser composes a batch that individually validates
+/// but collectively cheats" shape docs/phase3-spec.md §0 and design.md
+/// §15/§18 warn about. Fixed in two parts:
+///
+/// 1. An exact-duplicate `Sign(treaty)` is collapsed to its first occurrence
+///    before validation - `Sign` is a pure state-flag grant (like
+///    `propose`'s existing "re-proposing an already-pending treaty is a
+///    no-op" idiom), so re-asserting one this same batch already applied is
+///    idempotent, not a second concession worth a second bonus. Every other
+///    term kind (`Withdraw`/`Cede`/`Deliver`) is a real transfer with its
+///    own cost, so a literal repeat of one of those is deliberately left
+///    alone here and instead falls through to cumulative validation below.
+/// 2. The (deduplicated) batch is then validated and applied term-by-term
+///    against a scratch clone of the world, so a term that only becomes
+///    infeasible *because of an earlier term in this same batch* (two
+///    `Deliver`s that individually fit but together overdraw; a `Cede` of a
+///    region an earlier `Withdraw` already gave away; ...) is caught before
+///    anything real changes. The real `world` is reassigned from the scratch
+///    copy only if every term validated and applied cleanly - on any
+///    failure `world` is returned untouched, preserving the same
+///    all-or-nothing guarantee the old validate-then-apply-all shape
+///    intended but didn't actually enforce cumulatively.
+pub(crate) fn apply_treaty_terms(
+    world: &mut World,
+    proposer: FactionId,
+    recipient: FactionId,
+    terms: &[TreatyTerm],
+) -> bool {
+    if terms.is_empty() {
+        return false; // an "accept" with nothing to accept is not a deal.
+    }
+
+    let mut deduped: Vec<TreatyTerm> = Vec::with_capacity(terms.len());
+    for &term in terms {
+        let already_signed = matches!(term, TreatyTerm::Sign(_)) && deduped.contains(&term);
+        if !already_signed {
+            deduped.push(term);
+        }
+    }
+
+    let mut scratch = world.clone();
+    for &term in &deduped {
+        if !term_is_valid(&scratch, proposer, recipient, term) {
+            return false;
+        }
+        apply_term(&mut scratch, proposer, recipient, term);
+    }
+    *world = scratch;
+    true
+}
+
+/// Read-only feasibility check for one `TreatyTerm`, against the world as it
+/// stands *right now* - never against whatever the proposer's situation was
+/// when the natural-language text was first sent (which may be days stale
+/// by the time the recipient answers). See `TreatyTerm`'s doc for what each
+/// variant means and which side (`proposer`/`recipient`) it acts on.
+fn term_is_valid(world: &World, proposer: FactionId, recipient: FactionId, term: TreatyTerm) -> bool {
+    match term {
+        TreatyTerm::Sign(treaty) => {
+            !world.diplomacy.has_treaty(proposer, recipient, treaty)
+                && world.diplomacy.cooldown(proposer, recipient, treaty) == 0
+        }
+        TreatyTerm::Withdraw { from } => world.regions.get(from.index()).is_some_and(|r| {
+            r.owner == proposer && r.core != proposer && !world.has_enemy_units(from, proposer)
+        }),
+        TreatyTerm::Cede { region } => world.regions.get(region.index()).is_some_and(|r| {
+            r.owner == proposer && !world.has_enemy_units(region, proposer)
+        }),
+        TreatyTerm::Deliver { good, amount } => {
+            amount.is_finite() && amount >= 0.0 && world.faction(proposer).stock[good.index()] >= amount
+        }
+    }
+}
+
+/// Applies one already-validated `TreatyTerm`. Never called directly by an
+/// action applier - only through `apply_treaty_terms`, after every term in
+/// the batch has passed `term_is_valid`.
+fn apply_term(world: &mut World, proposer: FactionId, recipient: FactionId, term: TreatyTerm) {
+    match term {
+        TreatyTerm::Sign(treaty) => accept(world, proposer, recipient, treaty),
+        TreatyTerm::Withdraw { from } => {
+            let core = world.region(from).core;
+            transfer_region(world, from, core);
+        }
+        TreatyTerm::Cede { region } => transfer_region(world, region, recipient),
+        TreatyTerm::Deliver { good, amount } => {
+            world.faction_mut(proposer).stock[good.index()] -= amount;
+            world.faction_mut(recipient).stock[good.index()] += amount;
+        }
+    }
+}
+
+/// Peacefully hands `region_id` to `new_owner`, outside of combat -
+/// mirrors the ownership-change bookkeeping `military::tick_occupation`
+/// does on a violent capture (occupation/occupier/occupation_kind cleared,
+/// any in-progress project discarded since it belonged to the previous
+/// owner) but deliberately does *not* add the devastation/unrest spike a
+/// captured-by-force region gets: this is a negotiated transfer, not a
+/// battle.
+fn transfer_region(world: &mut World, region_id: RegionId, new_owner: FactionId) {
+    let region = world.region_mut(region_id);
+    region.owner = new_owner;
+    region.occupation = 0.0;
+    region.occupier = None;
+    region.occupation_kind = None;
+    region.construction = None;
 }
 
 /// `Action::DeclareWar`: only ever used to break an active `Ceasefire`
@@ -492,6 +759,32 @@ pub fn tick_diplomacy(world: &mut World, events: &mut Vec<Event>) {
     world.diplomacy.pending.retain(|p| p.ttl > 0);
     for p in world.diplomacy.pending.iter_mut() {
         p.ttl -= 1;
+    }
+
+    // Stage 4B: the same expiry shape as `pending` above, but an expired
+    // natural-language proposal additionally spends `NL_PROPOSAL_COOLDOWN_DAYS`
+    // on its `(from, to)` pair (`diplomacy::respond_nl`'s doc) - letting an
+    // unanswered proposal expire for free would otherwise be a *cheaper* way
+    // to retry than getting an explicit rejection back.
+    let expired_nl: Vec<(FactionId, FactionId)> = world
+        .diplomacy
+        .pending_nl
+        .iter()
+        .filter(|p| p.ttl == 0)
+        .map(|p| (p.from, p.to))
+        .collect();
+    world.diplomacy.pending_nl.retain(|p| p.ttl > 0);
+    for p in world.diplomacy.pending_nl.iter_mut() {
+        p.ttl -= 1;
+    }
+    for (from, to) in expired_nl {
+        world.diplomacy.set_nl_cooldown(from, to, NL_PROPOSAL_COOLDOWN_DAYS);
+    }
+
+    for c in world.diplomacy.nl_cooldown.iter_mut() {
+        if *c > 0 {
+            *c -= 1;
+        }
     }
 
     let mut resolved_breaks = Vec::new();

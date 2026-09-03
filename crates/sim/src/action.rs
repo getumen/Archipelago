@@ -3,10 +3,11 @@
 
 use crate::balance::{
     CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS,
-    IMPORT_PLAN_RATE_MAX, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
+    IMPORT_PLAN_RATE_MAX, NL_PROPOSAL_TEXT_MAX_CHARS, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
+    UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
-use crate::diplomacy::{self, Stance, Treaty};
+use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
 use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
@@ -15,7 +16,12 @@ use crate::military::{fleet_move_required, move_required, Movement, Unit};
 use crate::naval;
 use crate::world::{Domain, Station, World};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// Stage 4B (docs/phase4-spec.md "Stage 4B"): `RespondToNaturalLanguageProposal`
+/// carries an owned `Vec<TreatyTerm>` and `ProposeInNaturalLanguage` an owned
+/// `String`, so `Action` can no longer derive `Copy` - every caller that
+/// used to copy an `Action` implicitly (`sim::Simulation::apply`'s old `for
+/// &act in actions`) now clones it explicitly instead.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Action {
     /// A land unit's `to` must be `Station::Region`; a fleet's must be
     /// `Station::Sea` — `apply_move` validates the destination matches the
@@ -70,6 +76,23 @@ pub enum Action {
     /// `apply_set_national_focus`'s doc for exactly how that keeps this
     /// action un-spammable.
     SetNationalFocus(NationalFocus),
+    /// Stage 4B (docs/phase4-spec.md "Stage 4B — 自然言語外交"): queues a
+    /// one-tick free-text proposal to `to`, visible via `Observation`/
+    /// `Diplomacy::pending_nl` - the natural-language counterpart of
+    /// `ProposeTreaty`. `to`'s own agent (LLM-backed or keyword-fallback,
+    /// both in `archipelago-agents`) is responsible for interpreting `text`
+    /// into `TreatyTerm`s and answering with
+    /// `RespondToNaturalLanguageProposal` - this crate never parses `text`
+    /// itself.
+    ProposeInNaturalLanguage { to: FactionId, text: String },
+    /// Resolves a pending natural-language proposal *from* `from` *to* this
+    /// faction: `terms` is this faction's own interpretation of that
+    /// proposal's text (produced entirely outside this crate) and `accept`
+    /// is its accept/reject verdict. Every term is independently
+    /// re-validated against the *current* world before anything happens -
+    /// see `diplomacy::apply_treaty_terms` - so an interpretation that says
+    /// "accept" can still produce no change at all.
+    RespondToNaturalLanguageProposal { from: FactionId, terms: Vec<TreatyTerm>, accept: bool },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -119,6 +142,10 @@ pub fn apply_action(
         Action::DeclareWar { to } => apply_declare_war(world, faction, to),
         Action::BreakTreaty { with, treaty } => apply_break_treaty(world, faction, with, treaty),
         Action::SetNationalFocus(focus) => apply_set_national_focus(world, faction, focus),
+        Action::ProposeInNaturalLanguage { to, text } => apply_propose_nl(world, faction, to, text),
+        Action::RespondToNaturalLanguageProposal { from, terms, accept } => {
+            apply_respond_nl(world, faction, from, terms, accept)
+        }
     }
 }
 
@@ -634,5 +661,63 @@ fn apply_set_national_focus(
     }
     f.national_focus = focus;
     f.focus_transition_days = FOCUS_SWITCH_DAYS;
+    Ok(())
+}
+
+/// `Action::ProposeInNaturalLanguage` (docs/phase4-spec.md "Stage 4B").
+/// Rejects a self-target, a dead/unknown target, an empty or oversized
+/// `text`, and - the abuse-resistance guard, mirroring
+/// `apply_propose_treaty`'s own - a repeat attempt while one is already
+/// outstanding from this faction to `to` or still on
+/// `NL_PROPOSAL_COOLDOWN_DAYS` cooldown from the last one being answered or
+/// expiring. Unlike `apply_propose_treaty`, a duplicate attempt here is
+/// rejected outright rather than silently accepted as a no-op: there is no
+/// "same treaty, so it's harmless to no-op" concept for free text, and
+/// rejecting gives a caller a clear signal that this attempt did nothing.
+fn apply_propose_nl(
+    world: &mut World,
+    faction: FactionId,
+    to: FactionId,
+    text: String,
+) -> Result<(), ActionError> {
+    if to == faction {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.factions.get(to.index()).is_none_or(|f| !f.alive) {
+        return Err(ActionError::InvalidValue);
+    }
+    if text.trim().is_empty() || text.chars().count() > NL_PROPOSAL_TEXT_MAX_CHARS {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.diplomacy.find_pending_nl(faction, to).is_some() {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.diplomacy.nl_cooldown(faction, to) > 0 {
+        return Err(ActionError::InvalidValue);
+    }
+    diplomacy::propose_nl(world, faction, to, text);
+    Ok(())
+}
+
+/// `Action::RespondToNaturalLanguageProposal`: `from` must have an
+/// outstanding natural-language proposal to this faction. Consumes it
+/// (removed from `Diplomacy::pending_nl` here, before `diplomacy::respond_nl`
+/// applies the verdict) so it can never be answered twice - the same shape
+/// `apply_accept_treaty`/`apply_reject_treaty` already use for `pending`.
+/// Whether the deal actually takes effect is entirely
+/// `diplomacy::apply_treaty_terms`'s call, not this function's - see its doc.
+fn apply_respond_nl(
+    world: &mut World,
+    faction: FactionId,
+    from: FactionId,
+    terms: Vec<TreatyTerm>,
+    accept: bool,
+) -> Result<(), ActionError> {
+    let idx = world
+        .diplomacy
+        .find_pending_nl(from, faction)
+        .ok_or(ActionError::InvalidValue)?;
+    world.diplomacy.pending_nl.remove(idx);
+    diplomacy::respond_nl(world, from, faction, &terms, accept);
     Ok(())
 }

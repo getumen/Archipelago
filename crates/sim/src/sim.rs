@@ -41,7 +41,7 @@ impl Simulation {
     /// and reporting why. Call this before `step` for each acting faction.
     pub fn apply(&mut self, faction: FactionId, actions: &[Action]) -> Vec<ActionError> {
         let mut errors = Vec::new();
-        for &act in actions {
+        for act in actions.iter().cloned() {
             if let Err(e) = action::apply_action(&mut self.world, faction, act) {
                 errors.push(e);
             }

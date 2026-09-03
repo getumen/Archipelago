@@ -3,6 +3,7 @@
 //! names come straight from the scenario data and are Japanese; the
 //! surrounding labels are Japanese too so the two read as one table.
 
+use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::diplomacy::Treaty;
 use archipelago_sim::event::Event;
 use archipelago_sim::focus;
@@ -147,6 +148,27 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
             "同盟参戦: {} が同盟により {} との戦争に参戦",
             world.faction(*faction).name,
             world.faction(*into_war_with).name,
+        ),
+        Event::NaturalLanguageProposed { from, to, text } => format!(
+            "自然言語外交: {} が {} に提案 「{}」",
+            world.faction(*from).name,
+            world.faction(*to).name,
+            text,
+        ),
+        Event::NaturalLanguageAccepted { from, to } => format!(
+            "自然言語外交・成立: {} が {} の提案を受諾",
+            world.faction(*to).name,
+            world.faction(*from).name,
+        ),
+        Event::NaturalLanguageRejected { from, to } => format!(
+            "自然言語外交・拒否: {} が {} の提案を拒否",
+            world.faction(*to).name,
+            world.faction(*from).name,
+        ),
+        Event::NaturalLanguageTermsInvalid { from, to } => format!(
+            "自然言語外交・不成立: {} が {} の提案を受諾しようとしたが条件が満たせず不成立",
+            world.faction(*to).name,
+            world.faction(*from).name,
         ),
     };
     println!("[day {day:4}] {line}");
@@ -311,6 +333,25 @@ pub fn print_final_board(world: &World) {
         );
     }
     print_sea_zone_table(world);
+}
+
+/// Stage 4C `--newspaper` (docs/phase4-spec.md "Stage 4C — 新聞・報道生成"):
+/// prints one issue's worth of per-faction articles. Purely console output -
+/// nothing here reads or writes anything that could feed back into `World`.
+pub fn print_newspaper_issue(world: &World, issue: &[NewspaperArticle]) {
+    println!();
+    println!("=== 新聞 (day {}) ===", world.day);
+    for article in issue {
+        let source = if article.from_backend { "" } else { " [機械要約]" };
+        println!(
+            "-- {} 紙 (day {}-{}){} --",
+            world.faction(article.faction).name,
+            article.period_start,
+            article.period_end,
+            source,
+        );
+        println!("{}", article.text);
+    }
 }
 
 pub fn print_outcome(world: &World, outcome: Outcome) {

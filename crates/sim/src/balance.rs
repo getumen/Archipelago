@@ -771,3 +771,46 @@ pub const FOCUS_TECHNOCRACY_PRODUCTION_MULT: f32 = 1.1;
 pub const FOCUS_DEFENSIVE_HOME_DEFENSE_MULT: f32 = 1.25;
 pub const FOCUS_DEFENSIVE_DEVASTATION_RECOVERY_MULT: f32 = 1.5;
 pub const FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT: f32 = 0.85;
+
+// ---------------------------------------------------------------------------
+// Stage 4B — 自然言語外交 (docs/phase4-spec.md "Stage 4B — 自然言語外交"):
+// `Action::ProposeInNaturalLanguage`/`RespondToNaturalLanguageProposal` and
+// the `TreatyTerm`s an interpretation (LLM or keyword fallback, both in
+// `archipelago-agents`) collapses into. Per docs/phase3-spec.md §0's
+// carried-forward rule about a 1-tick allowance being a spent budget, never
+// a ratio reapplied to a remainder: answering a natural-language proposal
+// (accepted, rejected, or left to expire) spends a real, decrementing
+// `NL_PROPOSAL_COOLDOWN_DAYS` on that `(from, to)` pair, the same shape
+// `TREATY_COOLDOWN_DAYS` already gives ordinary treaty proposals - see
+// `diplomacy.rs`'s module doc for the exact exploit shapes this closes.
+// ---------------------------------------------------------------------------
+
+/// How many days a `PendingNlProposal` survives, once created, before
+/// `diplomacy::tick_diplomacy` expires it unanswered - the free-text
+/// counterpart of `PROPOSAL_TTL_DAYS`, kept at the same value for the same
+/// reason (`PROPOSAL_TTL_DAYS`'s own doc: it must outlive the worst gap a
+/// small, offset-staggered set of `HeuristicAgent`s can leave between a
+/// proposal landing and the target's next turn).
+pub const NL_PROPOSAL_TTL_DAYS: u32 = 3;
+
+/// Days a `(from, to)` pair is locked out of a fresh
+/// `Action::ProposeInNaturalLanguage` after their last one was answered
+/// (accepted, rejected, or resolved as terms-invalid) or expired unanswered
+/// (`diplomacy::respond_nl`/`tick_diplomacy`) - the abuse-resistance guard
+/// this whole section's doc names: without it, a proposer could re-submit a
+/// slightly-reworded natural-language text every single day, each attempt
+/// re-triggering interpretation (a real backend call, for an `LlmAgent`
+/// recipient) and, on every lucky "accept", another
+/// `TREATY_ACCEPT_OPINION_BONUS`-equivalent payout via a `Sign` term. Kept
+/// close to `TREATY_COOLDOWN_DAYS` so natural-language diplomacy isn't a
+/// structurally cheaper way to farm the same reward `ProposeTreaty` already
+/// guards.
+pub const NL_PROPOSAL_COOLDOWN_DAYS: u32 = 20;
+
+/// Ceiling on a `Action::ProposeInNaturalLanguage`'s `text` length, in
+/// characters - `action::apply_propose_nl` rejects anything longer outright.
+/// Purely a defence-in-depth bound against a pathologically large string
+/// reaching `Diplomacy::pending_nl`/the event log (and, for an `LlmAgent`
+/// recipient, the prompt built from it) - ordinary proposals, in any
+/// language, sit far below this.
+pub const NL_PROPOSAL_TEXT_MAX_CHARS: usize = 500;

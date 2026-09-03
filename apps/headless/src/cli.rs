@@ -33,6 +33,12 @@ pub struct Args {
     pub json: bool,
     pub agent: AgentKind,
     pub backend: BackendKind,
+    /// Stage 4C (docs/phase4-spec.md "Stage 4C — 新聞・報道生成"): periodic
+    /// newspaper generation from the accumulated `Event` stream. Purely
+    /// additional console output - see `main.rs`'s use of this flag for why
+    /// it can never change `--json`'s output (it's gated behind `!json`, and
+    /// even when active it never touches `Simulation`/`World` mutably).
+    pub newspaper: bool,
 }
 
 impl Default for Args {
@@ -45,6 +51,7 @@ impl Default for Args {
             json: false,
             agent: AgentKind::Heuristic,
             backend: BackendKind::Mock,
+            newspaper: false,
         }
     }
 }
@@ -82,6 +89,7 @@ impl Args {
                 "--report" => args.report = take_value(&mut iter, "--report")?.parse().map_err(|_| "--report expects an integer".to_string())?,
                 "--quiet" => args.quiet = true,
                 "--json" => args.json = true,
+                "--newspaper" => args.newspaper = true,
                 "--agent" => args.agent = parse_agent(&take_value(&mut iter, "--agent")?)?,
                 "--backend" => args.backend = parse_backend(&take_value(&mut iter, "--backend")?)?,
                 other => {

@@ -8,8 +8,10 @@ mod json;
 mod report;
 
 use archipelago_agents::llm::{LlmAgent, LlmBackend, LlmError, MockBackend, ScriptedBackend};
+use archipelago_agents::newspaper::{self, NEWSPAPER_INTERVAL_DAYS};
 use archipelago_agents::HeuristicAgent;
 use archipelago_sim::agent::Agent;
+use archipelago_sim::event::Event;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
@@ -50,6 +52,40 @@ fn mock_doctrine_backend() -> MockBackend {
         Ok(r#"{"posture":"defensive","caution_bias":0.4,"rationale":"hold what we have and rebuild"}"#
             .to_string()),
     ])
+}
+
+/// Stage 4C `--newspaper` (docs/phase4-spec.md "Stage 4C — 新聞・報道生成"):
+/// the backend `newspaper::generate_issue` tries before falling back to its
+/// own event-driven Japanese template (`archipelago_agents::newspaper::
+/// template_summary`).
+///
+/// External code review fix: the previous implementation
+/// (`newspaper_mock_backend`, removed) unconditionally wired `--newspaper`
+/// to a small fixed rotation of fabricated English flavor text, so every
+/// run's articles described nothing about the actual game, regardless of
+/// `--agent`/`--backend` - the real, event-driven template sat unused. Now:
+/// with no LLM configured at all (`--agent heuristic`, the default, or
+/// `--agent llm --backend fail`), this always fails, so `generate_issue`
+/// always falls through to the template - which is what `--seed 1 --days
+/// 200 --newspaper` (no `--agent`/`--backend` flags) actually exercises.
+/// Only when the run has genuinely opted into an LLM backend
+/// (`--agent llm --backend mock` or `--backend scripted:<path>`) does the
+/// LLM path get a real backend to try, with the template still standing by
+/// as its own fallback (`generate_article`'s doc) - a fresh, independent
+/// instance from whatever backend `build_agents` wired up for `Doctrine`
+/// consults, so the two never share a response-cycling call counter.
+fn newspaper_backend(args: &Args) -> Box<dyn LlmBackend> {
+    if args.agent != AgentKind::Llm {
+        return Box::new(MockBackend::always_err(LlmError::Unavailable));
+    }
+    match &args.backend {
+        BackendKind::Mock => Box::new(mock_doctrine_backend()),
+        BackendKind::Fail => Box::new(MockBackend::always_err(LlmError::Unavailable)),
+        BackendKind::Scripted(path) => match ScriptedBackend::from_file(path) {
+            Ok(scripted) => Box::new(scripted),
+            Err(_) => Box::new(MockBackend::always_err(LlmError::Unavailable)),
+        },
+    }
 }
 
 /// Builds this run's per-faction `Agent`s (docs/phase4-spec.md "headless
@@ -110,6 +146,18 @@ fn main() {
         report::print_header(args.seed, args.days, args.report);
     }
 
+    // Stage 4C `--newspaper` (docs/phase4-spec.md "Stage 4C"): gated behind
+    // `!args.json` the same way `log`/`show_summary` are, so this flag can
+    // never add a single byte to `--json` output - see
+    // `newspaper_does_not_affect_simulation`. `newspaper_backend`/`period_events`/
+    // `period_start` are only ever *read from* `sim.world` and `events`,
+    // never fed back into `sim` - see `newspaper.rs`'s module doc for the
+    // boundary this enforces.
+    let print_newspaper = args.newspaper && !args.json;
+    let newspaper_backend = newspaper_backend(&args);
+    let mut period_events: Vec<Event> = Vec::new();
+    let mut period_start = sim.world.day;
+
     let outcome = loop {
         let outcome = sim.outcome(args.days);
         if outcome != Outcome::Ongoing {
@@ -134,6 +182,16 @@ fn main() {
             if sim.world.day % args.report == 0 {
                 report::print_faction_table(&sim.world);
                 report::print_sea_zone_table(&sim.world);
+            }
+        }
+
+        if print_newspaper {
+            period_events.extend(events.iter().cloned());
+            if sim.world.day % NEWSPAPER_INTERVAL_DAYS == 0 {
+                let issue = newspaper::generate_issue(&newspaper_backend, &sim.world, &period_events, period_start);
+                report::print_newspaper_issue(&sim.world, &issue);
+                period_events.clear();
+                period_start = sim.world.day;
             }
         }
     };

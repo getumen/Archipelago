@@ -25,10 +25,10 @@
 
 use std::cell::Cell;
 
-use archipelago_sim::diplomacy::{Treaty, ALL_TREATIES};
+use archipelago_sim::diplomacy::{Treaty, TreatyTerm, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
-use archipelago_sim::good::ALL_GOODS;
-use archipelago_sim::ids::FactionId;
+use archipelago_sim::good::{Good, ALL_GOODS};
+use archipelago_sim::ids::{FactionId, RegionId};
 use archipelago_sim::observation::Observation;
 use archipelago_sim::world::World;
 
@@ -245,7 +245,7 @@ pub struct Doctrine {
 /// nothing in the simulation reads this field.
 const MAX_RATIONALE_CHARS: usize = 500;
 
-fn truncate_chars(s: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
@@ -720,6 +720,145 @@ other text, matching this schema: {\"posture\": \"offensive\" | \"defensive\" | 
 <number from -1.0 (bold) to 1.0 (cautious)>, \"rationale\": <one or two sentences explaining the doctrine>}.";
 
 // ---------------------------------------------------------------------
+// Stage 4B — natural-language diplomacy (docs/phase4-spec.md "Stage 4B —
+// 自然言語外交"): interpreting a pending `PendingNlProposal`'s free text into
+// a `Vec<TreatyTerm>` plus an accept/reject verdict. This is the *only*
+// place in this crate that reads proposal text - the result crosses back
+// into `crates/sim` as `Action::RespondToNaturalLanguageProposal`, which
+// revalidates every term against the live world regardless of what's
+// decided here (`diplomacy::apply_treaty_terms`) - so nothing here can move
+// the board on its own, only steer what gets *proposed* to it.
+// ---------------------------------------------------------------------
+
+/// System prompt for interpreting a natural-language proposal - the schema
+/// `parse_nl_response` expects back, in plain language. `LlmAgent::interpret_nl`
+/// sends this alongside a situation report (`summarize_observation`) and the
+/// proposal's own text.
+pub const NL_SYSTEM_PROMPT: &str = "You are the strategic command AI for one faction in a grand-strategy war \
+simulation, now evaluating a natural-language diplomatic proposal from another faction. You never move units, \
+cede territory, or sign treaties directly - you only interpret the proposal and decide whether your faction would \
+accept it; a separate rules-following validator checks every term against the actual game state before anything \
+happens. Respond with ONLY a single JSON object, no other text, matching this schema: {\"accept\": true | false, \
+\"terms\": [{\"kind\": \"sign\", \"treaty\": <one of \"ceasefire\", \"non_aggression\", \"alliance\", \
+\"military_access\", \"port_access\", \"trade_agreement\">} | {\"kind\": \"withdraw\", \"region\": <region id \
+number>} | {\"kind\": \"cede\", \"region\": <region id number>} | {\"kind\": \"deliver\", \"good\": <one of \
+\"food\", \"energy\", \"steel\", \"machinery\", \"munitions\", \"arms\">, \"amount\": <number>}]}. \"terms\" is \
+your best-effort structured reading of what the proposal actually offers/asks, from the *proposing* faction's \
+side (e.g. \"I will withdraw from region 4\" is {\"kind\":\"withdraw\",\"region\":4} even though you are the one \
+receiving the offer); \"accept\" is your own faction's verdict on the deal as a whole.";
+
+/// Upper bound on how many `TreatyTerm`s a single interpreted response can
+/// carry - `parse_nl_response` silently stops reading the `\"terms\"` array
+/// past this point rather than rejecting the whole response, the same
+/// "tolerate an odd but honest response" spirit `parse_doctrine` already
+/// applies to `seek_treaties`. Purely a bound against an unreasonably large
+/// array (malicious or just verbose); no legitimate natural-language deal
+/// needs anywhere near this many parts.
+const MAX_NL_TERMS: usize = 8;
+
+fn good_from_key(key: &str) -> Option<Good> {
+    ALL_GOODS.iter().copied().find(|g| g.key() == key)
+}
+
+/// Parses a backend's raw response text (to `NL_SYSTEM_PROMPT`'s prompt)
+/// into `(terms, accept)`. Reuses the same hand-written JSON parser as
+/// `parse_doctrine` - see that function's doc for the shared tolerance
+/// rules (prose-wrapped JSON, missing optional fields). Unlike `Doctrine`,
+/// there is no required field here beyond a well-formed `\"accept\"`
+/// boolean - a `\"terms\"` array that's missing, malformed, or contains
+/// entries this can't understand just yields fewer (possibly zero) terms,
+/// since `diplomacy::apply_treaty_terms` already treats an empty term list
+/// as "no deal" and every kept term is independently re-validated downstream
+/// regardless.
+fn parse_nl_response(text: &str) -> Result<(Vec<TreatyTerm>, bool), LlmError> {
+    let object_text = extract_json_object(text)
+        .ok_or_else(|| LlmError::Malformed("no JSON object found in response".to_string()))?;
+    let value =
+        parse_json(object_text).map_err(|_| LlmError::Malformed("invalid JSON syntax".to_string()))?;
+    let JsonValue::Object(fields) = value else {
+        return Err(LlmError::Malformed("top-level JSON value is not an object".to_string()));
+    };
+
+    let accept = match object_get(&fields, "accept") {
+        Some(JsonValue::Bool(b)) => *b,
+        _ => return Err(LlmError::Malformed("missing or non-boolean \"accept\"".to_string())),
+    };
+
+    let to_region = |v: &JsonValue| -> Option<RegionId> {
+        match v {
+            JsonValue::Number(num) if num.is_finite() && *num >= 0.0 && num.fract() == 0.0 => {
+                Some(RegionId(*num as u32))
+            }
+            _ => None,
+        }
+    };
+
+    let mut terms = Vec::new();
+    if let Some(JsonValue::Array(items)) = object_get(&fields, "terms") {
+        for item in items.iter().take(MAX_NL_TERMS) {
+            let JsonValue::Object(obj) = item else { continue };
+            let Some(JsonValue::String(kind)) = object_get(obj, "kind") else { continue };
+            let term = match kind.as_str() {
+                "sign" => match object_get(obj, "treaty") {
+                    Some(JsonValue::String(key)) => treaty_from_key(key).map(TreatyTerm::Sign),
+                    _ => None,
+                },
+                "withdraw" => object_get(obj, "region")
+                    .and_then(to_region)
+                    .map(|region| TreatyTerm::Withdraw { from: region }),
+                "cede" => object_get(obj, "region").and_then(to_region).map(|region| TreatyTerm::Cede { region }),
+                "deliver" => {
+                    let good = match object_get(obj, "good") {
+                        Some(JsonValue::String(key)) => good_from_key(key),
+                        _ => None,
+                    };
+                    let amount = match object_get(obj, "amount") {
+                        Some(JsonValue::Number(n)) if n.is_finite() && *n >= 0.0 => Some(*n as f32),
+                        _ => None,
+                    };
+                    match (good, amount) {
+                        (Some(good), Some(amount)) => Some(TreatyTerm::Deliver { good, amount }),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(term) = term {
+                terms.push(term);
+            }
+        }
+    }
+
+    Ok((terms, accept))
+}
+
+/// Every pending natural-language proposal addressed to `obs.faction` gets
+/// interpreted by `interpret` and answered with exactly one
+/// `Action::RespondToNaturalLanguageProposal` - shared by
+/// `HeuristicAgent::decide` (keyword-only interpretation, `crate::
+/// keyword_interpret`) and `LlmAgent::decide` (LLM interpretation, falling
+/// back to the same keyword extraction on failure - see `LlmAgent::
+/// interpret_nl`). `obs.world.diplomacy.pending_nl` is read once up front so
+/// the borrow ends before `interpret` (which may itself borrow `obs`) runs.
+pub fn respond_to_pending_nl_proposals<F>(obs: &Observation, mut interpret: F, actions: &mut Vec<Action>)
+where
+    F: FnMut(FactionId, &str) -> (Vec<TreatyTerm>, bool),
+{
+    let incoming: Vec<(FactionId, String)> = obs
+        .world
+        .diplomacy
+        .pending_nl
+        .iter()
+        .filter(|p| p.to == obs.faction)
+        .map(|p| (p.from, p.text.clone()))
+        .collect();
+    for (from, text) in incoming {
+        let (terms, accept) = interpret(from, &text);
+        actions.push(Action::RespondToNaturalLanguageProposal { from, terms, accept });
+    }
+}
+
+// ---------------------------------------------------------------------
 // LlmAgent
 // ---------------------------------------------------------------------
 
@@ -796,6 +935,35 @@ impl<B: LlmBackend> LlmAgent<B> {
         // A malformed response is silently discarded here too - same
         // "keep the previous Doctrine" rule as an outright `Err`.
     }
+
+    /// Stage 4B (docs/phase4-spec.md "Stage 4B"): interprets one pending
+    /// proposal's `text` via this agent's own backend. Failure semantics
+    /// mirror `consult`'s (docs/phase4-spec.md "失敗時の扱い" applies just as
+    /// much here - a backend outage must not stop diplomacy from
+    /// functioning): a backend `Err`, or an `Ok` response that doesn't parse,
+    /// falls back to the same keyword extraction a plain `HeuristicAgent`
+    /// recipient would use (`crate::keyword_interpret`), never to "always
+    /// reject" or a panic.
+    fn interpret_nl(&self, obs: &Observation, from: FactionId, text: &str) -> (Vec<TreatyTerm>, bool) {
+        let request = LlmRequest {
+            system: NL_SYSTEM_PROMPT.to_string(),
+            user: format!(
+                "{}\nProposal from {} (faction {}): \"{}\"",
+                summarize_observation(obs),
+                obs.world.faction(from).name,
+                from.0,
+                text,
+            ),
+            max_output_tokens: 300,
+        };
+        match self.backend.complete(&request) {
+            Ok(resp) => match parse_nl_response(&resp) {
+                Ok(result) => result,
+                Err(_) => crate::keyword_interpret(obs, from, text),
+            },
+            Err(_) => crate::keyword_interpret(obs, from, text),
+        }
+    }
 }
 
 impl<B: LlmBackend> Agent for LlmAgent<B> {
@@ -805,7 +973,9 @@ impl<B: LlmBackend> Agent for LlmAgent<B> {
 
     fn decide(&mut self, obs: &Observation) -> Vec<Action> {
         self.consult(obs);
-        self.fallback.decide_for_llm(obs, self.doctrine.as_ref())
+        let mut actions = self.fallback.decide_for_llm(obs, self.doctrine.as_ref());
+        respond_to_pending_nl_proposals(obs, |from, text| self.interpret_nl(obs, from, text), &mut actions);
+        actions
     }
 }
 

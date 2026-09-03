@@ -117,6 +117,36 @@ pub enum Event {
         faction: FactionId,
         into_war_with: FactionId,
     },
+    /// Stage 4B (docs/phase4-spec.md "Stage 4B — 自然言語外交"):
+    /// `Action::ProposeInNaturalLanguage` queued a one-tick natural-language
+    /// proposal. `text` is carried for logging/newspaper purposes only -
+    /// nothing in the simulation ever parses it (see `diplomacy.rs`'s
+    /// `TreatyTerm` doc).
+    NaturalLanguageProposed {
+        from: FactionId,
+        to: FactionId,
+        text: String,
+    },
+    /// `Action::RespondToNaturalLanguageProposal` accepted the deal *and*
+    /// every one of its interpreted `TreatyTerm`s validated - the deal
+    /// actually took effect.
+    NaturalLanguageAccepted {
+        from: FactionId,
+        to: FactionId,
+    },
+    /// `Action::RespondToNaturalLanguageProposal` turned the proposal down.
+    NaturalLanguageRejected {
+        from: FactionId,
+        to: FactionId,
+    },
+    /// `Action::RespondToNaturalLanguageProposal` said "accept", but at
+    /// least one interpreted `TreatyTerm` failed validation against the
+    /// current board - the whole deal was discarded, nothing changed
+    /// (docs/phase4-spec.md: "LLM が「受諾」と返しても...成立しない").
+    NaturalLanguageTermsInvalid {
+        from: FactionId,
+        to: FactionId,
+    },
 }
 
 impl fmt::Display for Event {
@@ -229,6 +259,26 @@ impl fmt::Display for Event {
                 f,
                 "faction {} is dragged into war with faction {} by an alliance",
                 faction.0, into_war_with.0
+            ),
+            Event::NaturalLanguageProposed { from, to, text } => write!(
+                f,
+                "faction {} sends a natural-language proposal to faction {}: \"{}\"",
+                from.0, to.0, text
+            ),
+            Event::NaturalLanguageAccepted { from, to } => write!(
+                f,
+                "faction {} accepts faction {}'s natural-language proposal",
+                to.0, from.0
+            ),
+            Event::NaturalLanguageRejected { from, to } => write!(
+                f,
+                "faction {} rejects faction {}'s natural-language proposal",
+                to.0, from.0
+            ),
+            Event::NaturalLanguageTermsInvalid { from, to } => write!(
+                f,
+                "faction {} tried to accept faction {}'s natural-language proposal, but its terms no longer held",
+                to.0, from.0
             ),
         }
     }
