@@ -7,13 +7,14 @@ mod cli;
 mod json;
 mod report;
 
+use archipelago_agents::llm::{LlmAgent, LlmBackend, LlmError, MockBackend, ScriptedBackend};
 use archipelago_agents::HeuristicAgent;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
 
-use cli::Args;
+use cli::{AgentKind, Args, BackendKind};
 
 /// Per-faction caution (the force-ratio margin required before attacking;
 /// higher = more cautious, ~1.0 = attack at parity) so the three AIs don't
@@ -34,6 +35,61 @@ const CAUTION: [f32; 3] = [1.15, 1.30, 1.45];
 /// different directions rather than one simply amplifying the other.
 const DIPLOMACY: [f32; 3] = [1.05, 0.80, 1.15];
 
+/// Stage 4A `--backend mock` (docs/phase4-spec.md "Stage 4A"): a small,
+/// fixed, deterministic rotation of valid canned `Doctrine` responses -
+/// varied enough to demonstrate `Doctrine`-driven behaviour actually
+/// changing over a long run, and, being purely a function of call count
+/// (`MockBackend`'s doc), identical every time the CLI is run with the same
+/// `--seed` (`mock_backend_run_is_deterministic`).
+fn mock_doctrine_backend() -> MockBackend {
+    MockBackend::new(vec![
+        Ok(r#"{"posture":"consolidate","rationale":"stabilize the home front before any new venture"}"#
+            .to_string()),
+        Ok(r#"{"posture":"offensive","caution_bias":-0.2,"rationale":"press the advantage while it lasts"}"#
+            .to_string()),
+        Ok(r#"{"posture":"defensive","caution_bias":0.4,"rationale":"hold what we have and rebuild"}"#
+            .to_string()),
+    ])
+}
+
+/// Builds this run's per-faction `Agent`s (docs/phase4-spec.md "headless
+/// defaults to HeuristicAgent; LLM is opt-in via `--agent llm --backend
+/// mock`"). Every faction gets the same `AgentKind`/`BackendKind` - a mixed
+/// run isn't part of Stage 4A's scope - but each still gets its own
+/// `HeuristicAgent` fallback with its own `CAUTION`/`DIPLOMACY` spread, and
+/// (for `AgentKind::Llm`) its own independent backend instance.
+fn build_agents(args: &Args, faction_count: usize) -> Vec<Box<dyn Agent>> {
+    (0..faction_count)
+        .map(|i| {
+            let caution = CAUTION.get(i).copied().unwrap_or(1.25);
+            let peace_disposition = DIPLOMACY.get(i).copied().unwrap_or(1.0);
+            let fallback =
+                HeuristicAgent::with_peace_disposition(FactionId(i as u32), caution, peace_disposition);
+
+            match args.agent {
+                AgentKind::Heuristic => Box::new(fallback) as Box<dyn Agent>,
+                AgentKind::Llm => {
+                    let backend: Box<dyn LlmBackend> = match &args.backend {
+                        BackendKind::Mock => Box::new(mock_doctrine_backend()),
+                        BackendKind::Fail => Box::new(MockBackend::always_err(LlmError::Unavailable)),
+                        BackendKind::Scripted(path) => match ScriptedBackend::from_file(path) {
+                            Ok(scripted) => Box::new(scripted),
+                            Err(e) => {
+                                eprintln!(
+                                    "warning: could not read --backend scripted:{path} ({e}); \
+                                     this faction's LlmAgent will fall back to HeuristicAgent behaviour"
+                                );
+                                Box::new(ScriptedBackend::new(Vec::new()))
+                            }
+                        },
+                    };
+                    Box::new(LlmAgent::new(backend, fallback)) as Box<dyn Agent>
+                }
+            }
+        })
+        .collect()
+}
+
 fn main() {
     let args = match Args::parse(std::env::args().skip(1)) {
         Ok(args) => args,
@@ -44,13 +100,7 @@ fn main() {
     };
 
     let mut sim = Simulation::new(args.seed);
-    let mut agents: Vec<HeuristicAgent> = (0..sim.world.factions.len())
-        .map(|i| {
-            let caution = CAUTION.get(i).copied().unwrap_or(1.25);
-            let peace_disposition = DIPLOMACY.get(i).copied().unwrap_or(1.0);
-            HeuristicAgent::with_peace_disposition(FactionId(i as u32), caution, peace_disposition)
-        })
-        .collect();
+    let mut agents: Vec<Box<dyn Agent>> = build_agents(&args, sim.world.factions.len());
 
     // `--json` keeps stdout a single parseable blob; `--quiet` only trims
     // the day-by-day log, the final board and outcome still print (§8).

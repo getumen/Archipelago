@@ -18,5 +18,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "archipelago-llm"
+version = "0.1.0"
+dependencies = [
+ "archipelago-agents",
+]
+
+[[package]]
 name = "archipelago-sim"
 version = "0.1.0"

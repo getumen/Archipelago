@@ -7,3 +7,9 @@ license.workspace = true
 [dependencies]
 archipelago-sim = { path = "../../crates/sim" }
 archipelago-agents = { path = "../../crates/agents" }
+
+# Stage 4A (docs/phase4-spec.md "Stage 4A"): headless never depends on
+# `archipelago-llm` (`HttpBackend`) - `--agent llm` only ever wires up
+# `MockBackend`/`ScriptedBackend`, both defined in `archipelago-agents`
+# itself. See `crates/llm/src/lib.rs`'s module doc for why nothing in this
+# workspace depends on that crate.

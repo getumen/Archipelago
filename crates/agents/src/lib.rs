@@ -26,6 +26,10 @@ use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::world::{Domain, Station, World};
 
+pub mod llm;
+
+use llm::Doctrine;
+
 /// Whether `unit` currently shares its station with an enemy of `faction` -
 /// the domain-generic form of the land-only `world.has_enemy_units` /
 /// sea-only `world.has_enemy_fleets` checks, for AI code that walks both
@@ -236,6 +240,36 @@ const FOCUS_ALLIANCE_ACCEPT_BONUS: f32 = 20.0;
 /// changes, so "half of what I started with" is always derivable straight
 /// from `World`).
 const MAJOR_TERRITORY_LOSS_FRACTION: f32 = 0.5;
+
+/// Stage 4A AI (docs/phase4-spec.md "Stage 4A": "Doctrine ... これにより
+/// ... 「正面戦争を避ける」... 「海軍増強を優先する」... がそのまま表現でき
+/// る"): caution multiplier `HeuristicAgent::decide_for_llm` applies on top
+/// of `HeuristicAgent::caution` when a `Doctrine::posture` of `Offensive` is
+/// in effect - below `1.0` so the agent commits to a fight at a smaller
+/// force-ratio edge than its own un-advised `caution` alone would allow.
+const DOCTRINE_OFFENSIVE_CAUTION_MULT: f32 = 0.85;
+/// As `DOCTRINE_OFFENSIVE_CAUTION_MULT`, for `Posture::Defensive`. Land
+/// `offensive()` is suppressed outright under this posture (see
+/// `decide_for_llm`'s `allow_land_offense`), and this multiplier raises the
+/// bar the still-active naval defense/blockade ops judge against.
+const DOCTRINE_DEFENSIVE_CAUTION_MULT: f32 = 1.6;
+/// As above, for `Posture::Consolidate` - also suppresses new offensives,
+/// but less steeply risk-averse than `Defensive` in what it still allows.
+const DOCTRINE_CONSOLIDATE_CAUTION_MULT: f32 = 1.3;
+/// `Doctrine::caution_bias` (docs/phase4-spec.md "-1.0..1.0 慎重さの補正")
+/// scales the posture multiplier above by up to this fraction either way.
+/// Read only after an `is_finite()` check (`decide_for_llm`) - a `Doctrine`
+/// can be built directly, bypassing `llm::parse_doctrine`'s own clamp, so a
+/// non-finite bias must never reach this multiplication (see `llm.rs`'s
+/// module doc on why every `Doctrine` field is treated as untrusted at the
+/// point of use).
+const DOCTRINE_CAUTION_BIAS_RANGE: f32 = 0.3;
+/// `Doctrine::primary_target` (docs/phase4-spec.md "Doctrine"): score
+/// multiplier `offensive()` applies to a candidate target owned by the
+/// named faction, so the wrapped heuristic prefers that enemy's territory
+/// over an equally-scored target elsewhere without being forced onto it
+/// (a target still has to clear the usual force-ratio `caution` gate).
+const DOCTRINE_PRIMARY_TARGET_SCORE_MULT: f32 = 1.5;
 
 /// Stage 3B AI: total military power (land + fleets combined) a faction can
 /// currently bring to bear, used by `diplomacy_ai` to judge "surrounded by a
@@ -840,24 +874,48 @@ impl HeuristicAgent {
             focus_initialized: false,
         }
     }
-}
 
-impl Agent for HeuristicAgent {
-    fn name(&self) -> &str {
-        "HeuristicAgent"
+    /// The faction this agent decides for.
+    pub fn faction(&self) -> FactionId {
+        self.faction
     }
 
-    fn decide(&mut self, obs: &Observation) -> Vec<Action> {
+    /// Stage 4A entry point (docs/phase4-spec.md "LlmAgent"): everything
+    /// `Agent::decide` does, with `doctrine` (from `llm::LlmAgent`, or
+    /// `None`) steering a handful of choices. `doctrine == None` takes
+    /// exactly the same branches, in exactly the same order, as the plain
+    /// `Agent::decide` below - this is what lets a backend that never
+    /// produces a `Doctrine` (every call failing, or before the first
+    /// consult) produce a run byte-identical to `HeuristicAgent` used
+    /// directly (see `llm_failure_falls_back_to_heuristic`).
+    pub(crate) fn decide_for_llm(&mut self, obs: &Observation, doctrine: Option<&Doctrine>) -> Vec<Action> {
         if obs.world.day % self.period != self.offset {
             return Vec::new();
         }
 
         let mut actions = Vec::new();
-        national_focus_ai(self.faction, &mut self.focus_initialized, obs, &mut actions);
+
+        // Stage 4A (docs/phase4-spec.md "Doctrine"): a named `focus` takes
+        // over from the heuristic's own opening/reactive focus AI outright
+        // rather than racing it. Safe to push unconditionally every time
+        // this doctrine is in effect - `apply_set_national_focus` already
+        // makes re-affirming the current focus a no-op and rejects
+        // retargeting mid-transition, so this can never be spammed into an
+        // advantage.
+        match doctrine.and_then(|d| d.focus) {
+            Some(focus) => actions.push(Action::SetNationalFocus(focus)),
+            None => national_focus_ai(self.faction, &mut self.focus_initialized, obs, &mut actions),
+        }
+
         set_policy(self.faction, obs, &mut actions);
         set_trade_policy(self.faction, obs, &mut actions);
         set_logistics_priority(obs, &mut actions);
         diplomacy_ai(self.faction, self.peace_disposition, obs, &mut actions);
+
+        if let Some(doc) = doctrine {
+            seek_doctrine_treaties(self.faction, obs, doc, &mut actions);
+        }
+
         reinforce(self.faction, obs, &mut actions);
         recruit(self.faction, obs, &mut actions);
         naval_recruit(self.faction, obs, &mut actions);
@@ -869,13 +927,38 @@ impl Agent for HeuristicAgent {
         // to falling, rather than spending what's left of its support on a
         // war it might not survive to finish.
         let stability = obs.world.faction(self.faction).stability;
-        let caution = if stability < REGIME_CHANGE_THRESHOLD + POLITICAL_SUPPORT_MARGIN {
+        let mut caution = if stability < REGIME_CHANGE_THRESHOLD + POLITICAL_SUPPORT_MARGIN {
             self.caution * POLITICAL_CAUTION_BOOST
         } else {
             self.caution
         };
-        offensive(self.faction, caution, obs, &mut actions);
-        naval_ops(self.faction, caution, obs, &mut actions);
+
+        // Stage 4A: `Posture`/`caution_bias` reshape the same `caution`
+        // knob `offensive()`/`naval_ops()` already read, and `Defensive`/
+        // `Consolidate` additionally suppress *new* offensives outright
+        // (still-in-flight orders from a previous tick are untouched -
+        // there simply are none, since `offensive()` is the only source of
+        // attack orders). `avoid`/`primary_target` only ever affect target
+        // *selection*, never bypass the caution gate itself.
+        let (avoid, primary_target, allow_offense): (&[FactionId], Option<FactionId>, bool) = match doctrine
+        {
+            None => (&[], None, true),
+            Some(doc) => {
+                let bias = if doc.caution_bias.is_finite() { doc.caution_bias.clamp(-1.0, 1.0) } else { 0.0 };
+                let (posture_mult, allow_offense) = match doc.posture {
+                    llm::Posture::Offensive => (DOCTRINE_OFFENSIVE_CAUTION_MULT, true),
+                    llm::Posture::Defensive => (DOCTRINE_DEFENSIVE_CAUTION_MULT, false),
+                    llm::Posture::Consolidate => (DOCTRINE_CONSOLIDATE_CAUTION_MULT, false),
+                };
+                caution *= posture_mult * (1.0 + bias * DOCTRINE_CAUTION_BIAS_RANGE);
+                (doc.avoid.as_slice(), doc.primary_target, allow_offense)
+            }
+        };
+
+        if allow_offense {
+            offensive(self.faction, caution, obs, avoid, primary_target, &mut actions);
+        }
+        naval_ops(self.faction, caution, obs, allow_offense, &mut actions);
 
         let already_moved: BTreeSet<UnitId> = actions
             .iter()
@@ -887,6 +970,46 @@ impl Agent for HeuristicAgent {
         advance_interior(self.faction, obs, &already_moved, &mut actions);
 
         actions
+    }
+}
+
+/// Stage 4A (docs/phase4-spec.md "Doctrine"): proposes whichever of
+/// `Doctrine::seek_treaties` this faction doesn't already have active or
+/// pending, and isn't on cooldown for. Every `FactionId` is re-validated
+/// against the *current* `World` right here, regardless of whether
+/// `llm::parse_doctrine` already sanitized it at parse time - a `Doctrine`
+/// can also be constructed directly (bypassing the parser entirely, as
+/// `llm_cannot_produce_invalid_actions` does on purpose), and a stale or
+/// out-of-range target must never reach `Diplomacy`'s direct indexing
+/// (`has_treaty`/`cooldown`/`find_pending` all index by `FactionId` with no
+/// bounds check of their own - see `diplomacy.rs`).
+fn seek_doctrine_treaties(faction: FactionId, obs: &Observation, doctrine: &Doctrine, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    let n = world.factions.len();
+    for &(to, treaty) in &doctrine.seek_treaties {
+        if to == faction || to.index() >= n || !world.factions[to.index()].alive {
+            continue;
+        }
+        if world.diplomacy.has_treaty(faction, to, treaty) {
+            continue;
+        }
+        if world.diplomacy.find_pending(faction, to).is_some() {
+            continue;
+        }
+        if world.diplomacy.cooldown(faction, to, treaty) > 0 {
+            continue;
+        }
+        actions.push(Action::ProposeTreaty { to, treaty });
+    }
+}
+
+impl Agent for HeuristicAgent {
+    fn name(&self) -> &str {
+        "HeuristicAgent"
+    }
+
+    fn decide(&mut self, obs: &Observation) -> Vec<Action> {
+        self.decide_for_llm(obs, None)
     }
 }
 
@@ -1220,9 +1343,21 @@ fn naval_recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action
 ///    dependent on that water;
 /// 3. (point 4) otherwise, head back to the faction's main home port zone,
 ///    where it stays once there (no target found next time it's idle).
-fn naval_ops(faction: FactionId, caution: f32, obs: &Observation, actions: &mut Vec<Action>) {
+/// Stage 4A addition: `allow_offense` gates point 3 (contesting an enemy
+/// port zone) only - point 2 (defending an own port zone under threat)
+/// always runs regardless, since a `Doctrine::posture` of `Defensive`/
+/// `Consolidate` means "don't start fights", not "don't defend". When
+/// `false`, `enemy_port_zones` is left empty so `blockade_target` below
+/// never finds anything to propose.
+fn naval_ops(
+    faction: FactionId,
+    caution: f32,
+    obs: &Observation,
+    allow_offense: bool,
+    actions: &mut Vec<Action>,
+) {
     let own_port_zones = port_zones(faction, obs, true);
-    let enemy_port_zones = port_zones(faction, obs, false);
+    let enemy_port_zones = if allow_offense { port_zones(faction, obs, false) } else { BTreeSet::new() };
 
     let mut idle_by_zone: BTreeMap<SeaZoneId, Vec<UnitId>> = BTreeMap::new();
     for unit_id in obs.own_units() {
@@ -1497,7 +1632,25 @@ fn safest_high_infra_region(faction: FactionId, obs: &Observation) -> Option<Reg
 /// garrison when attacking out of a front region with a defended target.
 /// Units already moving toward that same target fill part of that quota
 /// without a fresh order (see `is_en_route_here` below).
-fn offensive(faction: FactionId, caution: f32, obs: &Observation, actions: &mut Vec<Action>) {
+/// Stage 4A additions (docs/phase4-spec.md "Doctrine"): `avoid` drops any
+/// candidate target owned by one of those factions before scoring even
+/// starts (a hard exclusion, not a penalty - `HeuristicAgent::decide` itself
+/// always passes `&[]` here, so this is behaviourally a no-op for every
+/// existing caller); `primary_target`, when set, multiplies a candidate's
+/// score by `DOCTRINE_PRIMARY_TARGET_SCORE_MULT` when it's owned by that
+/// faction - a preference, not a requirement, so a much better-scoring
+/// target elsewhere can still win. Neither parameter is ever used to index
+/// `World` - only compared against a target region's own (always-valid)
+/// `owner` - so an out-of-range or otherwise invalid `FactionId` in either
+/// is harmless here by construction (see `llm.rs`'s module doc).
+fn offensive(
+    faction: FactionId,
+    caution: f32,
+    obs: &Observation,
+    avoid: &[FactionId],
+    primary_target: Option<FactionId>,
+    actions: &mut Vec<Action>,
+) {
     let mut front = obs.front_regions();
     front.sort_by_key(|r| r.0);
 
@@ -1505,7 +1658,10 @@ fn offensive(faction: FactionId, caution: f32, obs: &Observation, actions: &mut 
         let mut targets: Vec<RegionId> = obs
             .world
             .neighbors(region)
-            .filter(|&n| obs.world.region(n).owner != faction)
+            .filter(|&n| {
+                let owner = obs.world.region(n).owner;
+                owner != faction && !avoid.contains(&owner)
+            })
             .collect();
         targets.sort_by_key(|r| r.0);
         if targets.is_empty() {
@@ -1516,7 +1672,10 @@ fn offensive(faction: FactionId, caution: f32, obs: &Observation, actions: &mut 
             .into_iter()
             .fold(None, |best: Option<(RegionId, f32)>, t| {
                 let value = obs.world.region(t).value();
-                let score = value / (1.0 + obs.enemy_power(t));
+                let mut score = value / (1.0 + obs.enemy_power(t));
+                if primary_target.is_some() && primary_target == Some(obs.world.region(t).owner) {
+                    score *= DOCTRINE_PRIMARY_TARGET_SCORE_MULT;
+                }
                 match best {
                     Some((_, best_score)) if score <= best_score => best,
                     _ => Some((t, score)),
@@ -1632,6 +1791,9 @@ fn advance_interior(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod llm_tests;
 
 /// Breadth-first hop count from `from` to every region, over the full map
 /// graph (not restricted to friendly territory - this is just "how far
