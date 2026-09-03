@@ -9,7 +9,6 @@ mod report;
 
 use archipelago_agents::llm::{LlmAgent, LlmBackend, LlmError, MockBackend, ScriptedBackend};
 use archipelago_agents::newspaper::{self, NEWSPAPER_INTERVAL_DAYS};
-use archipelago_agents::HeuristicAgent;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::event::Event;
 use archipelago_sim::ids::FactionId;
@@ -17,25 +16,6 @@ use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
 
 use cli::{AgentKind, Args, BackendKind};
-
-/// Per-faction caution (the force-ratio margin required before attacking;
-/// higher = more cautious, ~1.0 = attack at parity) so the three AIs don't
-/// converge on identical play (mvp-spec.md §7 suggests this spread).
-const CAUTION: [f32; 3] = [1.15, 1.30, 1.45];
-
-/// External code review fix C2 (docs/phase3-spec.md §23: every seed should
-/// produce a different history): per-faction diplomatic disposition
-/// (`HeuristicAgent::with_peace_disposition`'s `peace_disposition`) - a
-/// separate spread from `CAUTION` above, since a faction's appetite for
-/// peace/alliance needn't track its appetite for a fight one-for-one. Below
-/// `1.0` sues for peace sooner (counts as "outmatched" at a smaller power
-/// deficit); above `1.0` holds out longer. Deliberately not in the same
-/// rank order as `CAUTION` (中央同盟, index 1, is both the most militarily
-/// cautious-of-the-two-front-facing pair *and* the quickest to seek peace,
-/// while 西方同盟, index 2, is militarily most cautious but diplomatically
-/// most stubborn) so the two knobs can pull a faction's behaviour in
-/// different directions rather than one simply amplifying the other.
-const DIPLOMACY: [f32; 3] = [1.05, 0.80, 1.15];
 
 /// Stage 4A `--backend mock` (docs/phase4-spec.md "Stage 4A"): a small,
 /// fixed, deterministic rotation of valid canned `Doctrine` responses -
@@ -92,15 +72,13 @@ fn newspaper_backend(args: &Args) -> Box<dyn LlmBackend> {
 /// defaults to HeuristicAgent; LLM is opt-in via `--agent llm --backend
 /// mock`"). Every faction gets the same `AgentKind`/`BackendKind` - a mixed
 /// run isn't part of Stage 4A's scope - but each still gets its own
-/// `HeuristicAgent` fallback with its own `CAUTION`/`DIPLOMACY` spread, and
-/// (for `AgentKind::Llm`) its own independent backend instance.
+/// `HeuristicAgent` fallback (`archipelago_agents::default_heuristic_agent`'s
+/// `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION` spread), and (for
+/// `AgentKind::Llm`) its own independent backend instance.
 fn build_agents(args: &Args, faction_count: usize) -> Vec<Box<dyn Agent>> {
     (0..faction_count)
         .map(|i| {
-            let caution = CAUTION.get(i).copied().unwrap_or(1.25);
-            let peace_disposition = DIPLOMACY.get(i).copied().unwrap_or(1.0);
-            let fallback =
-                HeuristicAgent::with_peace_disposition(FactionId(i as u32), caution, peace_disposition);
+            let fallback = archipelago_agents::default_heuristic_agent(i);
 
             match args.agent {
                 AgentKind::Heuristic => Box::new(fallback) as Box<dyn Agent>,

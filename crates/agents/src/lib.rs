@@ -961,6 +961,32 @@ pub struct HeuristicAgent {
     focus_initialized: bool,
 }
 
+/// Default per-faction caution spread (mvp-spec.md §7 suggests this
+/// spread): the force-ratio margin required before `HeuristicAgent`
+/// launches an offensive, indexed by faction id. Shared by every caller
+/// that wants "the same default AI `apps/headless --agent heuristic` uses"
+/// without picking its own tuning - `apps/headless`'s `build_agents` and
+/// `archipelago-api`'s uncontrolled-faction agents both go through
+/// `default_heuristic_agent` below, so both produce byte-identical default
+/// play for the same seed (docs/phase5-spec.md's `api_run_matches_headless`).
+pub const DEFAULT_CAUTION: [f32; 3] = [1.15, 1.30, 1.45];
+
+/// Default per-faction diplomatic disposition spread, paired with
+/// `DEFAULT_CAUTION` - see `HeuristicAgent::with_peace_disposition`'s doc
+/// for what the knob does.
+pub const DEFAULT_PEACE_DISPOSITION: [f32; 3] = [1.05, 0.80, 1.15];
+
+/// Builds the default `HeuristicAgent` for faction index `i`, using
+/// `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION` for the first three
+/// factions and `(1.25, 1.0)` beyond that spread - the same fallback
+/// `apps/headless`'s own `build_agents` used before this was factored out
+/// here.
+pub fn default_heuristic_agent(i: usize) -> HeuristicAgent {
+    let caution = DEFAULT_CAUTION.get(i).copied().unwrap_or(1.25);
+    let peace_disposition = DEFAULT_PEACE_DISPOSITION.get(i).copied().unwrap_or(1.0);
+    HeuristicAgent::with_peace_disposition(FactionId(i as u32), caution, peace_disposition)
+}
+
 impl HeuristicAgent {
     /// `caution` is the force-ratio margin required before the agent will
     /// launch an offensive: it attacks only when

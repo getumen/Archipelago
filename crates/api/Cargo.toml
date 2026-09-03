@@ -1,0 +1,22 @@
+[package]
+name = "archipelago-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Stage 5A (docs/phase5-spec.md "Stage 5A — API"): std-only, same as
+# `crates/llm`. No external crate at all - not even for WebSocket (see
+# `src/ws.rs` for the hand-rolled SHA-1/base64/handshake), so
+# `cargo build --workspace` never needs network access to fetch a
+# dependency for this crate either, and there is nothing to exclude with
+# `--exclude archipelago-api` on that account. It is still its own crate
+# (not folded into `apps/headless`) purely so a future dependency, if one
+# ever turns out to be unavoidable, stays isolated here exactly per the
+# spec's boundary.
+[dependencies]
+archipelago-sim = { path = "../sim" }
+archipelago-agents = { path = "../agents" }
+
+[[bin]]
+name = "archipelago-api"
+path = "src/bin/main.rs"
