@@ -14,6 +14,7 @@ use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
+use archipelago_sim::world::World;
 
 /// `Simulation::outcome`'s day horizon for a session that doesn't override
 /// it - matches `apps/headless`'s own `Args::default().days` so an
@@ -129,11 +130,31 @@ pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
     next_id: AtomicU64,
     idle_timeout: Duration,
+    /// Stage 6A (docs/phase6-spec.md "Stage 6A"): the scenario every new
+    /// session is built on - the embedded default unless the server was
+    /// started with `--scenario <path>` (`SessionManager::with_scenario`).
+    /// `POST /reset` clones this per session (`World` is cheap to clone at
+    /// the 10-region scale and each session needs its own independent
+    /// copy); `GET /schema` reads its dimensions directly so the reported
+    /// observation length/layout always matches whatever map is actually
+    /// loaded, not a scenario-agnostic compile-time constant.
+    pub scenario: World,
 }
 
 impl SessionManager {
+    /// `SessionManager::with_scenario` on the embedded default scenario -
+    /// unchanged since before Stage 6A, so every existing caller (this
+    /// crate's own tests included) keeps compiling and behaving exactly as
+    /// before.
     pub fn new(idle_timeout: Duration) -> Arc<Self> {
-        Arc::new(SessionManager { sessions: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1), idle_timeout })
+        SessionManager::with_scenario(idle_timeout, archipelago_sim::scenario::build_world())
+    }
+
+    /// Builds a `SessionManager` whose sessions all start from `scenario`
+    /// (already loaded and validated by the caller - `archipelago-api`'s
+    /// `--scenario <path>`, via `archipelago_sim::scenario::load_file`).
+    pub fn with_scenario(idle_timeout: Duration, scenario: World) -> Arc<Self> {
+        Arc::new(SessionManager { sessions: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1), idle_timeout, scenario })
     }
 
     /// Spawns the background idle-reclamation sweep on its own daemon

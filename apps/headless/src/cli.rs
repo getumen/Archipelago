@@ -39,6 +39,15 @@ pub struct Args {
     /// it can never change `--json`'s output (it's gated behind `!json`, and
     /// even when active it never touches `Simulation`/`World` mutably).
     pub newspaper: bool,
+    /// Stage 6A `--scenario <path>` (docs/phase6-spec.md "Stage 6A"): loads
+    /// the map from this JSON file (`archipelago_sim::scenario::load_file`)
+    /// instead of the embedded default (`scenarios/mvp.json`). `None` keeps
+    /// the previous behaviour exactly - `archipelago_sim::scenario::
+    /// build_world()`.
+    pub scenario: Option<String>,
+    /// Stage 6A `--bench` (docs/phase6-spec.md "Stage 6A — ベンチマーク"):
+    /// runs `bench::run` instead of the normal day-by-day loop and exits.
+    pub bench: bool,
 }
 
 impl Default for Args {
@@ -52,6 +61,8 @@ impl Default for Args {
             agent: AgentKind::Heuristic,
             backend: BackendKind::Mock,
             newspaper: false,
+            scenario: None,
+            bench: false,
         }
     }
 }
@@ -90,8 +101,10 @@ impl Args {
                 "--quiet" => args.quiet = true,
                 "--json" => args.json = true,
                 "--newspaper" => args.newspaper = true,
+                "--bench" => args.bench = true,
                 "--agent" => args.agent = parse_agent(&take_value(&mut iter, "--agent")?)?,
                 "--backend" => args.backend = parse_backend(&take_value(&mut iter, "--backend")?)?,
+                "--scenario" => args.scenario = Some(take_value(&mut iter, "--scenario")?),
                 other => {
                     if let Some(v) = other.strip_prefix("--seed=") {
                         args.seed = v.parse().map_err(|_| "--seed expects an integer".to_string())?;
@@ -103,6 +116,8 @@ impl Args {
                         args.agent = parse_agent(v)?;
                     } else if let Some(v) = other.strip_prefix("--backend=") {
                         args.backend = parse_backend(v)?;
+                    } else if let Some(v) = other.strip_prefix("--scenario=") {
+                        args.scenario = Some(v.to_string());
                     } else {
                         return Err(format!("unknown argument: {other}"));
                     }

@@ -80,6 +80,27 @@ impl Terrain {
             Terrain::Urban => 1.2,
         }
     }
+
+    /// Lowercase English key used by `scenario`'s JSON schema (Stage 6A,
+    /// docs/phase6-spec.md "Stage 6A"), the same `Good::key()` convention.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Terrain::Plain => "plain",
+            Terrain::Hill => "hill",
+            Terrain::Mountain => "mountain",
+            Terrain::Urban => "urban",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Terrain> {
+        match key {
+            "plain" => Some(Terrain::Plain),
+            "hill" => Some(Terrain::Hill),
+            "mountain" => Some(Terrain::Mountain),
+            "urban" => Some(Terrain::Urban),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -119,6 +140,31 @@ impl LinkKind {
             LinkKind::Tunnel => 3.0,
             LinkKind::Strait => 4.5,
             LinkKind::Sea => 6.0,
+        }
+    }
+
+    /// Lowercase English key used by `scenario`'s JSON schema (Stage 6A,
+    /// docs/phase6-spec.md "Stage 6A"), the same `Good::key()` convention.
+    /// `Sea` has no key: it's never authored in a scenario file (it marks a
+    /// unit's own transit through a `SeaZone`, not a `Region`-to-`Region`
+    /// link - see `Station`), so `from_key` never accepts it either.
+    pub const fn key(self) -> &'static str {
+        match self {
+            LinkKind::Rail => "rail",
+            LinkKind::Road => "road",
+            LinkKind::Tunnel => "tunnel",
+            LinkKind::Strait => "strait",
+            LinkKind::Sea => "sea",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<LinkKind> {
+        match key {
+            "rail" => Some(LinkKind::Rail),
+            "road" => Some(LinkKind::Road),
+            "tunnel" => Some(LinkKind::Tunnel),
+            "strait" => Some(LinkKind::Strait),
+            _ => None,
         }
     }
 }

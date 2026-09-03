@@ -1,0 +1,192 @@
+{
+  "regions": [
+    {
+      "id": "hokkaido",
+      "name": "北海道",
+      "terrain": "plain",
+      "population": 510.0,
+      "capacity": { "food": 12.0, "energy": 2.0, "steel": 0.5, "machinery": 0.3, "munitions": 0.2, "arms": 0.0 },
+      "infrastructure": 0.55,
+      "port": 1.0,
+      "links": [
+        { "to": "kita_tohoku", "kind": "strait", "strait_zone": "hoppou" }
+      ]
+    },
+    {
+      "id": "kita_tohoku",
+      "name": "北東北",
+      "terrain": "hill",
+      "population": 330.0,
+      "capacity": { "food": 9.0, "energy": 1.5, "steel": 0.5, "machinery": 0.3, "munitions": 0.2, "arms": 0.0 },
+      "infrastructure": 0.50,
+      "port": 0.6,
+      "links": [
+        { "to": "hokkaido", "kind": "strait", "strait_zone": "hoppou" },
+        { "to": "minami_tohoku", "kind": "rail" }
+      ]
+    },
+    {
+      "id": "minami_tohoku",
+      "name": "南東北",
+      "terrain": "hill",
+      "population": 550.0,
+      "capacity": { "food": 8.0, "energy": 2.5, "steel": 1.5, "machinery": 0.8, "munitions": 0.5, "arms": 0.2 },
+      "infrastructure": 0.65,
+      "port": 0.7,
+      "links": [
+        { "to": "kita_tohoku", "kind": "rail" },
+        { "to": "kanto", "kind": "rail" }
+      ]
+    },
+    {
+      "id": "kanto",
+      "name": "関東",
+      "terrain": "urban",
+      "population": 4300.0,
+      "capacity": { "food": 3.0, "energy": 4.0, "steel": 3.5, "machinery": 6.5, "munitions": 3.0, "arms": 3.0 },
+      "infrastructure": 1.00,
+      "port": 1.5,
+      "links": [
+        { "to": "minami_tohoku", "kind": "rail" },
+        { "to": "shinetsu_hokuriku", "kind": "rail" },
+        { "to": "tokai", "kind": "rail" }
+      ]
+    },
+    {
+      "id": "shinetsu_hokuriku",
+      "name": "信越・北陸",
+      "terrain": "mountain",
+      "population": 480.0,
+      "capacity": { "food": 6.0, "energy": 3.0, "steel": 1.0, "machinery": 0.7, "munitions": 0.3, "arms": 0.0 },
+      "infrastructure": 0.55,
+      "port": 0.5,
+      "links": [
+        { "to": "kanto", "kind": "rail" },
+        { "to": "tokai", "kind": "road" },
+        { "to": "kinki", "kind": "rail" }
+      ]
+    },
+    {
+      "id": "tokai",
+      "name": "東海",
+      "terrain": "plain",
+      "population": 1500.0,
+      "capacity": { "food": 4.0, "energy": 2.0, "steel": 3.0, "machinery": 7.0, "munitions": 2.0, "arms": 2.0 },
+      "infrastructure": 0.90,
+      "port": 1.2,
+      "links": [
+        { "to": "kanto", "kind": "rail" },
+        { "to": "shinetsu_hokuriku", "kind": "road" },
+        { "to": "kinki", "kind": "rail" }
+      ]
+    },
+    {
+      "id": "kinki",
+      "name": "近畿",
+      "terrain": "urban",
+      "population": 2200.0,
+      "capacity": { "food": 2.0, "energy": 2.5, "steel": 3.5, "machinery": 4.5, "munitions": 2.0, "arms": 1.5 },
+      "infrastructure": 0.95,
+      "port": 1.3,
+      "links": [
+        { "to": "shinetsu_hokuriku", "kind": "rail" },
+        { "to": "tokai", "kind": "rail" },
+        { "to": "chugoku", "kind": "rail" },
+        { "to": "shikoku", "kind": "strait", "strait_zone": "taiheiyo_minami" }
+      ]
+    },
+    {
+      "id": "chugoku",
+      "name": "中国",
+      "terrain": "hill",
+      "population": 740.0,
+      "capacity": { "food": 3.5, "energy": 2.0, "steel": 2.5, "machinery": 1.0, "munitions": 0.5, "arms": 0.0 },
+      "infrastructure": 0.70,
+      "port": 0.9,
+      "links": [
+        { "to": "kinki", "kind": "rail" },
+        { "to": "shikoku", "kind": "strait", "strait_zone": "seihou" },
+        { "to": "kyushu", "kind": "tunnel" }
+      ]
+    },
+    {
+      "id": "shikoku",
+      "name": "四国",
+      "terrain": "hill",
+      "population": 370.0,
+      "capacity": { "food": 4.0, "energy": 0.8, "steel": 0.5, "machinery": 0.4, "munitions": 0.3, "arms": 0.0 },
+      "infrastructure": 0.60,
+      "port": 0.6,
+      "links": [
+        { "to": "kinki", "kind": "strait", "strait_zone": "taiheiyo_minami" },
+        { "to": "chugoku", "kind": "strait", "strait_zone": "seihou" }
+      ]
+    },
+    {
+      "id": "kyushu",
+      "name": "九州",
+      "terrain": "plain",
+      "population": 1300.0,
+      "capacity": { "food": 7.0, "energy": 2.5, "steel": 2.0, "machinery": 1.5, "munitions": 1.5, "arms": 0.5 },
+      "infrastructure": 0.75,
+      "port": 1.4,
+      "links": [
+        { "to": "chugoku", "kind": "tunnel" }
+      ]
+    }
+  ],
+
+  "sea_zones": [
+    {
+      "id": "hoppou",
+      "name": "北方海域",
+      "coast": ["hokkaido", "kita_tohoku"],
+      "adjacent": ["taiheiyo_kita", "nihonkai"]
+    },
+    {
+      "id": "taiheiyo_kita",
+      "name": "太平洋北",
+      "coast": ["kita_tohoku", "minami_tohoku", "kanto"],
+      "adjacent": ["hoppou", "taiheiyo_minami"]
+    },
+    {
+      "id": "taiheiyo_minami",
+      "name": "太平洋南",
+      "coast": ["kanto", "tokai", "kinki", "shikoku"],
+      "adjacent": ["taiheiyo_kita", "seihou"]
+    },
+    {
+      "id": "nihonkai",
+      "name": "日本海",
+      "coast": ["hokkaido", "kita_tohoku", "minami_tohoku", "shinetsu_hokuriku", "chugoku"],
+      "adjacent": ["hoppou", "seihou"]
+    },
+    {
+      "id": "seihou",
+      "name": "西方海域",
+      "coast": ["kinki", "chugoku", "shikoku", "kyushu"],
+      "adjacent": ["taiheiyo_minami", "nihonkai"]
+    }
+  ],
+
+  "factions": [
+    {
+      "id": "touhou_rengou",
+      "name": "東方連合",
+      "capital": "kanto",
+      "regions": ["hokkaido", "kita_tohoku", "minami_tohoku", "kanto"]
+    },
+    {
+      "id": "chuo_domei",
+      "name": "中央同盟",
+      "capital": "kinki",
+      "regions": ["shinetsu_hokuriku", "tokai", "kinki"]
+    },
+    {
+      "id": "seihou_domei",
+      "name": "西方同盟",
+      "capital": "kyushu",
+      "regions": ["chugoku", "shikoku", "kyushu"]
+    }
+  ]
+}

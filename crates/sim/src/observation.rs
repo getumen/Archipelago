@@ -35,13 +35,25 @@ pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2;
 /// when there's no pending proposal in that direction.
 pub const DIPLOMACY_FIELD_COUNT: usize = 9;
 
-/// Fixed total length of `Observation::encode()`'s output for the MVP map
-/// (`scenario::REGION_COUNT` regions, `scenario::SEA_ZONE_COUNT` sea zones,
-/// `scenario::FACTION_COUNT` factions).
-pub const ENCODING_LEN: usize = crate::scenario::REGION_COUNT * REGION_FIELD_COUNT
-    + crate::scenario::SEA_ZONE_COUNT * SEA_ZONE_FIELD_COUNT
-    + FACTION_FIELD_COUNT
-    + crate::scenario::FACTION_COUNT * DIPLOMACY_FIELD_COUNT;
+/// `Observation::encode()`'s output length for a scenario with the given
+/// region/sea-zone/faction counts - the general form of `ENCODING_LEN`
+/// below. Stage 6A (docs/phase6-spec.md "Stage 6A"): scenario data is no
+/// longer fixed at compile time (`--scenario` can load a differently-sized
+/// map), so `encode()` itself computes its expected length this way rather
+/// than trusting the compile-time `ENCODING_LEN` constant, which only ever
+/// describes the embedded default scenario.
+pub const fn encoding_len(region_count: usize, sea_zone_count: usize, faction_count: usize) -> usize {
+    region_count * REGION_FIELD_COUNT + sea_zone_count * SEA_ZONE_FIELD_COUNT + FACTION_FIELD_COUNT + faction_count * DIPLOMACY_FIELD_COUNT
+}
+
+/// Fixed total length of `Observation::encode()`'s output for the embedded
+/// default scenario (`scenario::REGION_COUNT` regions,
+/// `scenario::SEA_ZONE_COUNT` sea zones, `scenario::FACTION_COUNT`
+/// factions) - i.e. `scenarios/mvp.json`. A `--scenario`-loaded world with
+/// different counts has a different real length; compute it with
+/// `encoding_len` from that world's actual sizes instead of assuming this
+/// constant, the same way `encode()` itself does.
+pub const ENCODING_LEN: usize = encoding_len(crate::scenario::REGION_COUNT, crate::scenario::SEA_ZONE_COUNT, crate::scenario::FACTION_COUNT);
 
 pub struct Observation<'a> {
     pub faction: FactionId,
@@ -140,8 +152,8 @@ impl<'a> Observation<'a> {
         None
     }
 
-    /// Fixed length `ENCODING_LEN` (`regions.len() * REGION_FIELD_COUNT +
-    /// sea_zones.len() * SEA_ZONE_FIELD_COUNT + FACTION_FIELD_COUNT`):
+    /// Length `encoding_len(regions.len(), sea_zones.len(), factions.len())`
+    /// (`ENCODING_LEN` for the embedded default scenario specifically):
     /// per-region `[owned, population, infrastructure, supply, unrest,
     /// own_power, enemy_power, capacity[GOOD_COUNT]..., devastation,
     /// construction_progress, import_flow, node_throughput]`, then
@@ -161,7 +173,8 @@ impl<'a> Observation<'a> {
     /// import volume and per-node supply throughput cap
     /// (`trade::tick_imports`, `Region::node_throughput`).
     pub fn encode(&self) -> Vec<f32> {
-        let mut out = Vec::with_capacity(ENCODING_LEN);
+        let expected_len = encoding_len(self.world.regions.len(), self.world.sea_zones.len(), self.world.factions.len());
+        let mut out = Vec::with_capacity(expected_len);
         for region in &self.world.regions {
             out.push(if region.owner == self.faction { 1.0 } else { 0.0 });
             out.push(region.population);
@@ -209,7 +222,7 @@ impl<'a> Observation<'a> {
         // fixed shape regardless of which faction it's viewing from - the
         // same convention the region "owned" flag already uses).
         let dip = &self.world.diplomacy;
-        for g_idx in 0..crate::scenario::FACTION_COUNT {
+        for g_idx in 0..self.world.factions.len() {
             let other = FactionId(g_idx as u32);
             if other == self.faction {
                 for _ in 0..DIPLOMACY_FIELD_COUNT {
@@ -230,7 +243,7 @@ impl<'a> Observation<'a> {
             out.push(outgoing.map(|p| p.treaty.index() as f32).unwrap_or(-1.0));
         }
 
-        debug_assert_eq!(out.len(), ENCODING_LEN);
+        debug_assert_eq!(out.len(), expected_len);
         out
     }
 }

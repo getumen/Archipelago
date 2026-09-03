@@ -3872,3 +3872,236 @@ fn repeated_natural_language_proposals_cannot_farm_opinion_or_flood_events() {
          acceptance bonus again"
     );
 }
+
+// Stage 6A (docs/phase6-spec.md "Stage 6A の受け入れ基準"): the scenario
+// data-driven-ization regression guards.
+
+/// `scenario_roundtrip`: serialising the built-in scenario and reading it
+/// back must reproduce it exactly - both as a `Scenario` (structural
+/// equality) and as the `World` it builds (`{:?}` equality, since `World`
+/// itself doesn't derive `PartialEq` - see `Region`'s `#[derive(Debug)]`).
+#[test]
+fn scenario_roundtrip() {
+    let original = scenario::Scenario::parse(scenario::embedded_mvp_json()).expect("embedded mvp.json parses");
+    original.validate().expect("embedded mvp.json passes validation");
+
+    let json = original.to_json();
+    let reparsed = scenario::Scenario::parse(&json).expect("round-tripped JSON parses");
+    assert_eq!(original, reparsed, "writing out the built-in scenario and reading it back must reproduce it exactly");
+
+    let world_a = original.build_world();
+    let world_b = reparsed.build_world();
+    assert_eq!(
+        format!("{world_a:?}"),
+        format!("{world_b:?}"),
+        "the round-tripped scenario must build a `World` identical to the original"
+    );
+}
+
+/// A minimal 3-region, 2-faction, sea-zone-free scenario, valid as written -
+/// every `invalid_scenario_is_rejected` case below starts from this text
+/// and breaks exactly one rule, so each failure is unambiguously
+/// attributable to the one thing that test changed.
+const MINI_VALID_SCENARIO: &str = r#"
+{
+  "regions": [
+    { "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0,
+      "links": [ { "to": "b", "kind": "rail" } ] },
+    { "id": "b", "name": "B", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0,
+      "links": [ { "to": "a", "kind": "rail" }, { "to": "c", "kind": "rail" } ] },
+    { "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0,
+      "links": [ { "to": "b", "kind": "rail" } ] }
+  ],
+  "sea_zones": [],
+  "factions": [
+    { "id": "f1", "name": "F1", "capital": "a", "regions": ["a", "b"] },
+    { "id": "f2", "name": "F2", "capital": "c", "regions": ["c"] }
+  ]
+}
+"#;
+
+#[test]
+fn invalid_scenario_is_rejected() {
+    // Sanity check: the shared base text is actually valid, so every
+    // failure below is caused by the one edit each variant makes.
+    scenario::load_str(MINI_VALID_SCENARIO).expect("MINI_VALID_SCENARIO must itself be valid");
+
+    // A one-way link: `a` lists a link to `b`, but `b`'s own link list no
+    // longer lists one back to `a` (only to `c`).
+    let one_way = MINI_VALID_SCENARIO.replacen(
+        r#"{ "to": "a", "kind": "rail" }, { "to": "c", "kind": "rail" }"#,
+        r#"{ "to": "c", "kind": "rail" }"#,
+        1,
+    );
+    match scenario::load_str(&one_way) {
+        Err(scenario::ScenarioError::OneWayLink { from, to }) => {
+            assert_eq!((from.as_str(), to.as_str()), ("a", "b"));
+        }
+        other => panic!("expected a distinct OneWayLink error, got {other:?}"),
+    }
+
+    // A dangling id: `a` gains a second link to a region that doesn't exist.
+    let dangling = MINI_VALID_SCENARIO.replacen(
+        r#"{ "to": "b", "kind": "rail" } ] },
+    { "id": "b""#,
+        r#"{ "to": "b", "kind": "rail" }, { "to": "nowhere", "kind": "rail" } ] },
+    { "id": "b""#,
+        1,
+    );
+    match scenario::load_str(&dangling) {
+        Err(scenario::ScenarioError::UnknownId { id, .. }) => assert_eq!(id, "nowhere"),
+        other => panic!("expected a distinct UnknownId error, got {other:?}"),
+    }
+
+    // A disconnected region: a fourth region `d`, with no links at all,
+    // claimed by `f2` alongside `c` so ownership itself stays valid.
+    let disconnected = MINI_VALID_SCENARIO
+        .replacen(
+            r#"{ "id": "c", "name": "C""#,
+            r#"{ "id": "d", "name": "D", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "links": [] },
+    { "id": "c", "name": "C""#,
+            1,
+        )
+        .replacen(r#""regions": ["c"]"#, r#""regions": ["c", "d"]"#, 1);
+    match scenario::load_str(&disconnected) {
+        Err(scenario::ScenarioError::Disconnected { unreachable }) => assert_eq!(unreachable, vec!["d".to_string()]),
+        other => panic!("expected a distinct Disconnected error, got {other:?}"),
+    }
+
+    // A faction with no territory: `f2`'s `regions` becomes empty, without
+    // reassigning `c` to anyone else.
+    let no_territory = MINI_VALID_SCENARIO.replacen(r#""regions": ["c"]"#, r#""regions": []"#, 1);
+    match scenario::load_str(&no_territory) {
+        Err(scenario::ScenarioError::FactionWithoutTerritory { faction }) => assert_eq!(faction, "f2"),
+        other => panic!("expected a distinct FactionWithoutTerritory error, got {other:?}"),
+    }
+}
+
+/// External code review fix (Stage 6A, P2 #1): an empty `regions` or
+/// `factions` array makes every validation loop below a no-op, so the file
+/// used to "pass" `validate()` and only blow up later - a `--bench` run on
+/// such a scenario panics inside `Observation::encode()` for `FactionId(0)`,
+/// which doesn't exist. Both collections must be rejected, as two separate
+/// cases so neither one masks the other.
+#[test]
+fn empty_scenario_is_rejected() {
+    let empty_regions = {
+        let start = MINI_VALID_SCENARIO.find(r#""regions": ["#).expect("regions array present");
+        let region_array_start = start + r#""regions": ["#.len();
+        let region_array_end = MINI_VALID_SCENARIO[region_array_start..].find("],\n  \"sea_zones\"").expect("end of regions array") + region_array_start;
+        format!("{}{}{}", &MINI_VALID_SCENARIO[..region_array_start], "", &MINI_VALID_SCENARIO[region_array_end..])
+    };
+    match scenario::load_str(&empty_regions) {
+        Err(scenario::ScenarioError::Empty { what }) => assert_eq!(what, "regions"),
+        other => panic!("expected a distinct Empty(\"regions\") error, got {other:?}"),
+    }
+
+    let empty_factions = {
+        let start = MINI_VALID_SCENARIO.find(r#""factions": ["#).expect("factions array present");
+        let faction_array_start = start + r#""factions": ["#.len();
+        let faction_array_end = MINI_VALID_SCENARIO[faction_array_start..].find("]\n}").expect("end of factions array") + faction_array_start;
+        format!("{}{}{}", &MINI_VALID_SCENARIO[..faction_array_start], "", &MINI_VALID_SCENARIO[faction_array_end..])
+    };
+    match scenario::load_str(&empty_factions) {
+        Err(scenario::ScenarioError::Empty { what }) => assert_eq!(what, "factions"),
+        other => panic!("expected a distinct Empty(\"factions\") error, got {other:?}"),
+    }
+}
+
+/// External code review fix (Stage 6A, P2 #2): a `strait` link that omits
+/// `strait_zone` silently becomes immune to blockade (`logistics`/
+/// `military` only throttle a link when `strait_zone.is_some()`), with no
+/// error and no visible symptom until someone notices a strait behaves like
+/// a land route.
+#[test]
+fn strait_without_zone_is_rejected() {
+    // `a`'s link to `b` becomes a `strait` but keeps no `strait_zone` -
+    // exactly the silent-mechanics-change case from the review.
+    let broken = MINI_VALID_SCENARIO.replacen(
+        r#""links": [ { "to": "b", "kind": "rail" } ] },
+    { "id": "b""#,
+        r#""links": [ { "to": "b", "kind": "strait" } ] },
+    { "id": "b""#,
+        1,
+    );
+    match scenario::load_str(&broken) {
+        Err(scenario::ScenarioError::InvalidStraitZone { from, to, .. }) => {
+            assert_eq!((from.as_str(), to.as_str()), ("a", "b"));
+        }
+        other => panic!("expected a distinct InvalidStraitZone error, got {other:?}"),
+    }
+}
+
+/// External code review fix (Stage 6A, P2 #2): a rail/road/tunnel link that
+/// names a `strait_zone` silently becomes subject to blockade throttling it
+/// was never meant to have - the exact opposite mistake from
+/// `strait_without_zone_is_rejected`, and the one the Kanmon tunnel (a land
+/// route deliberately immune to blockade) exists to guard against.
+#[test]
+fn land_link_with_zone_is_rejected() {
+    // Give the scenario a real sea zone to reference, so the failure is
+    // unambiguously "rail link must not name a strait_zone" and not
+    // "unknown sea zone id".
+    let with_zone = MINI_VALID_SCENARIO.replacen(
+        r#""sea_zones": [],"#,
+        r#""sea_zones": [ { "id": "z", "name": "Z", "coast": ["a", "b"], "adjacent": [] } ],"#,
+        1,
+    );
+    let broken = with_zone.replacen(
+        r#""links": [ { "to": "b", "kind": "rail" } ] },
+    { "id": "b""#,
+        r#""links": [ { "to": "b", "kind": "rail", "strait_zone": "z" } ] },
+    { "id": "b""#,
+        1,
+    );
+    match scenario::load_str(&broken) {
+        Err(scenario::ScenarioError::InvalidStraitZone { from, to, .. }) => {
+            assert_eq!((from.as_str(), to.as_str()), ("a", "b"));
+        }
+        other => panic!("expected a distinct InvalidStraitZone error, got {other:?}"),
+    }
+}
+
+/// External code review fix (Stage 6A, P2 #3): `Value::as_f32` used to check
+/// finiteness on the `f64` *before* narrowing to `f32`, so a finite-but-huge
+/// value like `1e100` silently became `f32::INFINITY` and passed. Covers
+/// both a scalar field (`population`) and a per-good `capacity` field, since
+/// `parse_capacity` calls `as_f32` independently of `require_f32`.
+#[test]
+fn out_of_range_number_is_rejected() {
+    let huge_population = MINI_VALID_SCENARIO.replacen(r#""population": 10.0,"#, r#""population": 1e100,"#, 1);
+    match scenario::load_str(&huge_population) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("population"), "expected the error to name `population`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error, got {other:?}"),
+    }
+
+    let huge_capacity = MINI_VALID_SCENARIO.replacen(r#""food":1.0,"#, r#""food":1e100,"#, 1);
+    match scenario::load_str(&huge_capacity) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("capacity"), "expected the error to name `capacity`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error, got {other:?}"),
+    }
+}
+
+/// Guards `scenario::REGION_COUNT`/`SEA_ZONE_COUNT`/`FACTION_COUNT` (kept as
+/// compile-time constants purely so `observation::ENCODING_LEN` can be one)
+/// against ever silently drifting from what `scenarios/mvp.json` actually
+/// contains.
+#[test]
+fn default_scenario_dimensions_match_embedded_json() {
+    let world = scenario::build_world();
+    assert_eq!(world.regions.len(), scenario::REGION_COUNT);
+    assert_eq!(world.sea_zones.len(), scenario::SEA_ZONE_COUNT);
+    assert_eq!(world.factions.len(), scenario::FACTION_COUNT);
+}

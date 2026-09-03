@@ -3,6 +3,7 @@
 //! "leave three AIs alone and history happens" - can be checked from a
 //! terminal.
 
+mod bench;
 mod cli;
 mod json;
 mod report;
@@ -14,8 +15,23 @@ use archipelago_sim::event::Event;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
+use archipelago_sim::world::World;
 
 use cli::{AgentKind, Args, BackendKind};
+
+/// Loads the map this run uses: the embedded default scenario, or whatever
+/// `--scenario <path>` names (Stage 6A, docs/phase6-spec.md "Stage 6A").
+/// Per "壊れたデータで暗黙に既定値へ落ちないこと" - a scenario file that
+/// fails to load is a hard error, never a silent fall-back to the default.
+fn load_world(args: &Args) -> World {
+    match &args.scenario {
+        None => archipelago_sim::scenario::build_world(),
+        Some(path) => archipelago_sim::scenario::load_file(path).unwrap_or_else(|e| {
+            eprintln!("error: could not load --scenario {path}: {e}");
+            std::process::exit(1);
+        }),
+    }
+}
 
 /// Stage 4A `--backend mock` (docs/phase4-spec.md "Stage 4A"): a small,
 /// fixed, deterministic rotation of valid canned `Doctrine` responses -
@@ -113,7 +129,12 @@ fn main() {
         }
     };
 
-    let mut sim = Simulation::new(args.seed);
+    if args.bench {
+        bench::run(&args, load_world(&args));
+        return;
+    }
+
+    let mut sim = Simulation::with_world(load_world(&args), args.seed);
     let mut agents: Vec<Box<dyn Agent>> = build_agents(&args, sim.world.factions.len());
 
     // `--json` keeps stdout a single parseable blob; `--quiet` only trims

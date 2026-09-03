@@ -10,10 +10,7 @@ use std::time::Duration;
 
 use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
-use archipelago_sim::observation::{
-    DIPLOMACY_FIELD_COUNT, ENCODING_LEN, FACTION_FIELD_COUNT, REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT,
-};
-use archipelago_sim::scenario;
+use archipelago_sim::observation::{DIPLOMACY_FIELD_COUNT, FACTION_FIELD_COUNT, REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT};
 use archipelago_sim::sim::{Outcome, Simulation};
 
 use crate::action_codec::{self, MAX_ACTIONS_PER_REQUEST};
@@ -44,9 +41,26 @@ pub struct ServerHandle {
 /// (`src/bin/main.rs`) and short-lived test processes, which never join
 /// them.
 pub fn serve_background(bind_addr: &str, idle_timeout: Duration, sweep_interval: Duration) -> std::io::Result<ServerHandle> {
+    serve_background_with_manager(bind_addr, SessionManager::new(idle_timeout), sweep_interval)
+}
+
+/// `serve_background`, but every session starts from `scenario` instead of
+/// the embedded default - Stage 6A `archipelago-api --scenario <path>`
+/// (docs/phase6-spec.md "Stage 6A"). `scenario` must already be loaded and
+/// validated (`archipelago_sim::scenario::load_file`) - this never falls
+/// back to the default on its own.
+pub fn serve_background_with_scenario(
+    bind_addr: &str,
+    idle_timeout: Duration,
+    sweep_interval: Duration,
+    scenario: archipelago_sim::world::World,
+) -> std::io::Result<ServerHandle> {
+    serve_background_with_manager(bind_addr, SessionManager::with_scenario(idle_timeout, scenario), sweep_interval)
+}
+
+fn serve_background_with_manager(bind_addr: &str, manager: Arc<SessionManager>, sweep_interval: Duration) -> std::io::Result<ServerHandle> {
     let listener = TcpListener::bind(bind_addr)?;
     let addr = listener.local_addr()?;
-    let manager = SessionManager::new(idle_timeout);
     manager.spawn_reaper(sweep_interval);
 
     let accept_manager = Arc::clone(&manager);
@@ -111,7 +125,7 @@ fn is_websocket_upgrade(request: &Request) -> bool {
 fn route(request: &Request, manager: &SessionManager) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Response::json(200, &Value::obj(vec![("status", Value::str("ok"))])),
-        ("GET", "/schema") => Response::json(200, &handle_schema()),
+        ("GET", "/schema") => Response::json(200, &handle_schema(manager)),
         ("POST", "/reset") => handle_reset(request, manager),
         ("GET", "/state") => handle_state(request, manager),
         ("POST", "/action") => handle_action(request, manager),
@@ -137,8 +151,13 @@ fn parse_body(request: &Request) -> Result<Value, Response> {
     crate::json::parse(text, 64).map_err(|e| Response::error(400, &e.to_string()))
 }
 
-fn faction_count() -> usize {
-    scenario::FACTION_COUNT
+/// The loaded scenario's faction count - Stage 6A (docs/phase6-spec.md
+/// "Stage 6A"): `manager.scenario` (the embedded default, or whatever
+/// `--scenario <path>` loaded), never the fixed `scenario::FACTION_COUNT`
+/// compile-time constant, so this stays correct for whatever map the
+/// server was actually started with.
+fn faction_count(manager: &SessionManager) -> usize {
+    manager.scenario.factions.len()
 }
 
 /// `GET /schema` (this stage's discoverability fix, docs/design.md §18): the
@@ -150,26 +169,33 @@ fn faction_count() -> usize {
 /// the exact same `ALL_*` arrays and `key()` methods the decoder itself
 /// uses - see that function's doc) with the two sections that belong closer
 /// to their own source of truth: `Observation::encode()`'s own length
-/// constants, and `scenario`'s own id-count constants (so `region_count`
-/// here can never disagree with the range the decoder actually accepts,
-/// since both come from `scenario::REGION_COUNT` directly).
-fn handle_schema() -> Value {
+/// formula, and the loaded `manager.scenario`'s actual dimensions (Stage 6A:
+/// no longer a fixed compile-time constant - see `faction_count`'s doc -
+/// so `region_count` here can never disagree with the range the decoder
+/// actually accepts for *this* server, whatever scenario it was started
+/// with).
+fn handle_schema(manager: &SessionManager) -> Value {
+    let region_count = manager.scenario.regions.len();
+    let sea_zone_count = manager.scenario.sea_zones.len();
+    let faction_count = faction_count(manager);
+    let encoding_len = archipelago_sim::observation::encoding_len(region_count, sea_zone_count, faction_count);
+
     let observation = Value::obj(vec![
-        ("length", Value::num(ENCODING_LEN as f64)),
+        ("length", Value::num(encoding_len as f64)),
         (
             "layout",
             Value::arr(vec![
                 Value::obj(vec![
                     ("segment", Value::str("regions")),
-                    ("count", Value::num(scenario::REGION_COUNT as f64)),
+                    ("count", Value::num(region_count as f64)),
                     ("fields_per_item", Value::num(REGION_FIELD_COUNT as f64)),
-                    ("total", Value::num((scenario::REGION_COUNT * REGION_FIELD_COUNT) as f64)),
+                    ("total", Value::num((region_count * REGION_FIELD_COUNT) as f64)),
                 ]),
                 Value::obj(vec![
                     ("segment", Value::str("sea_zones")),
-                    ("count", Value::num(scenario::SEA_ZONE_COUNT as f64)),
+                    ("count", Value::num(sea_zone_count as f64)),
                     ("fields_per_item", Value::num(SEA_ZONE_FIELD_COUNT as f64)),
-                    ("total", Value::num((scenario::SEA_ZONE_COUNT * SEA_ZONE_FIELD_COUNT) as f64)),
+                    ("total", Value::num((sea_zone_count * SEA_ZONE_FIELD_COUNT) as f64)),
                 ]),
                 Value::obj(vec![
                     ("segment", Value::str("faction_scalars")),
@@ -179,17 +205,17 @@ fn handle_schema() -> Value {
                 ]),
                 Value::obj(vec![
                     ("segment", Value::str("diplomacy")),
-                    ("count", Value::num(faction_count() as f64)),
+                    ("count", Value::num(faction_count as f64)),
                     ("fields_per_item", Value::num(DIPLOMACY_FIELD_COUNT as f64)),
-                    ("total", Value::num((faction_count() * DIPLOMACY_FIELD_COUNT) as f64)),
+                    ("total", Value::num((faction_count * DIPLOMACY_FIELD_COUNT) as f64)),
                 ]),
             ]),
         ),
     ]);
     let scenario_value = Value::obj(vec![
-        ("faction_count", Value::num(faction_count() as f64)),
-        ("region_count", Value::num(scenario::REGION_COUNT as f64)),
-        ("sea_zone_count", Value::num(scenario::SEA_ZONE_COUNT as f64)),
+        ("faction_count", Value::num(faction_count as f64)),
+        ("region_count", Value::num(region_count as f64)),
+        ("sea_zone_count", Value::num(sea_zone_count as f64)),
     ]);
 
     let mut merged = match action_codec::schema() {
@@ -201,8 +227,8 @@ fn handle_schema() -> Value {
     Value::Object(merged)
 }
 
-fn build_default_agents() -> Vec<Box<dyn Agent + Send>> {
-    (0..faction_count())
+fn build_default_agents(manager: &SessionManager) -> Vec<Box<dyn Agent + Send>> {
+    (0..faction_count(manager))
         .map(|i| Box::new(archipelago_agents::default_heuristic_agent(i)) as Box<dyn Agent + Send>)
         .collect()
 }
@@ -229,13 +255,18 @@ fn handle_reset(request: &Request, manager: &SessionManager) -> Response {
         None => DEFAULT_MAX_DAYS,
     };
 
-    let controlled = match parse_controlled(&body) {
+    let controlled = match parse_controlled(&body, manager) {
         Ok(c) => c,
         Err(r) => return r,
     };
 
-    let sim = Simulation::new(seed);
-    let agents = build_default_agents();
+    // Stage 6A (docs/phase6-spec.md "Stage 6A"): every session starts from
+    // `manager.scenario` - the embedded default unless the server was
+    // started with `--scenario <path>` - never a fresh `Simulation::new`,
+    // so the whole server (not just this one session) runs the map it was
+    // actually launched with.
+    let sim = Simulation::with_world(manager.scenario.clone(), seed);
+    let agents = build_default_agents(manager);
     let session_id = manager.create(sim, agents, controlled.clone(), seed, max_days);
 
     manager
@@ -250,7 +281,7 @@ fn handle_reset(request: &Request, manager: &SessionManager) -> Response {
 /// `/reset` accepts it as an optional extension: omitted or `[]` means
 /// every faction is AI-driven (the configuration `api_run_matches_headless`
 /// exercises, since it must reproduce a plain headless run exactly).
-fn parse_controlled(body: &Value) -> Result<Vec<FactionId>, Response> {
+fn parse_controlled(body: &Value, manager: &SessionManager) -> Result<Vec<FactionId>, Response> {
     let Some(v) = body.get("controlled") else {
         return Ok(Vec::new());
     };
@@ -262,7 +293,7 @@ fn parse_controlled(body: &Value) -> Result<Vec<FactionId>, Response> {
         let Some(id) = item.as_u32() else {
             return Err(Response::error(400, "`controlled` entries must be non-negative integers"));
         };
-        if id as usize >= faction_count() {
+        if id as usize >= faction_count(manager) {
             return Err(Response::error(400, "`controlled` names an unknown faction"));
         }
         let fid = FactionId(id);
@@ -311,7 +342,7 @@ fn handle_state(request: &Request, manager: &SessionManager) -> Response {
     };
     let faction_param = match request.query.get("faction") {
         Some(s) => match s.parse::<u32>() {
-            Ok(n) if (n as usize) < faction_count() => Some(FactionId(n)),
+            Ok(n) if (n as usize) < faction_count(manager) => Some(FactionId(n)),
             _ => return Response::error(400, "`faction` must be a valid faction id"),
         },
         None => None,

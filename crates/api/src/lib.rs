@@ -44,7 +44,7 @@ pub mod session;
 pub mod state;
 pub mod ws;
 
-pub use server::{serve_background, ServerHandle};
+pub use server::{serve_background, serve_background_with_scenario, ServerHandle};
 
 #[cfg(test)]
 mod tests;

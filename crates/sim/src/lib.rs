@@ -14,6 +14,7 @@ pub mod focus;
 pub mod good;
 pub mod group;
 pub mod ids;
+pub mod json;
 pub mod logistics;
 pub mod military;
 pub mod naval;
