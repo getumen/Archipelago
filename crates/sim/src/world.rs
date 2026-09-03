@@ -4,6 +4,7 @@
 use crate::balance::{INFRA_DAMAGE_SHARE, NODE_BASE, NODE_INFRA, NODE_PORT, WORKFORCE_SHARE};
 use crate::construction::Construction;
 use crate::diplomacy::Diplomacy;
+use crate::focus::NationalFocus;
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -394,6 +395,20 @@ pub struct Faction {
     pub protest_active: bool,
     pub mutiny_active: bool,
     pub capital_flight_active: bool,
+    /// Stage 3C (docs/phase3-spec.md "Stage 3C — 国家方針"): the long-term
+    /// strategic posture this faction has committed to. Read only through
+    /// `focus::active()` by every system that applies a focus modifier -
+    /// never directly - since a mid-switch faction's `national_focus` here
+    /// already reflects the *new* target even though its effects aren't live
+    /// yet (see `focus_transition_days`).
+    pub national_focus: NationalFocus,
+    /// Days left until a `national_focus` switch actually takes effect
+    /// (`Action::SetNationalFocus`, `focus::tick_national_focus`); `0` means
+    /// `national_focus` is already active. A real, decrementing budget, not
+    /// a ratio re-applied to a remainder - see `focus.rs`'s module doc for
+    /// why that's what keeps rapid `SetNationalFocus` spam from ever
+    /// shortening or stacking anything.
+    pub focus_transition_days: u32,
     pub alive: bool,
 }
 

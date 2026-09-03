@@ -4,14 +4,16 @@
 use crate::balance::{
     ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
     CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE, DEVASTATION_PER_COMBAT_DAMAGE,
-    EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, FLEET_MOVE_DAYS, MANPOWER_LOSS_PER_DAMAGE,
-    MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN, MUTINY_ORG_REGEN_MULT, OCCUPATION_DECAY,
-    OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN, ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR,
-    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN,
-    WAR_SUPPORT_LOSS_PENALTY,
+    EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, FLEET_MOVE_DAYS,
+    FOCUS_DEFENSIVE_HOME_DEFENSE_MULT, FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT,
+    FOCUS_MILITARY_ORG_CAP_MULT, MANPOWER_LOSS_PER_DAMAGE, MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN,
+    MUTINY_ORG_REGEN_MULT, OCCUPATION_DECAY, OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN,
+    ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
+    UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN, WAR_SUPPORT_LOSS_PENALTY,
 };
 use crate::diplomacy::Treaty;
 use crate::event::Event;
+use crate::focus::{self, NationalFocus};
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::naval;
 use crate::rng::Rng;
@@ -242,17 +244,30 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         let region = world.region(region_id);
         let defender = pick_defender(world, region, &factions_present);
         let defense_bonus = region.terrain.defense_bonus();
+        let region_core = region.core;
+
+        // Stage 3C `NationalFocus::DefensivePosture` (docs/phase3-spec.md:
+        // "自領での防御補正＋"/"攻勢時の補正−"): a per-side multiplier layered
+        // on top of terrain's `defense_bonus` - extra defense only when this
+        // side is both the defender *and* fighting on its own `core`
+        // territory (never on merely-held/occupied land), a penalty on
+        // offense whenever this side is present but is *not* the defender
+        // here. Computed once per side up front, the same way
+        // `defense_bonus` itself is a single per-region constant for the
+        // whole battle.
+        let side_mult: Vec<f32> = factions_present
+            .iter()
+            .map(|&f| combat_posture_mult(world, f, f == defender, region_core == f))
+            .collect();
 
         // Effective power per side, in the same order as `factions_present`.
         let power: Vec<f32> = factions_present
             .iter()
-            .map(|&f| {
+            .enumerate()
+            .map(|(i, &f)| {
                 let base = world.region_power(region_id, f);
-                if f == defender {
-                    base * defense_bonus
-                } else {
-                    base
-                }
+                let terrain_mult = if f == defender { defense_bonus } else { 1.0 };
+                base * terrain_mult * side_mult[i]
             })
             .collect();
 
@@ -295,11 +310,8 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
             for unit_id in unit_ids {
                 fought[unit_id.index()] = true;
                 let unit = world.unit_mut(unit_id);
-                let raw_power = if side_faction == defender {
-                    unit.combat_power() * defense_bonus
-                } else {
-                    unit.combat_power()
-                };
+                let terrain_mult = if side_faction == defender { defense_bonus } else { 1.0 };
+                let raw_power = unit.combat_power() * terrain_mult * side_mult[side_idx];
                 let share = raw_power / side_power;
                 let dmg = dmg_side * share;
 
@@ -335,6 +347,28 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
     CombatReport { fought, casualties }
 }
 
+/// `NationalFocus::DefensivePosture`'s combat multiplier for `faction` in
+/// this battle (see `tick_combat`'s call site doc): `FOCUS_DEFENSIVE_
+/// HOME_DEFENSE_MULT` when defending its own `core` soil, `FOCUS_DEFENSIVE_
+/// OFFENSE_PENALTY_MULT` when present but not the defender, `1.0` otherwise
+/// (including a DefensivePosture faction defending merely-held/occupied
+/// land, or one whose focus isn't active - mid-transition per
+/// `focus::active` - at all).
+fn combat_posture_mult(world: &World, faction: FactionId, is_defender: bool, is_core: bool) -> f32 {
+    if focus::active(world.faction(faction)) != Some(NationalFocus::DefensivePosture) {
+        return 1.0;
+    }
+    if is_defender {
+        if is_core {
+            FOCUS_DEFENSIVE_HOME_DEFENSE_MULT
+        } else {
+            1.0
+        }
+    } else {
+        FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT
+    }
+}
+
 fn pick_defender(world: &World, region: &Region, present: &[FactionId]) -> FactionId {
     if present.contains(&region.owner) {
         return region.owner;
@@ -366,6 +400,24 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
     // `tick_recovery` doesn't need to know about `crate::group` at all -
     // `politics::tick_politics` owns deciding whether mutiny is active.
     let mutiny: Vec<bool> = world.factions.iter().map(|f| f.mutiny_active).collect();
+    // Stage 3C `NationalFocus::MilitaryUnification` (docs/phase3-spec.md:
+    // "部隊の組織率上限＋"): the ceiling `organization` is clamped to below,
+    // per faction - `UNIT_ORG` normally, raised while this focus is active
+    // (post-transition; see `focus::active`). `Unit::org_ratio`/
+    // `combat_power` still divide by the fixed `UNIT_ORG`, so a unit held at
+    // the raised ceiling reads as an organization ratio above 1.0 there -
+    // this only widens what `organization` itself can reach.
+    let org_cap: Vec<f32> = world
+        .factions
+        .iter()
+        .map(|f| {
+            if focus::active(f) == Some(NationalFocus::MilitaryUnification) {
+                UNIT_ORG * FOCUS_MILITARY_ORG_CAP_MULT
+            } else {
+                UNIT_ORG
+            }
+        })
+        .collect();
 
     let mut deltas = Vec::new();
     for unit in &world.units {
@@ -402,7 +454,7 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
 
         deltas.push(Delta {
             id: unit.id,
-            organization: organization.clamp(0.0, UNIT_ORG),
+            organization: organization.clamp(0.0, org_cap[unit.owner.index()]),
             morale: morale.clamp(0.0, 1.0),
             manpower: manpower.max(0.0),
         });

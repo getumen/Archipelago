@@ -33,12 +33,13 @@
 //!   re-checked against a shrinking remainder.
 
 use crate::balance::{
-    ALLIANCE_BREAK_OPINION_PENALTY, DECLARE_WAR_OPINION_PENALTY,
+    ALLIANCE_BREAK_OPINION_PENALTY, DECLARE_WAR_OPINION_PENALTY, FOCUS_ALLIANCE_OPINION_RECOVERY_MULT,
     MINOR_TREATY_BREAK_OPINION_PENALTY, NON_AGGRESSION_BREAK_OPINION_PENALTY,
     NON_AGGRESSION_NOTICE_DAYS, OPINION_DECAY_RATE, PROPOSAL_TTL_DAYS, TREATY_ACCEPT_OPINION_BONUS,
     TREATY_COOLDOWN_DAYS,
 };
 use crate::event::Event;
+use crate::focus::{self, NationalFocus};
 use crate::ids::FactionId;
 use crate::world::World;
 
@@ -514,13 +515,37 @@ pub fn tick_diplomacy(world: &mut World, events: &mut Vec<Event>) {
     }
 
     let n = world.factions.len();
+    // Stage 3C `NationalFocus::AllianceNetwork` (docs/phase3-spec.md:
+    // "opinion の回復＋"): read once per faction up front, the same way
+    // `mutiny`/`org_cap` are precomputed elsewhere - `a`'s own focus speeds
+    // up how fast a *negative* opinion of `b` climbs back toward neutral.
+    // Deliberately only while `opinion[i] < 0.0` ("recovery," not a faster
+    // decay of an opinion that's already positive) so the focus never erodes
+    // a hard-won good relationship faster.
+    let alliance_mult: Vec<f32> = world
+        .factions
+        .iter()
+        .map(|f| {
+            if focus::active(f) == Some(NationalFocus::AllianceNetwork) {
+                FOCUS_ALLIANCE_OPINION_RECOVERY_MULT
+            } else {
+                1.0
+            }
+        })
+        .collect();
     for a_idx in 0..n {
         for b_idx in 0..n {
             if a_idx == b_idx {
                 continue;
             }
             let i = a_idx * n + b_idx;
-            world.diplomacy.opinion[i] -= world.diplomacy.opinion[i] * OPINION_DECAY_RATE;
+            let base = world.diplomacy.opinion[i];
+            let rate = if base < 0.0 {
+                OPINION_DECAY_RATE * alliance_mult[a_idx]
+            } else {
+                OPINION_DECAY_RATE
+            };
+            world.diplomacy.opinion[i] -= base * rate;
         }
     }
 }

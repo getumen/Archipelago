@@ -10,8 +10,10 @@ use crate::balance::{
     CAPACITY_STEP, CAPITAL_FLIGHT_CONSTRUCTION_MULT, CONSTRUCTION_MACHINERY_PER_POINT,
     CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_REQUIRED_INFRASTRUCTURE,
     CONSTRUCTION_REQUIRED_PORT, CONSTRUCTION_REQUIRED_REPAIR, CONSTRUCTION_STEEL_PER_POINT,
-    DEVASTATION_RECOVERY, INFRA_STEP, PORT_STEP, REPAIR_STEP,
+    DEVASTATION_RECOVERY, FOCUS_DEFENSIVE_DEVASTATION_RECOVERY_MULT,
+    FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT, INFRA_STEP, PORT_STEP, REPAIR_STEP,
 };
+use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::world::{Region, World};
 
@@ -74,12 +76,17 @@ pub fn tick_construction(world: &mut World) {
 
         // Stage 3A (docs/phase3-spec.md "資本逃避": "建設速度と Machinery 生
         // 産に係数"): a faction under active capital flight builds slower -
-        // read before the mutable borrow below.
-        let rate = if world.faction(owner).capital_flight_active {
-            CONSTRUCTION_RATE * CAPITAL_FLIGHT_CONSTRUCTION_MULT
-        } else {
-            CONSTRUCTION_RATE
-        };
+        // read before the mutable borrow below. Stage 3C
+        // `NationalFocus::Technocracy` ("建設速度＋") stacks multiplicatively
+        // on top of that, the same way every other independent rate
+        // multiplier here does.
+        let mut rate = CONSTRUCTION_RATE;
+        if world.faction(owner).capital_flight_active {
+            rate *= CAPITAL_FLIGHT_CONSTRUCTION_MULT;
+        }
+        if focus::active(world.faction(owner)) == Some(NationalFocus::Technocracy) {
+            rate *= FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT;
+        }
 
         // Cap the attempted progress at what's actually left to invest, so a
         // completing tick doesn't buy (and pay for) more than the project
@@ -129,8 +136,19 @@ pub fn tick_devastation_recovery(world: &mut World) {
         }
         let owner = world.regions[i].owner;
         let stability = world.faction(owner).stability;
+        // Stage 3C `NationalFocus::DefensivePosture` (docs/phase3-spec.md:
+        // "戦災の回復速度＋"): applies to every one of this faction's regions
+        // unconditionally (not just its own `core` soil) - a defense-minded
+        // economy rebuilds faster everywhere, not only at home.
+        let focus_mult = if focus::active(world.faction(owner)) == Some(NationalFocus::DefensivePosture)
+        {
+            FOCUS_DEFENSIVE_DEVASTATION_RECOVERY_MULT
+        } else {
+            1.0
+        };
         let region = &mut world.regions[i];
         let recovery = DEVASTATION_RECOVERY
+            * focus_mult
             * (1.0 - region.unrest / 100.0).clamp(0.0, 1.0)
             * (0.5 + 0.5 * stability / 100.0).clamp(0.0, 1.0);
         region.devastation = (region.devastation - recovery).max(0.0);

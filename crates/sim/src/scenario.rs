@@ -5,6 +5,7 @@
 //! Kanto/Tokai are the nation's Machinery hub and losing them chokes Arms.
 
 use crate::diplomacy::Diplomacy;
+use crate::focus::NationalFocus;
 use crate::good::GOOD_COUNT;
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -126,6 +127,22 @@ const FACTION_GROUP_SUPPORT: [f32; GROUP_COUNT] = [60.0; GROUP_COUNT];
 /// LocalGovernment 0.10 / Bureaucracy 0.10 / Military 0.20 / Business 0.15 /
 /// Labor 0.10 / Citizens 0.15" — sums to exactly `1.0`.
 const FACTION_GROUP_INFLUENCE: [f32; GROUP_COUNT] = [0.20, 0.10, 0.10, 0.20, 0.15, 0.10, 0.15];
+/// Stage 3C (docs/phase3-spec.md "Stage 3C — 国家方針"): every faction starts
+/// with this focus already active (`focus_transition_days: 0` below - the
+/// very first tick isn't a "switch" with anything to transition away from).
+/// Specifically `AllianceNetwork`, not an arbitrary pick: it is the one
+/// focus with no unconditional day-zero footprint against a freshly built
+/// world - it touches only `Diplomacy::opinion` recovery (a no-op until some
+/// pair's opinion actually goes negative) and treaty-acceptance ease (a
+/// no-op until a proposal actually arrives), unlike every other focus, each
+/// of which changes something Phase 1/2/3A/3B tests already assert exact or
+/// near-exact numbers for from tick one (group-support targets, import
+/// capacity, construction rate, production output, or combat power).
+/// `HeuristicAgent` replaces it with its own opening-situation choice via
+/// `Action::SetNationalFocus` within its first few days of play
+/// (docs/phase3-spec.md "AI" under "Stage 3C"), which *does* pay the normal
+/// `FOCUS_SWITCH_DAYS` transition like any other switch.
+const FACTION_NATIONAL_FOCUS_DEFAULT: NationalFocus = NationalFocus::AllianceNetwork;
 
 const UNITS_PER_FACTION: usize = 3;
 
@@ -218,6 +235,8 @@ pub fn build_world() -> World {
             protest_active: false,
             mutiny_active: false,
             capital_flight_active: false,
+            national_focus: FACTION_NATIONAL_FOCUS_DEFAULT,
+            focus_transition_days: 0,
             alive: true,
         })
         .collect();

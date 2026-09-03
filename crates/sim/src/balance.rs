@@ -35,6 +35,58 @@ pub const MUNITIONS_INPUT_ENERGY: f32 = 0.2;
 pub const ARMS_INPUT_MACHINERY: f32 = 0.5;
 pub const ARMS_INPUT_STEEL: f32 = 0.3;
 
+/// Stage 3C playtest fix (the ninth defect of docs/phase3-spec.md §0's
+/// shape, found post-Stage-3C): `economy::tick_economy`'s Step 0/1
+/// `efficiency`/`stability_mult` terms used to apply the *same*
+/// industrial-disorder multiplier to every commodity, `Food` included. That
+/// equality is what let unrest and shortage close into a loop with no
+/// floor: unrest rises -> efficiency falls -> Food output falls -> shortage
+/// rises -> unrest rises, bottoming out at `efficiency`'s own 0.2 floor
+/// times `stability_mult`'s own 0.6 floor (0.12x capacity) with nothing to
+/// arrest the fall before that - nowhere near enough to feed a population,
+/// and two whole surviving factions sat pinned at `shortage == 1.0` for
+/// 220+ days in the seed-3/seed-5 playtests that found this.
+///
+/// `Food`'s potential (`economy::tick_economy`) is now scaled by its own
+/// term instead of the shared `efficiency[region] * stability_mult` every
+/// other commodity uses: `FOOD_EFFICIENCY_FLOOR + (1 -
+/// FOOD_EFFICIENCY_FLOOR) * (efficiency[region] *
+/// stability_mult).clamp(0, 1).powf(FOOD_EFFICIENCY_DAMPENING)`.
+/// - At full efficiency/stability (`== 1.0`) this still reaches `1.0`, so a
+///   calm, fully-staffed faction sees no change from before.
+/// - `FOOD_EFFICIENCY_DAMPENING < 1.0` makes the term fall far more slowly
+///   than a straight product does as either input drops (`x.powf(d)` sits
+///   above `x` on `0..1` whenever `d < 1`), so a strike or a stability crash
+///   no longer cuts the harvest by the same proportion it cuts industrial
+///   output.
+/// - `FOOD_EFFICIENCY_FLOOR` is an unconditional additive floor: even at the
+///   combined worst case (`efficiency == 0.2`, `stability_mult == 0.6`) Food's
+///   multiplier can't fall below it, so an owned, undevastated region always
+///   produces a meaningful fraction of its Food capacity - the loop above
+///   has a floor to land on instead of spiraling toward zero
+///   (`food_output_survives_political_collapse`).
+///
+/// This is a property of the same two underlying multipliers every other
+/// commodity already reads, not a special-cased number: a faction that lets
+/// unrest decay and stability recover climbs `efficiency[region] *
+/// stability_mult` back toward 1.0 exactly as it always did, and Food's own
+/// multiplier climbs right back up with it - a faction driven to maximum
+/// shortage is not stuck there once the fighting that caused it stops
+/// (`collapsed_faction_can_recover`, the regression guard for this
+/// absorbing state).
+///
+/// This does NOT touch `Region::effective_capacity`'s `* (1 - devastation)`
+/// term (applied before any of this, unconditionally, to every commodity
+/// including Food), `Event::RegimeChange`'s flat `REGIME_CHANGE_OUTPUT_MULT`
+/// (a fixed-duration, self-resetting event rather than a feedback loop that
+/// deliberately hits every commodity per its own doc), or
+/// `NationalFocus::Technocracy`'s production bonus - physical destruction of
+/// the land, and the deliberate all-commodity events that already carry
+/// their own recovery guarantee, still bite Food exactly as hard as before
+/// (`devastation_still_destroys_food`).
+pub const FOOD_EFFICIENCY_FLOOR: f32 = 0.6;
+pub const FOOD_EFFICIENCY_DAMPENING: f32 = 0.3;
+
 /// Civilian demand, per capita (population is tracked in 万人/"ten
 /// thousands"), for the three commodities civilians draw on directly.
 ///
@@ -629,3 +681,93 @@ pub const TRADE_FLOW_RATE_MAX: f32 = 6.0;
 /// the degenerate all-progress-happens-in-one-instant edge a bare `* 0.0`
 /// would produce every tick it's fully blockaded.
 pub const STRAIT_CROSSING_FACTOR_FLOOR: f32 = 0.05;
+
+// ---------------------------------------------------------------------------
+// Stage 3C — 国家方針 (docs/phase3-spec.md "Stage 3C — 国家方針"): the six
+// `NationalFocus` variants and their per-focus modifiers. Every modifier
+// below is read only through `focus::active()`, which returns `None` for a
+// faction mid-`FOCUS_SWITCH_DAYS` transition — see `focus.rs`'s module doc
+// for why that (and `action::apply_set_national_focus`'s no-retarget-mid-
+// transition rule) is what keeps `Action::SetNationalFocus` un-spammable.
+// ---------------------------------------------------------------------------
+
+/// Days a `NationalFocus` switch takes to settle (docs/phase3-spec.md:
+/// "変更には FOCUS_SWITCH_DAYS の移行期間があり、その間は効果が出ない") - a
+/// real, decrementing `Faction::focus_transition_days` counted down once a
+/// day by `focus::tick_national_focus`, during which `focus::active` returns
+/// `None` for this faction (neither the abandoned focus's effects nor the
+/// new one's apply). Kept on the same order as `STRIKE_DAYS`/
+/// `TREATY_COOLDOWN_DAYS` - long enough that a focus is a real commitment,
+/// short enough that a faction reacting to a genuine crisis (see
+/// `archipelago-agents`' major-change switching) isn't locked out for an
+/// unreasonable fraction of a 720-day run.
+pub const FOCUS_SWITCH_DAYS: u32 = 20;
+
+/// `NationalFocus::MilitaryUnification` (docs/phase3-spec.md: "Military 支持
+/// ＋、部隊の組織率上限＋、Citizens 支持 −"): `politics::tick_politics`
+/// group-support target contributions, on the same order as
+/// `GROUP_ARMS_LEAN_MILITARY_BONUS`/`GROUP_ARMS_LEAN_CITIZENS_PENALTY`.
+pub const FOCUS_MILITARY_SUPPORT_BONUS: f32 = 8.0;
+pub const FOCUS_MILITARY_CITIZENS_PENALTY: f32 = 6.0;
+/// Multiplier on `UNIT_ORG` used as the organization ceiling
+/// `military::tick_recovery` clamps every unit of a MilitaryUnification
+/// faction to, in place of the plain `UNIT_ORG` every other faction's units
+/// are capped at - raising what `Unit::organization` (and therefore
+/// `Unit::org_ratio`/`Unit::combat_power`, both still dividing by the fixed
+/// `UNIT_ORG`) can actually reach, rather than changing the ratio formula
+/// itself.
+pub const FOCUS_MILITARY_ORG_CAP_MULT: f32 = 1.15;
+
+/// `NationalFocus::EconomicSphere` (docs/phase3-spec.md: "Business 支持 ＋、
+/// TradeAgreement の流量 ＋"): group-support bonus, and the multiplier
+/// `trade::tick_imports` applies to `TRADE_FLOW_RATE_MAX` for a
+/// `TradeAgreement` flow where either side has this focus active (the higher
+/// of the two, so one economically-focused partner is enough to grow the
+/// flow - never double-counted when both sides have it).
+pub const FOCUS_ECONOMIC_BUSINESS_SUPPORT_BONUS: f32 = 8.0;
+pub const FOCUS_ECONOMIC_TRADE_FLOW_MULT: f32 = 1.5;
+
+/// `NationalFocus::AllianceNetwork` (docs/phase3-spec.md: "外交提案の受諾さ
+/// れやすさ＋、opinion の回復＋"): multiplier `diplomacy::tick_diplomacy`
+/// applies to `OPINION_DECAY_RATE` for `a`'s opinion of `b` specifically
+/// while that opinion is negative (i.e. "recovery" toward neutral, not a
+/// faster erosion of an already-good relationship) when `a` has this focus
+/// active. The acceptance-ease half of the effect is an AI-side knob
+/// (`archipelago-agents`'s `FOCUS_ALLIANCE_ACCEPT_BONUS`), not a sim number.
+pub const FOCUS_ALLIANCE_OPINION_RECOVERY_MULT: f32 = 1.6;
+
+/// `NationalFocus::MaritimeTrade` (docs/phase3-spec.md: "港湾の輸入容量 ＋、
+/// 艦隊の建造コスト −"): multiplier `trade::tick_imports` applies to a
+/// MaritimeTrade faction's own per-port import capacity, and the multiplier
+/// `action::apply_recruit` applies to `UNIT_EQUIPMENT`'s Arms cost when
+/// building a `Domain::Sea` unit under this focus (land recruits are
+/// unaffected - this discounts fleets specifically, not army equipment in
+/// general).
+pub const FOCUS_MARITIME_IMPORT_CAPACITY_MULT: f32 = 1.3;
+pub const FOCUS_MARITIME_FLEET_COST_MULT: f32 = 0.75;
+
+/// `NationalFocus::Technocracy` (docs/phase3-spec.md: "Bureaucracy 支持 ＋、
+/// 建設速度 ＋、生産効率 ＋"): group-support bonus, the multiplier
+/// `construction::tick_construction` applies to `CONSTRUCTION_RATE` (stacks
+/// multiplicatively with `CAPITAL_FLIGHT_CONSTRUCTION_MULT` the same way
+/// every other independent rate multiplier in that function does), and the
+/// multiplier `economy::tick_economy` applies to every commodity's potential
+/// output alongside `stability_mult`/`regime_change_mult`.
+pub const FOCUS_TECHNOCRACY_BUREAUCRACY_SUPPORT_BONUS: f32 = 8.0;
+pub const FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT: f32 = 1.3;
+pub const FOCUS_TECHNOCRACY_PRODUCTION_MULT: f32 = 1.1;
+
+/// `NationalFocus::DefensivePosture` (docs/phase3-spec.md: "自領での防御補正
+/// ＋、戦災の回復速度 ＋、攻勢時の補正 −"): `military::tick_combat`'s
+/// per-side power multiplier, layered on top of `Terrain::defense_bonus`,
+/// when this faction is the region's defender *and* the region is its own
+/// `core` territory (never on merely-occupied land — "自領" is home soil
+/// specifically); the offense penalty applies whenever this faction is
+/// present in a battle but is *not* the defender there, regardless of whose
+/// territory it is. `construction::tick_devastation_recovery`'s multiplier
+/// applies unconditionally to a DefensivePosture faction's own
+/// `Region::devastation` recovery, home soil or not - rebuilding faster
+/// everywhere is the whole point of a defense-oriented economy.
+pub const FOCUS_DEFENSIVE_HOME_DEFENSE_MULT: f32 = 1.25;
+pub const FOCUS_DEFENSIVE_DEVASTATION_RECOVERY_MULT: f32 = 1.5;
+pub const FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT: f32 = 0.85;

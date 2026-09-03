@@ -2,11 +2,12 @@
 //! world mutations. Invalid actions are rejected, never panicked on.
 
 use crate::balance::{
-    CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, IMPORT_PLAN_RATE_MAX, UNIT_EQUIPMENT, UNIT_MANPOWER,
-    UNIT_ORG, UNIT_START_ORG_RATIO,
+    CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS,
+    IMPORT_PLAN_RATE_MAX, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty};
+use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::logistics;
@@ -62,6 +63,13 @@ pub enum Action {
     /// what happens per treaty kind. Rejected for `Treaty::Ceasefire`
     /// (use `DeclareWar`).
     BreakTreaty { with: FactionId, treaty: Treaty },
+    /// Stage 3C (docs/phase3-spec.md "Stage 3C — 国家方針"): commits the
+    /// faction to a new long-term posture, starting a real
+    /// `balance::FOCUS_SWITCH_DAYS` transition during which neither the old
+    /// focus's effects nor the new one's apply - see
+    /// `apply_set_national_focus`'s doc for exactly how that keeps this
+    /// action un-spammable.
+    SetNationalFocus(NationalFocus),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,6 +118,7 @@ pub fn apply_action(
         Action::RejectTreaty { from, treaty } => apply_reject_treaty(world, faction, from, treaty),
         Action::DeclareWar { to } => apply_declare_war(world, faction, to),
         Action::BreakTreaty { with, treaty } => apply_break_treaty(world, faction, with, treaty),
+        Action::SetNationalFocus(focus) => apply_set_national_focus(world, faction, focus),
     }
 }
 
@@ -226,16 +235,28 @@ fn apply_recruit(
         }
     };
 
+    // Stage 3C `NationalFocus::MaritimeTrade` (docs/phase3-spec.md: "艦隊の
+    // 建造コスト −"): only a `Domain::Sea` recruit's Arms *cost* is
+    // discounted - the fleet's own `equipment` stat below still starts at
+    // the normal `UNIT_EQUIPMENT`, so this is cheaper shipbuilding, not a
+    // weaker fleet.
     let f = world.faction(faction);
+    let equipment_cost = if domain == Domain::Sea
+        && focus::active(f) == Some(NationalFocus::MaritimeTrade)
+    {
+        UNIT_EQUIPMENT * FOCUS_MARITIME_FLEET_COST_MULT
+    } else {
+        UNIT_EQUIPMENT
+    };
     if f.manpower < UNIT_MANPOWER {
         return Err(ActionError::InsufficientManpower);
     }
-    if f.stock[Good::Arms.index()] < UNIT_EQUIPMENT {
+    if f.stock[Good::Arms.index()] < equipment_cost {
         return Err(ActionError::InsufficientEquipment);
     }
 
     world.faction_mut(faction).manpower -= UNIT_MANPOWER;
-    world.faction_mut(faction).stock[Good::Arms.index()] -= UNIT_EQUIPMENT;
+    world.faction_mut(faction).stock[Good::Arms.index()] -= equipment_cost;
 
     let id = UnitId(world.units.len() as u32);
     let kind = match domain {
@@ -575,5 +596,43 @@ fn apply_break_treaty(
         return Err(ActionError::InvalidValue);
     }
     diplomacy::break_treaty(world, faction, with, treaty);
+    Ok(())
+}
+
+/// `Action::SetNationalFocus` (docs/phase3-spec.md "Stage 3C — 国家方針").
+/// Two rules keep this un-spammable (docs/phase3-spec.md §0: "SetNational-
+/// Focus がファーム/回避に使われないこと"), together closing off every shape
+/// rapid repeated calls could exploit:
+/// - Setting the *same* focus that's already current — whether it's already
+///   active or a switch to it is already under way — is a pure no-op: it
+///   neither starts a new transition nor resets/extends one in progress. An
+///   agent that calls this every tick with the same target pays the
+///   transition exactly once, on the same schedule as a single call.
+/// - Requesting a *different* focus while a switch is already under way
+///   (`focus_transition_days > 0`) is rejected outright. The agent must let
+///   the current transition finish before redirecting it - without this, an
+///   agent could keep retargeting the switch and never actually settle on
+///   anything, or attempt to reuse a transition already partway elapsed
+///   toward a different destination for free.
+///
+/// Because `focus::active` treats *any* faction with `focus_transition_days
+/// > 0` as having no focus in effect (neither the abandoned one nor the new
+/// one - see `focus.rs`'s module doc), there is additionally no window in
+/// which switching, however rapidly, ever nets a bonus: every switch pays
+/// the full `FOCUS_SWITCH_DAYS` blackout, unconditionally.
+fn apply_set_national_focus(
+    world: &mut World,
+    faction: FactionId,
+    focus: NationalFocus,
+) -> Result<(), ActionError> {
+    let f = world.faction_mut(faction);
+    if focus == f.national_focus {
+        return Ok(());
+    }
+    if f.focus_transition_days > 0 {
+        return Err(ActionError::InvalidValue);
+    }
+    f.national_focus = focus;
+    f.focus_transition_days = FOCUS_SWITCH_DAYS;
     Ok(())
 }

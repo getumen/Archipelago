@@ -13,7 +13,9 @@
 
 use crate::balance::{
     CAPITAL_FLIGHT_THRESHOLD, CIVILIAN_RATION_DEFAULT, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
-    GROUP_ADAPT_RATE, GROUP_ARMS_LEAN_BUSINESS_BONUS, GROUP_ARMS_LEAN_CITIZENS_PENALTY,
+    FOCUS_ECONOMIC_BUSINESS_SUPPORT_BONUS, FOCUS_MILITARY_CITIZENS_PENALTY,
+    FOCUS_MILITARY_SUPPORT_BONUS, FOCUS_TECHNOCRACY_BUREAUCRACY_SUPPORT_BONUS, GROUP_ADAPT_RATE,
+    GROUP_ARMS_LEAN_BUSINESS_BONUS, GROUP_ARMS_LEAN_CITIZENS_PENALTY,
     GROUP_ARMS_LEAN_MILITARY_BONUS, GROUP_ARMS_STOCK_MARGIN, GROUP_ARMS_STOCK_MILITARY_BONUS,
     GROUP_CASUALTY_CITIZENS_PENALTY, GROUP_CASUALTY_GOVERNMENT_PENALTY,
     GROUP_CASUALTY_MILITARY_PENALTY, GROUP_CASUALTY_NORM, GROUP_CONSCRIPTION_CITIZENS_PENALTY,
@@ -33,6 +35,7 @@ use crate::balance::{
     WAR_SUPPORT_CASUALTY_MULT, WAR_SUPPORT_DRIFT,
 };
 use crate::event::Event;
+use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::group::{Group, GROUP_COUNT};
 use crate::ids::FactionId;
@@ -166,6 +169,29 @@ pub fn tick_politics(
         target[Group::Military.index()] += GROUP_ARMS_STOCK_MILITARY_BONUS * arms_stock_f;
         target[Group::Business.index()] += GROUP_MACHINERY_GOOD_BUSINESS_BONUS * machinery_f;
 
+        // ---- Stage 3C national focus (docs/phase3-spec.md "Stage 3C —
+        // 国家方針"'s modifier table): only the three foci with a
+        // group-support line apply here - `focus::active` is `None` while
+        // this faction is mid-transition, so neither an abandoned focus nor
+        // one not yet settled contributes anything.
+        if let Some(active_focus) = focus::active(&world.factions[f_idx]) {
+            match active_focus {
+                NationalFocus::MilitaryUnification => {
+                    target[Group::Military.index()] += FOCUS_MILITARY_SUPPORT_BONUS;
+                    target[Group::Citizens.index()] -= FOCUS_MILITARY_CITIZENS_PENALTY;
+                }
+                NationalFocus::EconomicSphere => {
+                    target[Group::Business.index()] += FOCUS_ECONOMIC_BUSINESS_SUPPORT_BONUS;
+                }
+                NationalFocus::Technocracy => {
+                    target[Group::Bureaucracy.index()] += FOCUS_TECHNOCRACY_BUREAUCRACY_SUPPORT_BONUS;
+                }
+                NationalFocus::AllianceNetwork
+                | NationalFocus::MaritimeTrade
+                | NationalFocus::DefensivePosture => {}
+            }
+        }
+
         let faction = &mut world.factions[f_idx];
         for g in 0..GROUP_COUNT {
             let t = target[g].clamp(0.0, 100.0);
@@ -260,6 +286,12 @@ fn apply_political_events(world: &mut World, events: &mut Vec<Event>) {
             faction.group_support = [GROUP_SUPPORT_BASELINE; GROUP_COUNT];
             faction.stability = GROUP_SUPPORT_BASELINE;
             faction.regime_change_days = REGIME_CHANGE_DAYS;
+            // `national_focus`/`focus_transition_days` are deliberately NOT
+            // in the reset list docs/phase3-spec.md's "政権交代の扱い" names
+            // (`conscription`/`civilian_ration`/`industry_priority`/
+            // `logistics_priority`/`import_plan`) - a national focus is a
+            // longer-term strategic identity than day-to-day policy, and a
+            // coup doesn't erase it.
             // External code review fix (Stage 3A, Fix 1): `protest_active`/
             // `mutiny_active`/`capital_flight_active` were computed earlier
             // this same tick from *pre-reset* support and would otherwise

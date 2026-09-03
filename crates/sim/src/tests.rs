@@ -2,16 +2,17 @@
 
 use crate::action::{self, Action, ActionError};
 use crate::balance::{
-    CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MIN,
+    CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
     CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
-    CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
-    OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, UNIT_DEATH_MANPOWER,
-    UNIT_EQUIPMENT,
+    CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR,
+    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS,
+    STRIKE_OUTPUT_MULT, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
 };
 use crate::construction::{self, Construction, Project};
 use crate::diplomacy::{self, Treaty};
 use crate::economy;
 use crate::event::Event;
+use crate::focus::{self, NationalFocus};
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::{Group, GROUP_COUNT};
 use crate::ids::{FactionId, RegionId, SeaZoneId};
@@ -2307,6 +2308,210 @@ fn strike_reduces_industrial_output() {
     );
 }
 
+/// Stage 3C playtest fix (regression guard for the ninth §0-shaped defect:
+/// seeds 3 and 5 both froze two surviving factions at maximum `shortage` for
+/// 220+ days). `balance::FOOD_EFFICIENCY_FLOOR`'s doc has the full account -
+/// at the worst political state a region can be in (maximum unrest, minimum
+/// stability), Food must still produce a meaningful fraction of its
+/// capacity, unlike every other commodity, which is allowed to collapse
+/// toward the shared `efficiency * stability_mult` floor. Steel is measured
+/// alongside Food, at the same infrastructure/labor/unrest/stability, as the
+/// contrast: this is Food being specifically exempted, not every commodity
+/// getting gentler.
+#[test]
+fn food_output_survives_political_collapse() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let food_capacity = 10.0;
+    let steel_capacity = 10.0;
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.capacity[Good::Food.index()] = food_capacity;
+            region.capacity[Good::Steel.index()] = steel_capacity;
+            region.infrastructure = 1.0;
+            region.unrest = 100.0; // maximum unrest
+            region.devastation = 0.0; // owned and undevastated - the property under test
+            region.population = 1.0; // negligible civilian demand, isolates production
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stability = 0.0; // minimum stability
+        f.stock = [0.0; GOOD_COUNT];
+    }
+    let total_food_capacity: f32 = world
+        .regions
+        .iter()
+        .filter(|r| r.owner == faction)
+        .map(|r| r.capacity[Good::Food.index()])
+        .sum();
+
+    economy::tick_economy(&mut world);
+
+    let f = world.faction(faction);
+    let food_output = f.stock[Good::Food.index()];
+    let steel_output = f.stock[Good::Steel.index()];
+
+    assert!(
+        food_output >= total_food_capacity * FOOD_EFFICIENCY_FLOOR - 0.01,
+        "expected Food output to respect FOOD_EFFICIENCY_FLOOR even at maximum unrest and \
+         minimum stability: output={food_output}, capacity={total_food_capacity}, \
+         floor={FOOD_EFFICIENCY_FLOOR}"
+    );
+    assert!(
+        food_output > total_food_capacity * 0.5,
+        "expected an owned, undevastated region to still produce a meaningful fraction of its \
+         Food capacity under maximum political collapse: output={food_output}, \
+         capacity={total_food_capacity}"
+    );
+    assert!(
+        steel_output < food_output * 0.4,
+        "expected industrial output (Steel) to collapse far harder than Food under the exact \
+         same political conditions - Food's weaker sensitivity is the fix, not a general \
+         loosening: steel={steel_output}, food={food_output}"
+    );
+}
+
+/// Companion to `food_output_survives_political_collapse`: the floor that
+/// protects Food from unrest/stability must NOT protect it from physical
+/// destruction of the land. `Region::effective_capacity`'s `* (1 -
+/// devastation)` term is untouched by the Stage 3C fix, so a devastated
+/// region's Food output must still fall far below an otherwise-identical
+/// intact region's, even though both sit at the same (calm) political
+/// state - war damage stays a real, locally-caused loss.
+#[test]
+fn devastation_still_destroys_food() {
+    let build = |devastation: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Food.index()] = 10.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.devastation = devastation;
+                region.population = 1.0; // negligible civilian demand
+            }
+        }
+        world.faction_mut(faction).stability = 100.0;
+        world.faction_mut(faction).stock = [0.0; GOOD_COUNT];
+
+        economy::tick_economy(&mut world);
+        world.faction(faction).stock[Good::Food.index()]
+    };
+
+    let food_intact = build(0.0);
+    let food_devastated = build(0.9);
+
+    assert!(food_intact > 0.0, "sanity: an intact, calm region should produce Food: {food_intact}");
+    assert!(
+        food_devastated < food_intact * 0.2,
+        "expected heavy devastation to still gut Food output despite calm political conditions: \
+         intact={food_intact}, devastated={food_devastated}"
+    );
+}
+
+/// Stage 3C playtest fix, the regression guard for the whole defect: a
+/// faction driven to maximum `shortage` by political collapse must be able
+/// to climb back out on its own once the fighting that caused it stops and
+/// unrest/stability are free to recover - seeds 3 and 5's playtest run
+/// instead froze two surviving factions at `shortage == 1.0` for 220+ days,
+/// a state neither could ever leave (docs/phase3-spec.md §0's absorbing-
+/// state rule). `FOOD_EFFICIENCY_FLOOR` is exactly what breaks the
+/// chicken-and-egg deadlock: without it, production can't recover until
+/// unrest decays, and unrest can't decay until production (and therefore
+/// shortage) recovers - a loop with no floor to climb out from. War damage
+/// (`Region::devastation`) is included here, not just unrest/stability,
+/// because that is how the actual playtested collapse compounds: devastated
+/// land produces little, the shortfall keeps unrest pinned high, and
+/// `construction::tick_devastation_recovery`'s own recovery rate is itself
+/// gated on unrest being low - so this test also exercises devastation
+/// healing once the political floor gives the faction enough Food to let
+/// unrest start easing.
+#[test]
+fn collapsed_faction_can_recover() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.infrastructure = 1.0;
+            region.unrest = 100.0;
+            if region.id == capital {
+                region.capacity[Good::Food.index()] = 5.0;
+                region.capacity[Good::Energy.index()] = 1000.0;
+                // Machinery output is an input-constrained *output* of the
+                // Stage 2A chain (economy.rs), not a direct read of its own
+                // capacity - it needs Steel (and Energy) to actually turn
+                // into product, so Steel capacity is set abundant here too,
+                // otherwise `machinery_shortage` would stay pinned at 1.0
+                // forever regardless of how much Food/political conditions
+                // recover, which isn't the property this test is about.
+                region.capacity[Good::Steel.index()] = 1000.0;
+                region.capacity[Good::Machinery.index()] = 1000.0;
+                region.devastation = 0.97;
+                region.population = 500.0;
+            } else {
+                // Negligible population so the rest of the faction's
+                // regions don't add demand this test isn't measuring.
+                region.population = 1.0;
+            }
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stock = [0.0; GOOD_COUNT];
+        f.group_support = [0.0; GROUP_COUNT];
+        f.stability = 0.0;
+        f.conscription = 0.0;
+        f.civilian_ration = CIVILIAN_RATION_MAX;
+    }
+
+    let n = world.factions.len();
+    let casualties = vec![0.0f32; n];
+    let region_delta = vec![0i32; n];
+    let mut events = Vec::new();
+
+    // Day 0: still fully collapsed - devastated land, maximum unrest,
+    // minimum stability, zero stock.
+    economy::tick_economy(&mut world);
+    politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+    let shortage_start = world.faction(faction).shortage;
+    assert!(
+        shortage_start > 0.8,
+        "sanity: devastated land at maximum unrest, minimum stability and zero stock should \
+         start this faction in severe shortage: {shortage_start}"
+    );
+
+    // No more fighting: casualties and region deltas stay zero for the rest
+    // of the run (the same "pressure eases" setup
+    // `unrest_recovers_after_shortage`/`support_recovers_after_policy_relaxed`
+    // already use), letting unrest, stability and devastation all recover on
+    // their own.
+    for _ in 0..500 {
+        economy::tick_economy(&mut world);
+        politics::tick_politics(&mut world, &casualties, &region_delta, &mut events);
+        construction::tick_devastation_recovery(&mut world);
+    }
+
+    let shortage_end = world.faction(faction).shortage;
+    assert!(
+        shortage_end < shortage_start - 0.5,
+        "expected a collapsed faction to climb back out of maximum shortage once fighting \
+         stopped, not stay pinned near it - the absorbing state this whole fix exists to break: \
+         start={shortage_start}, end={shortage_end}"
+    );
+    assert!(
+        shortage_end < 0.3,
+        "expected shortage to recover to a comfortable level, not just drift off the ceiling: \
+         {shortage_end}"
+    );
+}
+
 /// docs/phase3-spec.md "地方独立運動": an occupied region (`core != owner`)
 /// left with neglected LocalGovernment support - and no units defending it
 /// - drifts back to its core faction on its own.
@@ -2479,12 +2684,22 @@ fn overextended_faction_sheds_unaffordable_territory_via_separatism() {
         // `CAPTURE_UNREST` on the region that just changed hands) - this
         // test's direct, costless `owner` reassignment skips the fighting
         // that would normally produce it, so it's set explicitly instead.
-        // Without it these particular regions are self-sufficient enough on
-        // their own `capacity`/`population` that 西方同盟 would show no Food
-        // shortage at all even holding all six - see `shortage_before`'s
-        // sanity check below.
         world.region_mut(r).devastation = DEVASTATION_ON_CAPTURE;
         world.region_mut(r).unrest = CAPTURE_UNREST;
+        // Stage 3C playtest fix (`balance::FOOD_EFFICIENCY_FLOOR`'s doc):
+        // Food no longer takes the same unrest/stability-driven hit every
+        // other commodity does, so `DEVASTATION_ON_CAPTURE`/`CAPTURE_UNREST`
+        // alone (the realistic amount a single capture leaves) are no
+        // longer enough to manufacture a famine here - 西方同盟's own three
+        // regions are close enough to self-sufficient that even a modest
+        // Food contribution from the other three covers the gap. This test
+        // is about separatism shedding unaffordable territory, not about
+        // Food's political sensitivity, so the "can't feed it" premise is
+        // now built the same structural way `imports_feed_food_poor_faction`/
+        // `blockaded_faction_starves` already do: these regions' farmland
+        // itself, not their political state, can't support the population
+        // that comes with them.
+        world.region_mut(r).capacity[Good::Food.index()] = 0.0;
     }
     // Strips the starting `scenario::FACTION_STOCK` Food reserve, which
     // would otherwise cushion a single day's shortfall and mask exactly the
@@ -3171,5 +3386,194 @@ fn repeated_proposal_does_not_refresh_or_relog() {
         world.diplomacy.pending[idx].ttl, ttl_after_one_day,
         "repeated proposals for an already-pending treaty must not refresh its ttl"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3C — 国家方針 (docs/phase3-spec.md "Stage 3C — 国家方針")
+// ---------------------------------------------------------------------------
+
+/// `Action::SetNationalFocus` (docs/phase3-spec.md: "変更には FOCUS_SWITCH_
+/// DAYS の移行期間があり、その間は効果が出ない"): the new focus must not be
+/// `focus::active` immediately, must stay inactive for the whole transition,
+/// and must become active only once `FOCUS_SWITCH_DAYS` have actually
+/// elapsed.
+#[test]
+fn focus_switch_has_transition_period() {
+    let mut world = scenario::build_world();
+    let f = FactionId(0);
+
+    action::apply_action(&mut world, f, Action::SetNationalFocus(NationalFocus::MaritimeTrade))
+        .unwrap();
+    assert_eq!(world.faction(f).national_focus, NationalFocus::MaritimeTrade);
+    assert!(
+        focus::active(world.faction(f)).is_none(),
+        "the new focus must not take effect the instant it's set"
+    );
+
+    for day in 0..(FOCUS_SWITCH_DAYS - 1) {
+        focus::tick_national_focus(&mut world);
+        assert!(
+            focus::active(world.faction(f)).is_none(),
+            "day {day}: should still be mid-transition"
+        );
+    }
+    focus::tick_national_focus(&mut world);
+    assert_eq!(
+        focus::active(world.faction(f)),
+        Some(NationalFocus::MaritimeTrade),
+        "the focus should be active once FOCUS_SWITCH_DAYS have fully elapsed"
+    );
+}
+
+/// `NationalFocus::MilitaryUnification` (docs/phase3-spec.md: "Military 支持
+/// ＋、Citizens 支持 −"): once active, `politics::tick_politics` should push
+/// Military support up and Citizens support down relative to a faction with
+/// no support-affecting focus active.
+#[test]
+fn focus_affects_group_support() {
+    let run = |focus: NationalFocus| {
+        let mut world = scenario::build_world();
+        let f = FactionId(0);
+        world.faction_mut(f).national_focus = focus;
+        world.faction_mut(f).focus_transition_days = 0;
+        let n = world.factions.len();
+        let mut events = Vec::new();
+        politics::tick_politics(&mut world, &vec![0.0; n], &vec![0i32; n], &mut events);
+        world.faction(f).group_support
+    };
+
+    // `AllianceNetwork` has no group-support line at all (see
+    // `scenario::FACTION_NATIONAL_FOCUS_DEFAULT`'s doc) - a clean control
+    // that isolates MilitaryUnification's specific contribution.
+    let control = run(NationalFocus::AllianceNetwork);
+    let militarized = run(NationalFocus::MilitaryUnification);
+
+    assert!(
+        militarized[Group::Military.index()] > control[Group::Military.index()],
+        "MilitaryUnification should raise Military support: control={}, militarized={}",
+        control[Group::Military.index()],
+        militarized[Group::Military.index()]
+    );
+    assert!(
+        militarized[Group::Citizens.index()] < control[Group::Citizens.index()],
+        "MilitaryUnification should lower Citizens support: control={}, militarized={}",
+        control[Group::Citizens.index()],
+        militarized[Group::Citizens.index()]
+    );
+}
+
+/// `NationalFocus::MaritimeTrade` (docs/phase3-spec.md: "港湾の輸入容量＋"):
+/// once active, a faction should be able to import more through its own
+/// ports than an otherwise-identical faction without the focus.
+#[test]
+fn maritime_trade_increases_import_capacity() {
+    let run = |focus: Option<NationalFocus>| {
+        let mut world = scenario::build_world();
+        let f = FactionId(0);
+        world.faction_mut(f).import_plan[Good::Food.index()] = 1000.0;
+        world.faction_mut(f).stock[Good::Machinery.index()] = 100_000.0;
+        if let Some(focus) = focus {
+            world.faction_mut(f).national_focus = focus;
+            world.faction_mut(f).focus_transition_days = 0;
+        }
+        trade::tick_imports(&mut world);
+        world.faction(f).stock[Good::Food.index()]
+    };
+
+    let baseline = run(None);
+    let maritime = run(Some(NationalFocus::MaritimeTrade));
+
+    assert!(
+        maritime > baseline,
+        "MaritimeTrade should increase how much Food actually lands through this faction's own \
+         ports: baseline={baseline}, maritime={maritime}"
+    );
+}
+
+/// `NationalFocus::DefensivePosture` (docs/phase3-spec.md: "自領での防御補正
+/// ＋"): an intruder attacking this faction on its own `core` soil should
+/// take more damage than the same attack against an otherwise-identical
+/// defender with no focus-driven combat bonus.
+#[test]
+fn defensive_posture_improves_home_defense() {
+    let run = |focus: Option<NationalFocus>| {
+        let mut world = scenario::build_world();
+        let defender = FactionId(0);
+        if let Some(focus) = focus {
+            world.faction_mut(defender).national_focus = focus;
+            world.faction_mut(defender).focus_transition_days = 0;
+        }
+
+        // Region 3 (関東) is faction 0's capital and `core` territory - put
+        // a lone faction-1 intruder there alongside faction 0's own
+        // defenders, mirroring `combat_reduces_organization`'s setup.
+        let intruder = world.units.iter().position(|u| u.owner == FactionId(1)).unwrap();
+        world.units[intruder].station = Station::Region(RegionId(3));
+        world.units[intruder].movement = None;
+
+        let mut rng = Rng::new(1);
+        let mut events = Vec::new();
+        military::tick_combat(&mut world, &mut rng, &mut events);
+        world.units[intruder].organization
+    };
+
+    let baseline_org = run(None);
+    let defended_org = run(Some(NationalFocus::DefensivePosture));
+
+    assert!(
+        defended_org < baseline_org,
+        "an intruder attacking a DefensivePosture faction's home soil should take more damage \
+         (lose more organization) than against an otherwise-identical defender: \
+         baseline={baseline_org}, defended={defended_org}"
+    );
+}
+
+/// docs/phase3-spec.md §0's abuse-resistance rule, applied to `Action::
+/// SetNationalFocus` specifically: rapid repeated calls - retargeting mid-
+/// transition, re-affirming the same target over and over - must never
+/// produce a different `national_focus`/`focus_transition_days` outcome, nor
+/// a different day the focus actually becomes active, than a single call.
+#[test]
+fn rapid_focus_switching_gains_no_advantage() {
+    let f = FactionId(0);
+
+    let mut world_single = scenario::build_world();
+    action::apply_action(&mut world_single, f, Action::SetNationalFocus(NationalFocus::Technocracy))
+        .unwrap();
+
+    let mut world_spam = scenario::build_world();
+    action::apply_action(&mut world_spam, f, Action::SetNationalFocus(NationalFocus::Technocracy))
+        .unwrap();
+    for _ in 0..10 {
+        // Retargeting mid-transition must be rejected outright...
+        assert!(
+            action::apply_action(&mut world_spam, f, Action::SetNationalFocus(NationalFocus::MaritimeTrade))
+                .is_err(),
+            "retargeting an in-progress focus switch should be rejected"
+        );
+        // ...and re-affirming the same target must be a harmless no-op, not
+        // a timer reset.
+        action::apply_action(&mut world_spam, f, Action::SetNationalFocus(NationalFocus::Technocracy))
+            .unwrap();
+    }
+
+    assert_eq!(world_single.faction(f).national_focus, world_spam.faction(f).national_focus);
+    assert_eq!(
+        world_single.faction(f).focus_transition_days,
+        world_spam.faction(f).focus_transition_days,
+        "spamming SetNationalFocus must not shorten (or lengthen) the transition already in progress"
+    );
+
+    for day in 0..(FOCUS_SWITCH_DAYS + 2) {
+        focus::tick_national_focus(&mut world_single);
+        focus::tick_national_focus(&mut world_spam);
+        assert_eq!(
+            focus::active(world_single.faction(f)).is_some(),
+            focus::active(world_spam.faction(f)).is_some(),
+            "day {day}: spamming SetNationalFocus must activate the focus on exactly the same \
+             day as a single call"
+        );
+    }
+    assert_eq!(focus::active(world_single.faction(f)), Some(NationalFocus::Technocracy));
 }
 

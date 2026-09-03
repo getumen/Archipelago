@@ -22,8 +22,9 @@ pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 
 /// Faction-scalar field count in `Observation::encode()`: `manpower`,
 /// `stock[GOOD_COUNT]`, `war_support`, `stability`,
-/// `group_support[GROUP_COUNT]` (Stage 3A), `unit_count`.
-pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT;
+/// `group_support[GROUP_COUNT]` (Stage 3A), `unit_count`,
+/// `[national_focus_code, focus_transition_days]` (Stage 3C).
+pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2;
 
 /// Stage 3B per-relation field count in `Observation::encode()`, one block
 /// per *other* faction (own row zeroed - see `encode`'s doc): `[stance_code,
@@ -146,8 +147,13 @@ impl<'a> Observation<'a> {
     /// construction_progress, import_flow, node_throughput]`, then
     /// per-sea-zone (Stage 2D) `[own_control, enemy_control_max, own_power,
     /// enemy_power]`, then faction scalars `[manpower, stock[GOOD_COUNT]...,
-    /// war_support, stability, group_support[GROUP_COUNT]..., unit_count]`
-    /// (Stage 3A adds `group_support`), then one Stage 3B
+    /// war_support, stability, group_support[GROUP_COUNT]..., unit_count,
+    /// national_focus_code, focus_transition_days]` (Stage 3A adds
+    /// `group_support`; Stage 3C adds the trailing pair -
+    /// `national_focus_code` is `NationalFocus::index()` as an `f32`,
+    /// regardless of whether a switch is still transitioning - a consumer
+    /// that needs "is it actually active" must additionally check
+    /// `focus_transition_days == 0`), then one Stage 3B
     /// `DIPLOMACY_FIELD_COUNT`-sized relation block per faction (own row
     /// zeroed - see the loop below). `construction_progress` is
     /// `invested / required` in `0..=1`, or `0.0` when no project is in
@@ -194,6 +200,8 @@ impl<'a> Observation<'a> {
             out.push(faction.group_support[g]);
         }
         out.push(self.own_units().len() as f32);
+        out.push(faction.national_focus.index() as f32);
+        out.push(faction.focus_transition_days as f32);
 
         // Stage 3B (docs/phase3-spec.md "Stage 3B"): one `DIPLOMACY_FIELD_
         // COUNT`-sized block per faction in ascending `FactionId` order

@@ -5,6 +5,7 @@
 
 use archipelago_sim::diplomacy::Treaty;
 use archipelago_sim::event::Event;
+use archipelago_sim::focus;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::sim::Outcome;
@@ -197,6 +198,20 @@ pub fn print_faction_table(world: &World) {
             .map(|g| format!("{}={:.1}", g.label(), faction.group_support[g.index()]))
             .collect();
         println!("  {}  支持: {}", pad_right("", 8), group_line.join(" "));
+
+        // Stage 3C (docs/phase3-spec.md "Stage 3C — 国家方針"): the current
+        // national focus and whether its transition has settled.
+        let focus_status = if focus::active(faction).is_some() {
+            "有効"
+        } else {
+            "移行中"
+        };
+        println!(
+            "  {}  方針: {} ({})",
+            pad_right("", 8),
+            faction.national_focus.label(),
+            focus_status,
+        );
 
         // Stage 2C (docs/phase2-spec.md "Stage 2C"): import plan (what the
         // faction is asking to bring in) and the total actually landed

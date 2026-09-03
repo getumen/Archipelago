@@ -10,13 +10,14 @@ use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
     ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
-    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT, IMPORT_PER_PORT,
-    MACHINERY_INPUT_STEEL, MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD,
-    REGIME_CHANGE_THRESHOLD, STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT,
-    UNIT_MANPOWER,
+    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT,
+    FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_PER_PORT, MACHINERY_INPUT_STEEL,
+    MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
+    STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
 };
 use archipelago_sim::construction::Project;
-use archipelago_sim::diplomacy::Treaty;
+use archipelago_sim::diplomacy::{Stance, Treaty};
+use archipelago_sim::focus::{self, NationalFocus};
 use archipelago_sim::good::Good;
 use archipelago_sim::group::Group;
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
@@ -220,6 +221,22 @@ const ALLIANCE_THREAT_RATIO: f32 = 1.5;
 /// seed to seed without the simulation itself gaining any new randomness.
 const MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING: f32 = 0.05;
 
+/// Stage 3C AI (docs/phase3-spec.md "AI" under "Stage 3C": "外交提案の受諾さ
+/// れやすさ＋"): subtracted from every opinion floor in `evaluate_proposal`
+/// when the *responder* has `NationalFocus::AllianceNetwork` active - an
+/// alliance-minded faction says yes to a wider range of relationships than
+/// it otherwise would.
+const FOCUS_ALLIANCE_ACCEPT_BONUS: f32 = 20.0;
+
+/// Stage 3C AI (docs/phase3-spec.md "AI" under "Stage 3C": "領土の半分を失う
+/// ... にのみ切り替える"): once a faction's currently-owned region count
+/// falls to this fraction of its `core` (starting) region count or below, it
+/// reactively switches to `NationalFocus::DefensivePosture` - a stable,
+/// state-free trigger (no extra bookkeeping needed: `Region::core` never
+/// changes, so "half of what I started with" is always derivable straight
+/// from `World`).
+const MAJOR_TERRITORY_LOSS_FRACTION: f32 = 0.5;
+
 /// Stage 3B AI: total military power (land + fleets combined) a faction can
 /// currently bring to bear, used by `diplomacy_ai` to judge "surrounded by a
 /// stronger enemy".
@@ -249,9 +266,20 @@ fn evaluate_proposal(
     treaty: Treaty,
 ) -> bool {
     let opinion = world.diplomacy.opinion(faction, from);
+    // Stage 3C AI (docs/phase3-spec.md "AI" under "Stage 3C": "外交提案の受
+    // 諾されやすさ＋"): every opinion floor below eases by this much when the
+    // *responder* (this faction) has `NationalFocus::AllianceNetwork`
+    // active - it says yes more readily across every treaty kind, not just
+    // `Alliance` itself.
+    let accept_bonus = if focus::active(world.faction(faction)) == Some(NationalFocus::AllianceNetwork)
+    {
+        FOCUS_ALLIANCE_ACCEPT_BONUS
+    } else {
+        0.0
+    };
     match treaty {
         Treaty::Ceasefire | Treaty::NonAggression => {
-            if opinion < PEACE_ACCEPT_MIN_OPINION {
+            if opinion < PEACE_ACCEPT_MIN_OPINION - accept_bonus {
                 return false;
             }
             // External code review fix C2: judged off starting army size
@@ -265,9 +293,9 @@ fn evaluate_proposal(
             let enemy_power = total_military_power(world, from);
             own_power < enemy_power * PEACE_SEEK_BASE_RATIO * peace_disposition
         }
-        Treaty::Alliance => opinion >= ALLIANCE_ACCEPT_MIN_OPINION,
-        Treaty::MilitaryAccess | Treaty::PortAccess => opinion >= ACCESS_ACCEPT_MIN_OPINION,
-        Treaty::TradeAgreement => opinion >= TRADE_ACCEPT_MIN_OPINION,
+        Treaty::Alliance => opinion >= ALLIANCE_ACCEPT_MIN_OPINION - accept_bonus,
+        Treaty::MilitaryAccess | Treaty::PortAccess => opinion >= ACCESS_ACCEPT_MIN_OPINION - accept_bonus,
+        Treaty::TradeAgreement => opinion >= TRADE_ACCEPT_MIN_OPINION - accept_bonus,
     }
 }
 
@@ -403,12 +431,190 @@ fn dominant_threat(world: &World, faction: FactionId) -> Option<(FactionId, f32)
     best
 }
 
+/// Stage 3C AI (docs/phase3-spec.md "AI" under "Stage 3C": "初期状況（工業力
+/// ・港湾・地理）から方針を選び"): scores every `NationalFocus` off this
+/// faction's own opening geography/industry (no cross-faction comparison
+/// needed for the score itself), then returns the highest-scoring one that
+/// no *lower-`FactionId`* living faction has already actively chosen -
+/// diversity without any extra bookkeeping, relying only on the existing
+/// `HeuristicAgent::period`/`offset` scheduling (`decide`'s doc): with 3
+/// factions and `period == 4`, faction 0 always makes this call on day 0,
+/// faction 1 on day 1, faction 2 on day 2, so by the time a later faction
+/// picks, every earlier one's real choice is already visible in `World`
+/// (the scenario's shared `FACTION_NATIONAL_FOCUS_DEFAULT` never collides
+/// with this check, since only a *lower* id ever counts as "already
+/// chosen"). Falls back to the top score outright if every candidate is
+/// somehow already taken (never happens with 3 factions and 6 foci).
+///
+/// Scores (all roughly `0..1`-ish so they compare meaningfully against each
+/// other):
+/// - `MilitaryUnification`: Arms capacity's share of this faction's own
+///   industry total.
+/// - `Technocracy`: Machinery capacity's share of industry total.
+/// - `EconomicSphere`: Steel capacity's share of industry total (a
+///   raw-materials/trade-goods orientation).
+/// - `MaritimeTrade`: total port rating over industry total.
+/// - `DefensivePosture`: average owned-region terrain `defense_bonus`,
+///   minus the `1.0` a flat `Terrain::Plain` map would score.
+/// - `AllianceNetwork`: how many *distinct* other factions border this one,
+///   per owned region - a faction sandwiched between several neighbors
+///   scores higher than one with a single front.
+fn choose_opening_focus(faction: FactionId, world: &World) -> NationalFocus {
+    let own_regions = world.regions_of(faction);
+    if own_regions.is_empty() {
+        return world.faction(faction).national_focus;
+    }
+
+    let industry_total: f32 = own_regions.iter().map(|&r| world.region(r).industry_total()).sum::<f32>().max(0.01);
+    let arms: f32 = own_regions.iter().map(|&r| world.region(r).effective_capacity(Good::Arms)).sum();
+    let machinery: f32 = own_regions
+        .iter()
+        .map(|&r| world.region(r).effective_capacity(Good::Machinery))
+        .sum();
+    let steel: f32 = own_regions.iter().map(|&r| world.region(r).effective_capacity(Good::Steel)).sum();
+    let port: f32 = own_regions.iter().map(|&r| world.region(r).port).sum();
+    let defense_avg: f32 =
+        own_regions.iter().map(|&r| world.region(r).terrain.defense_bonus()).sum::<f32>() / own_regions.len() as f32;
+
+    let mut neighbor_factions: BTreeSet<FactionId> = BTreeSet::new();
+    for &r in &own_regions {
+        for n in world.neighbors(r) {
+            let owner = world.region(n).owner;
+            if owner != faction {
+                neighbor_factions.insert(owner);
+            }
+        }
+    }
+    let alliance_score = neighbor_factions.len() as f32 / own_regions.len() as f32;
+
+    let mut ranked: Vec<(NationalFocus, f32)> = vec![
+        (NationalFocus::MilitaryUnification, arms / industry_total),
+        (NationalFocus::Technocracy, machinery / industry_total),
+        (NationalFocus::EconomicSphere, steel / industry_total),
+        (NationalFocus::MaritimeTrade, port / industry_total),
+        (NationalFocus::DefensivePosture, defense_avg - 1.0),
+        (NationalFocus::AllianceNetwork, alliance_score),
+    ];
+    // Deterministic tie-break: higher score first, `NationalFocus::index()`
+    // as the fixed fallback order for an exact tie.
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.index().cmp(&b.0.index()))
+    });
+
+    for &(candidate, _) in &ranked {
+        let taken = world.factions.iter().any(|f| {
+            f.alive && f.id.0 < faction.0 && f.national_focus == candidate
+        });
+        if !taken {
+            return candidate;
+        }
+    }
+    ranked[0].0
+}
+
+/// External code review fix P1 (docs/phase3-spec.md "AI" under "Stage 3C":
+/// "状況が大きく変わったとき（領土の半分を失う、同盟が成立するなど）にのみ
+/// 切り替える"): the only two reactive triggers, resolved as a strict
+/// priority order rather than two independent `if`s - an existential
+/// territorial collapse matters more than a new alliance, and *only* the
+/// winning trigger's target is ever compared against `current`.
+///
+/// Before this fix each trigger was checked independently, guarded only by
+/// `current != <that trigger's target>`. That looks edge-triggered but
+/// isn't: once the territory trigger fires and `current` becomes
+/// `DefensivePosture`, the *still-true* alliance condition sees
+/// `current != AllianceNetwork` and fires too (rejected while the
+/// territory switch is transitioning, then accepted the moment it
+/// finishes) - and vice versa the instant the alliance switch itself
+/// finishes, since the territory condition is still true. Two permanently-
+/// true conditions with no priority between them made the two targets
+/// perpetually disagree about what `current` "should" be, so the faction
+/// oscillated between them forever, spending most of the game in the
+/// `focus::active() == None` transition blackout - strictly worse than
+/// never reacting at all.
+///
+/// The fix makes only the highest-priority *currently-true* condition's
+/// target ever count as "what we should be on": while the territory
+/// trigger holds, the alliance condition is never even consulted, so a
+/// faction already on `DefensivePosture` for that reason emits nothing more
+/// no matter how long the alliance also stays true - a real switch happens
+/// only when the *set of true conditions* changes (the winning trigger
+/// clears, or a higher one newly arms), which is a genuine change of
+/// situation, not a level that merely remains true.
+///
+/// Also refuses to even evaluate while a switch is already under way
+/// (`focus_transition_days > 0`): `action::apply_set_national_focus`
+/// rejects retargeting mid-transition anyway, so doing so here would only
+/// ever produce actions in `decide()`'s output that the simulation is
+/// certain to bounce.
+fn major_change_focus(faction: FactionId, world: &World) -> Option<NationalFocus> {
+    let f = world.faction(faction);
+    if f.focus_transition_days > 0 {
+        return None;
+    }
+    let current = f.national_focus;
+
+    let core_regions = world.regions.iter().filter(|r| r.core == faction).count() as f32;
+    let owned_regions = world.region_count(faction) as f32;
+    let territory_collapse =
+        core_regions > 0.0 && owned_regions <= core_regions * MAJOR_TERRITORY_LOSS_FRACTION;
+    if territory_collapse {
+        return (current != NationalFocus::DefensivePosture).then_some(NationalFocus::DefensivePosture);
+    }
+
+    let n = world.factions.len();
+    let allied = (0..n).map(|i| FactionId(i as u32)).any(|other| {
+        other != faction
+            && world.factions[other.index()].alive
+            && world.diplomacy.stance(faction, other) == Stance::Alliance
+    });
+    if allied {
+        return (current != NationalFocus::AllianceNetwork).then_some(NationalFocus::AllianceNetwork);
+    }
+
+    None
+}
+
+/// Stage 3C AI entry point (docs/phase3-spec.md "AI" under "Stage 3C"):
+/// picks an opening focus on this agent's very first `decide()` call, then
+/// only ever reacts to `major_change_focus` afterward - never re-running the
+/// opening heuristic, so a score that would merely have crept past another
+/// focus's without any real change in circumstances is not a reason to
+/// switch.
+fn national_focus_ai(faction: FactionId, initialized: &mut bool, obs: &Observation, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    if !*initialized {
+        actions.push(Action::SetNationalFocus(choose_opening_focus(faction, world)));
+        *initialized = true;
+        return;
+    }
+    if let Some(focus) = major_change_focus(faction, world) {
+        actions.push(Action::SetNationalFocus(focus));
+    }
+}
+
 /// This faction's own usable import capacity, mirroring `trade::tick_imports`'s
 /// `own_capacity` computation exactly (own, uncontested, unblockaded ports
 /// only) - the figure `Treaty::PortAccess` extends when granted, so it's
 /// also the figure that decides whether this faction's *own* capacity is
 /// the binding constraint worth seeking a grant to relieve.
+///
+/// External code review fix P2: Stage 3C added `NationalFocus::MaritimeTrade`'s
+/// `FOCUS_MARITIME_IMPORT_CAPACITY_MULT` to `tick_imports`'s own per-port
+/// figure, but this mirror wasn't updated alongside it - so a faction
+/// running `MaritimeTrade` had its own capacity underestimated by this
+/// function (by the same margin the multiplier grants) and could seek out a
+/// `PortAccess` grant it didn't actually need. Applying the same
+/// `focus::active`-gated multiplier here, exactly as `tick_imports` does,
+/// keeps the two in lockstep again.
 fn own_port_capacity(faction: FactionId, world: &World) -> f32 {
+    let maritime_mult = if focus::active(world.faction(faction)) == Some(NationalFocus::MaritimeTrade) {
+        FOCUS_MARITIME_IMPORT_CAPACITY_MULT
+    } else {
+        1.0
+    };
     world
         .regions
         .iter()
@@ -418,7 +624,7 @@ fn own_port_capacity(faction: FactionId, world: &World) -> f32 {
                 && !world.has_enemy_units(r.id, faction)
                 && !naval::is_port_blockaded(world, r.id)
         })
-        .map(|r| r.port * IMPORT_PER_PORT * (1.0 - r.devastation))
+        .map(|r| r.port * IMPORT_PER_PORT * (1.0 - r.devastation) * maritime_mult)
         .sum()
 }
 
@@ -594,6 +800,16 @@ pub struct HeuristicAgent {
     peace_disposition: f32,
     period: u32,
     offset: u32,
+    /// Stage 3C AI (docs/phase3-spec.md "AI" under "Stage 3C"): whether this
+    /// agent has already made its opening `NationalFocus` choice - `false`
+    /// until the first `decide()` call issues one, after which
+    /// `national_focus_ai` only ever reacts to `major_change_focus`. Not
+    /// derived from `World` (unlike everything else this AI reads) because
+    /// nothing in `World` distinguishes "still holding the scenario's shared
+    /// default" from "deliberately chose that same focus" - see
+    /// `choose_opening_focus`'s doc for how that same ambiguity is avoided
+    /// for the *other* factions' choices instead.
+    focus_initialized: bool,
 }
 
 impl HeuristicAgent {
@@ -621,6 +837,7 @@ impl HeuristicAgent {
             peace_disposition,
             period: PERIOD,
             offset: faction.0 % PERIOD,
+            focus_initialized: false,
         }
     }
 }
@@ -636,6 +853,7 @@ impl Agent for HeuristicAgent {
         }
 
         let mut actions = Vec::new();
+        national_focus_ai(self.faction, &mut self.focus_initialized, obs, &mut actions);
         set_policy(self.faction, obs, &mut actions);
         set_trade_policy(self.faction, obs, &mut actions);
         set_logistics_priority(obs, &mut actions);

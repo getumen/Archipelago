@@ -6,6 +6,7 @@ use crate::construction;
 use crate::diplomacy;
 use crate::economy;
 use crate::event::Event;
+use crate::focus;
 use crate::ids::FactionId;
 use crate::logistics;
 use crate::military;
@@ -61,6 +62,12 @@ impl Simulation {
         // this `step()` call) is fully resolved before combat, occupation
         // and trade decide anything off `world.diplomacy` today.
         diplomacy::tick_diplomacy(&mut self.world, &mut events);
+
+        // Stage 3C (docs/phase3-spec.md "Stage 3C — 国家方針"): counts down
+        // every faction's in-progress `NationalFocus` switch, the same
+        // "maintenance runs before anything reads today's state" slot
+        // `tick_diplomacy`'s own countdowns occupy.
+        focus::tick_national_focus(&mut self.world);
 
         // Stage 2D: sea control is recomputed first, from fleet positions
         // as they stood at the end of the previous tick's movement — the

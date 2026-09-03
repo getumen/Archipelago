@@ -5,6 +5,7 @@
 
 use archipelago_sim::construction::{Construction, Project};
 use archipelago_sim::diplomacy::ALL_TREATIES;
+use archipelago_sim::focus;
 use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::ids::FactionId;
@@ -167,7 +168,7 @@ fn serialize_factions(world: &World) -> String {
                 .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Sea)
                 .count();
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
@@ -193,6 +194,9 @@ fn serialize_factions(world: &World) -> String {
                 f.protest_active,
                 f.mutiny_active,
                 f.capital_flight_active,
+                string(f.national_focus.key()),
+                f.focus_transition_days,
+                focus::active(f).is_some(),
             )
         })
         .collect();

@@ -42,14 +42,16 @@
 //! themselves move faction-to-faction.
 
 use crate::balance::{
+    FOCUS_ECONOMIC_TRADE_FLOW_MULT, FOCUS_MARITIME_IMPORT_CAPACITY_MULT,
     IMPORT_COST_MACHINERY_PER_GOOD, IMPORT_PER_PORT, TRADE_FLOW_RATE_MAX,
     TRADE_SURPLUS_RESERVE_FRACTION,
 };
 use crate::diplomacy::Treaty;
+use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::FactionId;
 use crate::naval;
-use crate::world::World;
+use crate::world::{Faction, World};
 
 /// The three tradeable civilian goods `Treaty::TradeAgreement` moves - the
 /// same three `Faction::shortage_by_good` tracks (Stage 2C's external code
@@ -64,6 +66,18 @@ struct TradeFlow {
     exporter: usize,
     good: Good,
     amount: f32,
+}
+
+/// `NationalFocus::EconomicSphere`'s `TradeAgreement`-flow multiplier for
+/// `faction` (see `tick_imports`'s call site doc): `FOCUS_ECONOMIC_
+/// TRADE_FLOW_MULT` while the focus is active (post-transition; see
+/// `focus::active`), `1.0` otherwise.
+fn economic_sphere_mult(faction: &Faction) -> f32 {
+    if focus::active(faction) == Some(NationalFocus::EconomicSphere) {
+        FOCUS_ECONOMIC_TRADE_FLOW_MULT
+    } else {
+        1.0
+    }
 }
 
 pub fn tick_imports(world: &mut World) {
@@ -94,7 +108,19 @@ pub fn tick_imports(world: &mut World) {
             continue;
         }
         let region = &world.regions[i];
-        let cap = region.port * IMPORT_PER_PORT * (1.0 - region.devastation);
+        // Stage 3C `NationalFocus::MaritimeTrade` (docs/phase3-spec.md: "港
+        // 湾の輸入容量＋"): the owner's own ports rate higher while this
+        // focus is active - a `Treaty::PortAccess` grantee drawing on those
+        // ports benefits too, since it's genuinely a better port, not a
+        // per-recipient discount.
+        let maritime_mult = if focus::active(&world.factions[region.owner.index()])
+            == Some(NationalFocus::MaritimeTrade)
+        {
+            FOCUS_MARITIME_IMPORT_CAPACITY_MULT
+        } else {
+            1.0
+        };
+        let cap = region.port * IMPORT_PER_PORT * (1.0 - region.devastation) * maritime_mult;
         if cap > 0.0 {
             port_capacity[i] = cap;
             own_capacity[region.owner.index()] += cap;
@@ -148,7 +174,14 @@ pub fn tick_imports(world: &mut World) {
                 let surplus = (world.factions[exp].stock[good.index()]
                     * (1.0 - TRADE_SURPLUS_RESERVE_FRACTION))
                     .max(0.0);
-                let want = (TRADE_FLOW_RATE_MAX * deficit).min(surplus);
+                // Stage 3C `NationalFocus::EconomicSphere` (docs/phase3-
+                // spec.md: "TradeAgreement の流量＋"): either side having this
+                // focus active grows the flow ceiling - the higher of the
+                // two multipliers, so a partnership with one economically-
+                // focused side is never double-counted when both are.
+                let flow_mult = economic_sphere_mult(&world.factions[imp])
+                    .max(economic_sphere_mult(&world.factions[exp]));
+                let want = (TRADE_FLOW_RATE_MAX * flow_mult * deficit).min(surplus);
                 if want > 0.0 {
                     flows.push(TradeFlow { importer: imp, exporter: exp, good, amount: want });
                 }

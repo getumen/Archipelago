@@ -40,10 +40,12 @@
 use crate::balance::{
     ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
     CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP,
-    CONSCRIPT_RATE, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL, MANPOWER_DEMOBILIZATION_RATE,
-    MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL, REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY,
-    STRIKE_OUTPUT_MULT,
+    CONSCRIPT_RATE, FOCUS_TECHNOCRACY_PRODUCTION_MULT, FOOD_EFFICIENCY_DAMPENING,
+    FOOD_EFFICIENCY_FLOOR, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL,
+    MANPOWER_DEMOBILIZATION_RATE, MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL,
+    REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY, STRIKE_OUTPUT_MULT,
 };
+use crate::focus::{self, NationalFocus};
 use crate::good::{Good, ALL_GOODS, GOOD_COUNT};
 use crate::world::World;
 
@@ -72,31 +74,62 @@ fn consume(stock: &mut f32, need: f32, ration: f32) -> f32 {
     ((need - served) / need).clamp(0.0, 1.0)
 }
 
+/// The industrial output multiplier from a faction's political `stability`
+/// (`0..100`, docs/phase3-spec.md "安定度の再定義"): floors at 0.6, the same
+/// way `efficiency` floors at 0.2 - neither term can zero a faction's output
+/// on its own. Factored out so Step 0's Food-specific dampening
+/// (`balance::FOOD_EFFICIENCY_FLOOR`'s doc) and Step 1's per-faction
+/// commodity scaling read the exact same formula instead of two copies that
+/// could drift apart.
+fn stability_output_mult(stability: f32) -> f32 {
+    0.6 + 0.4 * (stability / 100.0)
+}
+
 pub fn tick_economy(world: &mut World) {
     let n_regions = world.regions.len();
     let n_factions = world.factions.len();
 
-    // Step 0: per-region efficiency, shared across every commodity (Phase 1
-    // §4.1's formula, now applied uniformly instead of Food having its own).
+    // Step 0: per-region efficiency, shared across every commodity except
+    // Food (Phase 1 §4.1's formula). Food used to read the exact same
+    // `efficiency[i]` (and the same faction-wide `stability_mult` below) as
+    // every other commodity - the Stage 3C playtest found that equality
+    // closes unrest/shortage into a loop with no floor
+    // (`balance::FOOD_EFFICIENCY_FLOOR`'s doc has the full account), so Food
+    // now gets its own, separately dampened and floored multiplier,
+    // `food_efficiency[i]`, computed from the same underlying signal
+    // (`efficiency[i]` here times this region owner's `stability_mult`, read
+    // fresh from `faction.stability` since the per-faction loop below
+    // hasn't computed its own copy yet).
     let mut efficiency = vec![0.0f32; n_regions];
+    let mut food_efficiency = vec![0.0f32; n_regions];
     for (i, region) in world.regions.iter().enumerate() {
         efficiency[i] = (region.effective_infrastructure().max(0.2)
             * region.labor_ratio()
             * (1.0 - region.unrest / 150.0))
             .clamp(0.2, 1.0);
+
+        let owner_stability_mult =
+            stability_output_mult(world.factions[region.owner.index()].stability);
+        let disorder_free = (efficiency[i] * owner_stability_mult).clamp(0.0, 1.0);
+        food_efficiency[i] = FOOD_EFFICIENCY_FLOOR
+            + (1.0 - FOOD_EFFICIENCY_FLOOR) * disorder_free.powf(FOOD_EFFICIENCY_DAMPENING);
     }
 
     // Step 1: potential[f][g] = capacity-weighted output before any input
     // constraint, summed over each faction's owned regions in region-index
-    // order (fixed accumulation order for determinism).
+    // order (fixed accumulation order for determinism). Food is weighted by
+    // `food_efficiency` instead of the shared `efficiency` every other good
+    // uses - see Step 0's comment.
     let mut potential = vec![[0.0f32; GOOD_COUNT]; n_factions];
     let mut total_pop = vec![0.0f32; n_factions];
     for region in &world.regions {
         let f = region.owner.index();
         total_pop[f] += region.population;
         let e = efficiency[region.id.index()];
+        let food_e = food_efficiency[region.id.index()];
         for good in ALL_GOODS {
-            potential[f][good.index()] += region.effective_capacity(good) * e;
+            let mult = if good == Good::Food { food_e } else { e };
+            potential[f][good.index()] += region.effective_capacity(good) * mult;
         }
     }
 
@@ -107,7 +140,7 @@ pub fn tick_economy(world: &mut World) {
         }
         let f = faction.id.index();
 
-        let stability_mult = 0.6 + 0.4 * (faction.stability / 100.0);
+        let stability_mult = stability_output_mult(faction.stability);
         // Stage 3A political events (docs/phase3-spec.md "政治イベント"):
         // `Event::Strike` depresses every non-Food commodity's potential
         // (a labor strike, not a farming one); `Event::RegimeChange`
@@ -122,11 +155,27 @@ pub fn tick_economy(world: &mut World) {
         } else {
             1.0
         };
+        // Stage 3C `NationalFocus::Technocracy` (docs/phase3-spec.md: "生産
+        // 効率＋"): applies to every commodity, including Food, alongside
+        // `stability_mult`/`regime_change_mult`.
+        let focus_production_mult = if focus::active(faction) == Some(NationalFocus::Technocracy) {
+            FOCUS_TECHNOCRACY_PRODUCTION_MULT
+        } else {
+            1.0
+        };
+        // `stability_mult` is exempted for Food: `food_efficiency` (Step 0)
+        // already folded a dampened, floored copy of it in, so applying the
+        // shared, un-dampened multiplier again here would undo that floor.
+        // `regime_change_mult`/`focus_production_mult` still apply to every
+        // commodity including Food - see their own doc comments for why
+        // that's fine (a fixed-duration, self-resetting event and a pure
+        // bonus respectively, neither one part of the feedback loop this
+        // exemption exists to break).
         let mut pot = potential[f];
         for (idx, v) in pot.iter_mut().enumerate() {
-            *v *= stability_mult * regime_change_mult;
+            *v *= regime_change_mult * focus_production_mult;
             if idx != Good::Food.index() {
-                *v *= strike_mult;
+                *v *= stability_mult * strike_mult;
             }
         }
         // `Event::CapitalFlight` narrows further: only Machinery output is
