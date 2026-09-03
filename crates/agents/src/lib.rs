@@ -9,7 +9,8 @@ use std::collections::{BTreeSet, VecDeque};
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, COMBAT_SUPPLY_MULT, MACHINERY_INPUT_STEEL,
+    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
+    CIVILIAN_FOOD_DEMAND_PER_POP, COMBAT_SUPPLY_MULT, MACHINERY_INPUT_STEEL,
     MUNITIONS_INPUT_STEEL, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
 };
 use archipelago_sim::construction::Project;
@@ -72,6 +73,34 @@ const REPAIR_THRESHOLD: f32 = 0.35;
 /// into the stockpile the war effort itself needs (Stage 2B: "Machinery /
 /// Steel の在庫が軍需の余裕分を下回っている間は着工しない").
 const BUILD_STOCK_RESERVE_DAYS: f32 = 15.0;
+/// Stage 2C sea imports (docs/phase2-spec.md "Stage 2C": "shortage が出て
+/// いるなら不足量を埋めるだけの輸入を要求し"): the agent requests an import
+/// rate scaled by `Faction::shortage` (0 when unshortaged, up to the full
+/// civilian Food/Energy need at `shortage == 1.0`) rather than always asking
+/// for the theoretical maximum - `trade::tick_imports` would cap an
+/// over-large request at port capacity/Machinery affordability anyway, but
+/// asking only for what's actually missing keeps the request meaningful as
+/// a diagnostic and avoids needlessly bidding away Machinery the war economy
+/// might still need.
+const IMPORT_REQUEST_SHORTAGE_SCALE: f32 = 1.5;
+/// Machinery stockpile, in import-equivalents of a full day's Food+Energy
+/// civilian need, below which the agent throttles its import request
+/// (design.md §9-style trade-off: imports are worth less than keeping the
+/// war economy's own Machinery reserve solvent) rather than bidding for
+/// imports it can't really afford to keep paying for.
+const IMPORT_MACHINERY_LOW_DAYS: f32 = 10.0;
+/// Import request multiplier applied when Machinery is running low
+/// (`IMPORT_MACHINERY_LOW_DAYS`).
+const IMPORT_THROTTLE_WEIGHT: f32 = 0.4;
+/// `unit.supply` / `unit.strength()` average below which the fleet is
+/// considered pressured on that axis for `logistics_priority` purposes
+/// (docs/phase2-spec.md: "部隊の平均 supply が低ければ Munitions 寄り、部隊の
+/// 平均 strength が低ければ Arms 寄りにする").
+const LOGISTICS_PRESSURE_THRESHOLD: f32 = 0.75;
+/// Logistics-priority weight given to whichever good the fleet is pressured
+/// on (the other gets `1.0 -` this); an even split when neither or both axes
+/// are under pressure, so neither ever gets a fixed unconditional priority.
+const LOGISTICS_FOCUSED_WEIGHT: f32 = 0.7;
 
 /// Decides for one faction every `period` days (offset by faction id so the
 /// three AIs don't all act on the same day), per mvp-spec.md §7.
@@ -112,6 +141,8 @@ impl Agent for HeuristicAgent {
 
         let mut actions = Vec::new();
         set_policy(self.faction, obs, &mut actions);
+        set_trade_policy(self.faction, obs, &mut actions);
+        set_logistics_priority(obs, &mut actions);
         reinforce(self.faction, obs, &mut actions);
         recruit(self.faction, obs, &mut actions);
         build(self.faction, obs, &mut actions);
@@ -206,6 +237,77 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
         1.0
     };
     actions.push(Action::SetCivilianRation(ration));
+}
+
+/// Stage 2C sea imports (docs/phase2-spec.md "Stage 2C" AI section): request
+/// enough Food/Energy import to close whatever share of civilian demand
+/// `Faction::shortage_by_good` says is currently missing *for that specific
+/// commodity* (external code review fix - the aggregate `Faction::shortage`
+/// is the worst of Food/Energy/Machinery and can be nonzero from Machinery
+/// alone, which used to make this request both Food and Energy at full
+/// scale even when one of them was perfectly well-stocked), throttled back
+/// when the Machinery that pays for it is itself running low.
+fn set_trade_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let f = obs.world.faction(faction);
+    let total_pop: f32 = obs.own_regions().iter().map(|&r| obs.world.region(r).population).sum();
+    let food_need = total_pop * CIVILIAN_FOOD_DEMAND_PER_POP;
+    let energy_need = total_pop * CIVILIAN_ENERGY_DEMAND_PER_POP;
+
+    let machinery_days = if food_need + energy_need > 0.0 {
+        f.stock[Good::Machinery.index()] / (food_need + energy_need)
+    } else {
+        f32::INFINITY
+    };
+    let throttle = if machinery_days < IMPORT_MACHINERY_LOW_DAYS {
+        IMPORT_THROTTLE_WEIGHT
+    } else {
+        1.0
+    };
+
+    // External code review fix (Stage 2C): scale each commodity's request
+    // off *that commodity's own* deficit (`shortage_by_good`), not the
+    // aggregate `shortage` (the worst of Food/Energy/Machinery). The old
+    // code requested both Food and Energy proportional to full demand
+    // whenever aggregate shortage was nonzero, even when only one was
+    // actually short - the two plans then competed for the same port
+    // capacity and the same Machinery payment, crowding out the commodity
+    // that genuinely needed the import with surplus of the one that didn't.
+    let food_scale = f.shortage_by_good[Good::Food.index()] * IMPORT_REQUEST_SHORTAGE_SCALE * throttle;
+    let energy_scale = f.shortage_by_good[Good::Energy.index()] * IMPORT_REQUEST_SHORTAGE_SCALE * throttle;
+    actions.push(Action::SetImportPlan { good: Good::Food, rate: food_need * food_scale });
+    actions.push(Action::SetImportPlan { good: Good::Energy, rate: energy_need * energy_scale });
+}
+
+/// Stage 2C per-commodity delivery (docs/phase2-spec.md "Stage 2C" AI
+/// section): shift `logistics_priority` toward Munitions when the fleet's
+/// average `supply` is under pressure, toward Arms when its average
+/// `strength()` is - an even split when neither (or both) axis is
+/// pressured, so neither good gets a fixed unconditional priority.
+fn set_logistics_priority(obs: &Observation, actions: &mut Vec<Action>) {
+    let units = obs.own_units();
+    if units.is_empty() {
+        return;
+    }
+
+    let mut supply_sum = 0.0f32;
+    let mut strength_sum = 0.0f32;
+    for &unit_id in &units {
+        let unit = obs.world.unit(unit_id);
+        supply_sum += unit.supply;
+        strength_sum += unit.strength();
+    }
+    let avg_supply = supply_sum / units.len() as f32;
+    let avg_strength = strength_sum / units.len() as f32;
+
+    let low_supply = avg_supply < LOGISTICS_PRESSURE_THRESHOLD;
+    let low_strength = avg_strength < LOGISTICS_PRESSURE_THRESHOLD;
+    let (munitions_weight, arms_weight) = match (low_supply, low_strength) {
+        (true, false) => (LOGISTICS_FOCUSED_WEIGHT, 1.0 - LOGISTICS_FOCUSED_WEIGHT),
+        (false, true) => (1.0 - LOGISTICS_FOCUSED_WEIGHT, LOGISTICS_FOCUSED_WEIGHT),
+        _ => (0.5, 0.5),
+    };
+    actions.push(Action::SetLogisticsPriority { good: Good::Munitions, weight: munitions_weight });
+    actions.push(Action::SetLogisticsPriority { good: Good::Arms, weight: arms_weight });
 }
 
 /// Tops up under-strength units sitting safely in friendly, uncontested territory.

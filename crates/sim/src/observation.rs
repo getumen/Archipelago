@@ -10,8 +10,9 @@ use crate::world::World;
 /// Per-region field count in `Observation::encode()`: `[owned, population,
 /// infrastructure, supply, unrest, own_power, enemy_power]` (7 fixed
 /// fields) followed by `capacity[GOOD_COUNT]`, then `[devastation,
-/// construction_progress]` (Stage 2B, 2 fixed fields).
-pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2;
+/// construction_progress]` (Stage 2B, 2 fixed fields), then `[import_flow,
+/// node_throughput]` (Stage 2C, 2 fixed fields).
+pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2 + 2;
 
 /// Faction-scalar field count in `Observation::encode()`: `manpower`,
 /// `stock[GOOD_COUNT]`, `war_support`, `stability`, `unit_count`.
@@ -108,11 +109,13 @@ impl<'a> Observation<'a> {
     /// Fixed length `ENCODING_LEN` (`regions.len() * REGION_FIELD_COUNT +
     /// FACTION_FIELD_COUNT`): per-region `[owned, population,
     /// infrastructure, supply, unrest, own_power, enemy_power,
-    /// capacity[GOOD_COUNT]..., devastation, construction_progress]`, then
-    /// faction scalars `[manpower, stock[GOOD_COUNT]..., war_support,
-    /// stability, unit_count]`. `construction_progress` is
-    /// `invested / required` in `0..=1`, or `0.0` when no project is
-    /// in progress.
+    /// capacity[GOOD_COUNT]..., devastation, construction_progress,
+    /// import_flow, node_throughput]`, then faction scalars `[manpower,
+    /// stock[GOOD_COUNT]..., war_support, stability, unit_count]`.
+    /// `construction_progress` is `invested / required` in `0..=1`, or `0.0`
+    /// when no project is in progress. `import_flow`/`node_throughput` are
+    /// Stage 2C's per-port import volume and per-node supply throughput cap
+    /// (`trade::tick_imports`, `Region::node_throughput`).
     pub fn encode(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(ENCODING_LEN);
         for region in &self.world.regions {
@@ -132,6 +135,8 @@ impl<'a> Observation<'a> {
                 _ => 0.0,
             };
             out.push(progress);
+            out.push(region.import_flow);
+            out.push(region.node_throughput());
         }
         let faction = self.world.faction(self.faction);
         out.push(faction.manpower);

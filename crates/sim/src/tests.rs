@@ -3,8 +3,8 @@
 use crate::action::{self, Action, ActionError};
 use crate::balance::{
     CIVILIAN_ENERGY_DEMAND_PER_POP, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
-    CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, OCCUPATION_RATE,
-    UNIT_DEATH_MANPOWER,
+    CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, IMPORT_PER_PORT, OCCUPATION_RATE,
+    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
 };
 use crate::construction::{self, Construction, Project};
 use crate::economy;
@@ -16,6 +16,7 @@ use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
 use crate::sim::Simulation;
+use crate::trade;
 
 #[test]
 fn supply_corridor_cut() {
@@ -1103,6 +1104,467 @@ fn devastation_slows_organisation_recovery() {
     assert!(
         intact_org > 0.0,
         "sanity check: the intact region should still regenerate some organization"
+    );
+}
+
+/// Stage 2C acceptance test — the regression guard for the structural
+/// famine found in the Stage 2A playtest (docs/phase2-spec.md "Stage 2C の
+/// 2A で判明した必須要件：輸入": a faction holding the industrial heartland
+/// cannot feed its population "at any efficiency" from domestic Food
+/// capacity alone). Faction 1 (信越・北陸/東海/近畿) is reshaped here into
+/// exactly that case - urban, Machinery-rich, Food capacity nowhere near
+/// its population's need even at full efficiency - using the same direct
+/// world-construction style `losing_machinery_region_halts_arms` and
+/// `input_shortage_limits_output` already use, rather than depending on
+/// hundreds of ticks of the full pipeline (conscription, unrest, combat)
+/// to eventually reach that state on its own. Without imports the deficit
+/// must show up in `shortage` at (very near) the 1.0 ceiling the spec
+/// calls out; with a real import plan funded by its own Machinery surplus
+/// (ports 東海/近畿/信越・北陸 stay uncontested and undevastated), it must
+/// recover to nowhere near that ceiling.
+#[test]
+fn imports_feed_food_poor_faction() {
+    let build = |with_imports: bool| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(1);
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Machinery.index()] = 500.0; // ample surplus to pay for imports with
+            f.stability = 100.0;
+            if with_imports {
+                f.import_plan[Good::Food.index()] = 20.0; // more than port capacity can serve
+            }
+        }
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                // The Stage 2A finding, reproduced directly: an urban
+                // industrial region whose own Food capacity cannot cover
+                // its population's demand even at 100% efficiency.
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 2000.0;
+                region.capacity[Good::Food.index()] = 0.3;
+            }
+        }
+
+        let mut shortage = 0.0;
+        for _ in 0..30 {
+            trade::tick_imports(&mut world);
+            economy::tick_economy(&mut world);
+            shortage = world.faction(faction).shortage;
+        }
+        shortage
+    };
+
+    let shortage_without_imports = build(false);
+    let shortage_with_imports = build(true);
+
+    assert!(
+        shortage_without_imports > 0.9,
+        "expected the Stage 2A structural famine (Food capacity that can't cover \
+         population demand at any efficiency) to show up as shortage pinned near 1.0 \
+         without imports: {shortage_without_imports}"
+    );
+    assert!(
+        shortage_with_imports < 0.3,
+        "expected imports funded by Machinery exports to lift the faction out of \
+         structural famine: {shortage_with_imports}"
+    );
+}
+
+/// Stage 2C acceptance test: with no Machinery to pay for it, an import plan
+/// with real port capacity and real demand must still land nothing.
+#[test]
+fn import_requires_payment() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1);
+    {
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 0.0;
+        f.import_plan[Good::Food.index()] = 10.0;
+    }
+    let food_before = world.faction(faction).stock[Good::Food.index()];
+
+    trade::tick_imports(&mut world);
+
+    let food_after = world.faction(faction).stock[Good::Food.index()];
+    assert_eq!(
+        food_after, food_before,
+        "no Machinery to pay with should mean zero imports land: before={food_before}, after={food_after}"
+    );
+    let landed: f32 = world
+        .regions
+        .iter()
+        .filter(|r| r.owner == faction)
+        .map(|r| r.import_flow)
+        .sum();
+    assert_eq!(landed, 0.0, "no port should record any import_flow either: {landed}");
+}
+
+/// Stage 2C acceptance test: import capacity is accounted per port node, not
+/// as one summed national figure — losing a port region should reduce total
+/// import volume by exactly that port's own capacity contribution, no more
+/// and no less.
+#[test]
+fn import_capacity_is_per_port() {
+    // 東海 (region 5)'s port value from the scenario table, fetched from a
+    // fresh world rather than hardcoded so this test tracks the table.
+    let tokai_port = scenario::build_world().region(RegionId(5)).port;
+
+    let build = |strip_tokai: bool| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(1);
+        if strip_tokai {
+            world.region_mut(RegionId(5)).owner = FactionId(0);
+        }
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 1_000_000.0;
+        f.import_plan[Good::Food.index()] = 1_000.0; // saturate capacity
+
+        trade::tick_imports(&mut world);
+        world
+            .regions
+            .iter()
+            .filter(|r| r.owner == faction)
+            .map(|r| r.import_flow)
+            .sum::<f32>()
+    };
+
+    let with_tokai = build(false);
+    let without_tokai = build(true);
+    let drop = with_tokai - without_tokai;
+    let expected_drop = tokai_port * IMPORT_PER_PORT;
+
+    assert!(
+        without_tokai < with_tokai,
+        "losing a port region should reduce total import volume: with={with_tokai}, without={without_tokai}"
+    );
+    assert!(
+        (drop - expected_drop).abs() < 0.01,
+        "the drop should equal exactly the lost port's own capacity, not a shared/summed \
+         figure: drop={drop}, expected={expected_drop}"
+    );
+}
+
+/// Stage 2C acceptance test: a devastated port's capacity — and therefore
+/// its actual import_flow — falls with it.
+#[test]
+fn devastated_port_imports_less() {
+    let build = |devastation: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(1);
+        world.region_mut(RegionId(5)).devastation = devastation;
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 1_000_000.0;
+        f.import_plan[Good::Food.index()] = 1_000.0; // saturate capacity
+
+        trade::tick_imports(&mut world);
+        world.region(RegionId(5)).import_flow
+    };
+
+    let intact = build(0.0);
+    let devastated = build(0.8);
+
+    assert!(intact > 0.0, "sanity check: the intact port should import something: {intact}");
+    assert!(
+        devastated < intact * 0.3,
+        "a heavily devastated port should import much less: intact={intact}, devastated={devastated}"
+    );
+}
+
+/// Stage 2C acceptance test: a port with enemy units present must not
+/// import at all, even with ample capacity/Machinery/demand elsewhere.
+#[test]
+fn contested_port_does_not_import() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1);
+    {
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 1_000_000.0;
+        f.import_plan[Good::Food.index()] = 1_000.0;
+    }
+    // Put an enemy (faction 0) unit at 東海 (region 5), one of faction 1's
+    // own ports, contesting it without taking it.
+    let intruder = world.units.iter().position(|u| u.owner == FactionId(0)).unwrap();
+    world.units[intruder].location = RegionId(5);
+    world.units[intruder].movement = None;
+
+    trade::tick_imports(&mut world);
+
+    assert_eq!(
+        world.region(RegionId(5)).import_flow,
+        0.0,
+        "a contested port should not import"
+    );
+    let total: f32 = world
+        .regions
+        .iter()
+        .filter(|r| r.owner == faction)
+        .map(|r| r.import_flow)
+        .sum();
+    assert!(
+        total > 0.0,
+        "faction 1's other, uncontested ports should still import: {total}"
+    );
+}
+
+/// Stage 2C acceptance test: `logistics::recompute_supply`'s node-side cap
+/// (`Region::node_throughput`) binds even when the link into the node is
+/// otherwise unconstrained — a saturated upstream source and a fully
+/// retained, max-infra link must still not push a node's throughput past
+/// its own `node_throughput()`, which for an underdeveloped node sits well
+/// under a Rail link's 25.0 `max_throughput`.
+#[test]
+fn node_throughput_limits_supply() {
+    let mut world = scenario::build_world();
+
+    // Region 3 (関東, source): saturate its own supply base so nothing
+    // upstream is the binding constraint.
+    for good in [Good::Steel, Good::Machinery, Good::Munitions, Good::Arms] {
+        world.region_mut(RegionId(3)).capacity[good.index()] = 100_000.0;
+    }
+    world.region_mut(RegionId(3)).infrastructure = 1.0;
+    world.region_mut(RegionId(3)).devastation = 0.0;
+
+    // Region 2 (南東北, relay node): full infra, so the link retention
+    // formula's own infra factor is maxed out and not what's limiting
+    // anything here - only node_throughput's own NODE_BASE/NODE_INFRA
+    // terms (no port) are left to cap it.
+    world.region_mut(RegionId(2)).infrastructure = 1.0;
+    world.region_mut(RegionId(2)).devastation = 0.0;
+    world.region_mut(RegionId(2)).port = 0.0;
+
+    logistics::recompute_supply(&mut world);
+
+    let cap2 = world.supply[RegionId(2).index()];
+    let node_cap = world.region(RegionId(2)).node_throughput();
+
+    assert!(
+        cap2 <= node_cap + 0.01,
+        "throughput at the node must not exceed its own node_throughput even with a \
+         saturated upstream and a fully retained link: cap2={cap2}, node_cap={node_cap}"
+    );
+    assert!(
+        cap2 < 20.0,
+        "node_throughput should keep this region's supply well under Rail's own 25.0 \
+         max_throughput ceiling: cap2={cap2}"
+    );
+}
+
+/// Stage 2C acceptance test: raising `logistics_priority[Arms]` relative to
+/// `[Munitions]` (or vice versa) must flip which of the two goods has the
+/// higher delivery rate at a region where both are genuinely contended for
+/// the same scarce throughput.
+#[test]
+fn logistics_priority_splits_delivery() {
+    let build = |munitions_weight: f32, arms_weight: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        let region = world.faction(faction).capital;
+
+        // Replace faction 0's units with two controlled units, both at the
+        // capital (faction 0's own, uncontested), so demand is exactly what
+        // this test sets up: real Munitions upkeep demand (manpower) and
+        // real Arms delivery demand (a large equipment gap) at once.
+        world.units.retain(|u| u.owner != faction);
+        for i in 0..2 {
+            let id = crate::ids::UnitId(world.units.len() as u32);
+            world.units.push(military::Unit {
+                id,
+                owner: faction,
+                name: format!("Test Corps {i}"),
+                location: region,
+                movement: None,
+                manpower: 1.0,
+                equipment: 5.0, // large gap vs UNIT_EQUIPMENT (20.0)
+                organization: 100.0,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_region: region,
+                experience: 0.0,
+                alive: true,
+            });
+        }
+        // Deliberately scarce throughput relative to combined demand, so
+        // the two goods are genuinely contending for it.
+        world.supply[region.index()] = 2.0;
+
+        let f = world.faction_mut(faction);
+        f.logistics_priority[Good::Munitions.index()] = munitions_weight;
+        f.logistics_priority[Good::Arms.index()] = arms_weight;
+
+        for _ in 0..30 {
+            logistics::distribute_supply(&mut world);
+        }
+
+        let units: Vec<_> = world.units.iter().filter(|u| u.owner == faction).collect();
+        let n = units.len() as f32;
+        let avg_supply = units.iter().map(|u| u.supply).sum::<f32>() / n;
+        let avg_arms = units.iter().map(|u| u.arms_delivery).sum::<f32>() / n;
+        (avg_supply, avg_arms)
+    };
+
+    let (supply_munitions_favored, arms_munitions_favored) = build(0.8, 0.2);
+    let (supply_arms_favored, arms_arms_favored) = build(0.2, 0.8);
+
+    assert!(
+        supply_munitions_favored > arms_munitions_favored,
+        "favoring Munitions should give it the higher delivery rate: \
+         supply={supply_munitions_favored}, arms={arms_munitions_favored}"
+    );
+    assert!(
+        arms_arms_favored > supply_arms_favored,
+        "favoring Arms should give it the higher delivery rate: \
+         supply={supply_arms_favored}, arms={arms_arms_favored}"
+    );
+}
+
+/// Stage 2C acceptance test: even with an abundant national Arms stockpile,
+/// `ReinforceUnit` can't restore more of a unit's equipment gap than the
+/// unit's current `arms_delivery` ratio allows.
+#[test]
+fn arms_delivery_limits_reinforcement() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.equipment = 5.0; // gap of 15.0 against UNIT_EQUIPMENT (20.0)
+        unit.arms_delivery = 0.1;
+        // External code review fix (Stage 2C): `apply_reinforce` now spends
+        // down a real per-tick `arms_budget` (`gap * arms_delivery`, as
+        // `logistics::distribute_supply` would have just set it) instead of
+        // re-applying `arms_delivery` to the gap at call time - stamp both
+        // fields the way a real tick would, matching `arms_delivery_region`
+        // (still the unit's own, unchanged, `location`) to `location` so
+        // `apply_reinforce` trusts the stamped budget rather than treating
+        // it as stale and recomputing from `world.supply` instead.
+        unit.arms_budget = (UNIT_EQUIPMENT - unit.equipment) * unit.arms_delivery;
+        unit.arms_delivery_region = unit.location;
+    }
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
+
+    let before = world.unit(unit_id).equipment;
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()));
+
+    let after = world.unit(unit_id).equipment;
+    let gap = UNIT_EQUIPMENT - before;
+    let filled = after - before;
+
+    assert!(
+        filled < gap * 0.5,
+        "a low arms_delivery ratio should stop the unit from being reinforced to full \
+         despite an abundant national Arms stock: gap={gap}, filled={filled}"
+    );
+    assert!(
+        (filled - gap * 0.1).abs() < 0.01,
+        "the filled amount should match need_equipment * arms_delivery exactly: \
+         expected={}, got={filled}",
+        gap * 0.1
+    );
+}
+
+/// External code review fix (Stage 2C, P1): `ReinforceUnit` used to
+/// re-apply `arms_delivery` (a ratio) to the unit's *remaining* equipment
+/// gap on every call, so N actions against the same unit in one batch
+/// compounded past a single tick's delivery allowance - at
+/// `arms_delivery == 0.1`, ten actions filled roughly `1 - 0.9^10 ≈ 65%`
+/// of the original gap instead of 10%. `apply_reinforce` now spends down a
+/// real per-tick `arms_budget` instead, so no number of actions in one
+/// batch can together deliver more than one tick's allowance.
+#[test]
+fn repeated_reinforce_cannot_exceed_daily_delivery() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.equipment = 5.0; // gap of 15.0 against UNIT_EQUIPMENT (20.0)
+        unit.arms_delivery = 0.1;
+        unit.arms_budget = (UNIT_EQUIPMENT - unit.equipment) * unit.arms_delivery; // 1.5
+        unit.arms_delivery_region = unit.location;
+    }
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
+
+    let before = world.unit(unit_id).equipment;
+    let gap = UNIT_EQUIPMENT - before;
+    let one_tick_allowance = gap * 0.1;
+
+    // N large enough that the pre-fix "reapply ratio to remainder" shape
+    // would obviously fail this: 1 - 0.9^30 ≈ 96% of the gap, versus the
+    // ~10% one tick should actually allow.
+    for _ in 0..30 {
+        let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+        assert_eq!(result, Ok(()));
+    }
+
+    let after = world.unit(unit_id).equipment;
+    let filled = after - before;
+
+    assert!(
+        (filled - one_tick_allowance).abs() < 0.01,
+        "30 ReinforceUnit actions in a single batch must not deliver more \
+         than one tick's allowance ({one_tick_allowance}) no matter how many \
+         times the action is resubmitted: filled={filled}, gap={gap}"
+    );
+}
+
+/// External code review fix (Stage 2C, P1): `distribute_supply` computes
+/// `arms_delivery` once a tick, *before* `military::tick_movement` runs, so
+/// a unit that finishes moving into a newly cut-off friendly region still
+/// carries the ratio/budget stamped from the well-supplied region it just
+/// left - `apply_reinforce` must not trust that stale value for a region
+/// that is, right now, starved.
+#[test]
+fn reinforcement_uses_current_region_supply() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    let old_region = world.unit(unit_id).location;
+    let dest = RegionId(1);
+    assert_eq!(world.region(dest).owner, faction, "test setup requires an owned, uncontested destination");
+
+    // `world.supply` is recomputed once a tick by `recompute_supply` from
+    // the map's link topology alone - independent of which units are
+    // where - so directly driving it down to zero here is a faithful stand
+    // in for "region 1's relay chain is currently cut" without this test
+    // depending on the MVP map's specific link layout (already exercised
+    // by `supply_corridor_cut` above).
+    world.supply[dest.index()] = 0.0;
+
+    // Simulate the unit having just finished a same-day move into the
+    // now-cut-off region 1, before `distribute_supply` has run again for
+    // its new location: `arms_delivery`/`arms_budget`/`arms_delivery_region`
+    // are left exactly as they were at `old_region` (healthy, well
+    // connected) - precisely the state `military::tick_movement` would
+    // leave a freshly-arrived unit in.
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.location = dest;
+        unit.movement = None;
+        unit.equipment = 5.0; // gap of 15.0 against UNIT_EQUIPMENT (20.0)
+        unit.arms_delivery = 1.0;
+        unit.arms_budget = UNIT_EQUIPMENT - unit.equipment; // as if fully deliverable back at old_region
+        unit.arms_delivery_region = old_region;
+    }
+    assert_ne!(old_region, dest, "test setup requires an actual region change");
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
+
+    let before = world.unit(unit_id).equipment;
+    let gap = UNIT_EQUIPMENT - before;
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()));
+    let after = world.unit(unit_id).equipment;
+    let filled = after - before;
+
+    assert!(
+        filled < gap * 0.1,
+        "a unit that moved into a cut-off region must not reinforce as if it \
+         were still at its old, well-supplied region: filled={filled}, gap={gap}"
     );
 }
 

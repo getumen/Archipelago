@@ -11,6 +11,7 @@ use crate::military;
 use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
+use crate::trade;
 use crate::world::World;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -46,11 +47,19 @@ impl Simulation {
     }
 
     /// Advances the simulation by one day, in the fixed tick order from the
-    /// spec: economy, construction, supply, movement, combat, recovery,
-    /// occupation, politics, devastation recovery, then survival bookkeeping.
+    /// spec: imports, economy, construction, supply, movement, combat,
+    /// recovery, occupation, politics, devastation recovery, then survival
+    /// bookkeeping.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
 
+        // Imports land before production's civilian ration is served, so a
+        // faction that can't feed itself domestically is actually helped by
+        // them the same day (Stage 2C's fix for the Stage 2A structural
+        // famine) rather than a day late. They're paid for out of
+        // yesterday's Machinery stock, same as every other consumer that
+        // runs later in this same tick draws on stock as it stood at its turn.
+        trade::tick_imports(&mut self.world);
         economy::tick_economy(&mut self.world);
         // Construction draws Machinery/Steel from what production just
         // left in stock, the same way every other consumer in the tick does.

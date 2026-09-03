@@ -72,6 +72,14 @@ const FACTION_CONSCRIPTION: f32 = 0.5;
 /// Machinery and Munitions - the goods that contend for shared Energy/Steel
 /// input in Stage 2A (see `economy::tick_economy`).
 const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.5, 0.5, 0.5, 0.0];
+/// Initial import plan (Stage 2C): no imports requested until an agent or
+/// player sets one via `Action::SetImportPlan`.
+const FACTION_IMPORT_PLAN: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+/// Initial logistics priority (Stage 2C): an even split of the shared
+/// regional throughput between Munitions and Arms delivery, the same
+/// even-split convention `FACTION_INDUSTRY_PRIORITY` uses for its contended
+/// inputs.
+const FACTION_LOGISTICS_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.5, 0.5];
 const FACTION_WAR_SUPPORT: f32 = 60.0;
 const FACTION_STABILITY: f32 = 80.0;
 
@@ -108,6 +116,7 @@ pub fn build_world() -> World {
             links: Vec::new(),
             devastation: 0.0,
             construction: None,
+            import_flow: 0.0,
         })
         .collect();
 
@@ -131,8 +140,11 @@ pub fn build_world() -> World {
             war_support: FACTION_WAR_SUPPORT,
             stability: FACTION_STABILITY,
             shortage: 0.0,
+            shortage_by_good: [0.0; crate::good::GOOD_COUNT],
             casualties: 0.0,
             supply_ratio: 1.0,
+            import_plan: FACTION_IMPORT_PLAN,
+            logistics_priority: FACTION_LOGISTICS_PRIORITY,
             alive: true,
         })
         .collect();
@@ -168,6 +180,9 @@ pub fn build_world() -> World {
                 organization: crate::balance::UNIT_ORG,
                 morale: 1.0,
                 supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_region: location,
                 experience: 0.0,
                 alive: true,
             });

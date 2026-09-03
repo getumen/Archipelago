@@ -100,7 +100,7 @@ fn serialize_factions(world: &World) -> String {
         .map(|f| {
             let units = world.units.iter().filter(|u| u.alive && u.owner == f.id).count();
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
@@ -116,6 +116,8 @@ fn serialize_factions(world: &World) -> String {
                 number(f.shortage),
                 number(f.casualties),
                 number(f.supply_ratio),
+                good_object(&f.import_plan),
+                good_object(&f.logistics_priority),
             )
         })
         .collect();
@@ -132,7 +134,7 @@ fn serialize_regions(world: &World) -> String {
                 None => "null".to_string(),
             };
             format!(
-                "{{\"id\":{},\"name\":{},\"owner\":{},\"owner_name\":{},\"core\":{},\"capacity\":{},\"unrest\":{},\"occupation\":{},\"occupier\":{},\"supply\":{},\"devastation\":{},\"construction\":{}}}",
+                "{{\"id\":{},\"name\":{},\"owner\":{},\"owner_name\":{},\"core\":{},\"capacity\":{},\"unrest\":{},\"occupation\":{},\"occupier\":{},\"supply\":{},\"devastation\":{},\"construction\":{},\"import_flow\":{},\"node_throughput\":{}}}",
                 r.id.0,
                 string(&r.name),
                 r.owner.0,
@@ -145,6 +147,8 @@ fn serialize_regions(world: &World) -> String {
                 number(world.supply[r.id.index()]),
                 number(r.devastation),
                 construction_object(&r.construction),
+                number(r.import_flow),
+                number(r.node_throughput()),
             )
         })
         .collect();

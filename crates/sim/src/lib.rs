@@ -18,6 +18,7 @@ pub mod politics;
 pub mod rng;
 pub mod scenario;
 pub mod sim;
+pub mod trade;
 pub mod world;
 
 #[cfg(test)]

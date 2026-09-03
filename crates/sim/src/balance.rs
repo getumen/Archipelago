@@ -194,3 +194,59 @@ pub const INFRA_STEP: f32 = 0.15;
 pub const PORT_STEP: f32 = 0.3;
 pub const CAPACITY_STEP: f32 = 1.0;
 pub const REPAIR_STEP: f32 = 0.3;
+
+/// Stage 2C sea imports (docs/phase2-spec.md "Stage 2C — 品目別物流・港湾容量・
+/// 海上輸入"): each owned, uncontested port region can pull `Food`/`Energy`
+/// in from outside the map, capped per port node (never summed into one
+/// national number — `trade::tick_imports` keeps every port's own
+/// contribution, since Stage 2D blockades individual ports).
+///
+/// `port_capacity(region) = region.port * IMPORT_PER_PORT * (1 -
+/// devastation)`. Scaled so a faction's full port line can plausibly close
+/// the structural Food gap the Stage 2A playtest found (a faction sitting on
+/// the Machinery hub but short on Food): e.g. 中央同盟 (信越・北陸/東海/近畿,
+/// ports 0.5+1.2+1.3=3.0) gets a combined capacity of `3.0 * 3.0 = 9.0`
+/// good/day against a civilian Food need on the order of ~9 (pop 4180 *
+/// `CIVILIAN_FOOD_DEMAND_PER_POP`), enough headroom to close a production
+/// shortfall without dwarfing domestic output.
+pub const IMPORT_PER_PORT: f32 = 3.0;
+
+/// Upper clamp on `Action::SetImportPlan`'s `rate` (docs/phase2-spec.md:
+/// "rate は 0 以上、上限でクランプ" — out-of-range values are clamped, not
+/// rejected, unlike an invalid `good`). Set comfortably above any faction's
+/// realistic total port capacity (`IMPORT_PER_PORT` times the map's largest
+/// port line) so it's a safety ceiling, not a routine constraint.
+pub const IMPORT_PLAN_RATE_MAX: f32 = 50.0;
+
+/// Machinery spent, from the importing faction's national stock, per unit of
+/// Food/Energy actually imported (docs/phase2-spec.md: "輸入は無償ではない。
+/// Machinery を輸出して支払う"). Kept low relative to `ARMS_INPUT_MACHINERY`/
+/// `CONSTRUCTION_MACHINERY_PER_POINT` so a Machinery-rich, Food-poor faction
+/// (the Stage 2A structural-famine case) can afford a meaningful import flow
+/// out of ordinary production, not just an idle stockpile.
+pub const IMPORT_COST_MACHINERY_PER_GOOD: f32 = 0.3;
+
+/// Stage 2C node-side supply throughput cap (docs/phase2-spec.md "2. 港湾・
+/// インフラによるノード側の上限"): `node_throughput(region) = NODE_BASE +
+/// region.effective_infrastructure() * NODE_INFRA + region.port *
+/// NODE_PORT`, applied as an extra `min()` term in
+/// `logistics::recompute_supply`'s propagation alongside the existing link
+/// `max_throughput()`. A region with no infrastructure and no port can still
+/// relay a trickle (`NODE_BASE`); a fully-developed, high-port hub can relay
+/// close to a Rail link's own ceiling (`LinkKind::Rail::max_throughput() ==
+/// 25.0`), so the node cap bites mainly on devastated or underdeveloped
+/// relay points, not on every link uniformly.
+pub const NODE_BASE: f32 = 3.0;
+pub const NODE_INFRA: f32 = 14.0;
+pub const NODE_PORT: f32 = 4.0;
+
+/// Stage 2C per-commodity delivery (docs/phase2-spec.md "3. 品目別の到達率"):
+/// converts a unit's equipment gap (`UNIT_EQUIPMENT - unit.equipment`) into
+/// an Arms delivery-flow demand on the same regional throughput Munitions
+/// upkeep already contends for, on a comparable scale to
+/// `SUPPLY_NEED_PER_MANPOWER` - a unit at its full `UNIT_EQUIPMENT` (20.0)
+/// gap wants a flow of `20.0 * 0.1 == 2.0`, in the same order of magnitude
+/// as one unit's peacetime (1.0) to in-combat (2.5) Munitions demand, so
+/// `Faction::logistics_priority` has real contention to split rather than
+/// one side dwarfing the other by construction.
+pub const ARMS_SUPPLY_NEED_PER_GAP: f32 = 0.1;

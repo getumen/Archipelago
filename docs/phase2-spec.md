@@ -263,23 +263,122 @@ pub struct Region {
 
 これはバグではなく、日本列島の構造（都市圏は食料を自給できない）が正しく出た結果である。
 欠けているのは**輸入**であり、企画書 §2 の「港湾を封鎖することで物資輸入が停止する」は
-輸入が存在しなければ成立しない。したがって Stage 2C の必須項目とする。
+輸入が存在しなければ成立しない。
 
-- 港湾を持つ地域は、外部世界から品目を輸入できる。輸入量の上限は
-  `Region.port` の実効容量に比例する。
-- 輸入は無償ではない。対価は当面「工業製品の輸出」とし、
-  Machinery / Arms の在庫を消費して Food / Energy を得る交換レートを `balance.rs` に置く
-  （Phase 3 の貿易・外交で相手勢力との取引に置き換える）。
-- 輸入が止まった場合に何が起きるかが Stage 2D の封鎖の意味になるため、
-  **輸入は港湾ノードごとに独立して勘定する**こと。単一の national な数値にしない。
+### 1. 海上輸入
 
-### 物流
+港を持つ自領地域は、外部世界から品目を輸入できる。
 
-- 補給網が運ぶものを `Munitions` に限定せず、地域ごとの在庫と輸送を導入するか、
-  national プールのまま「前線への到達率」だけを品目別にするかを 2B の結果を見て決める。
-  スコープが膨らむため、**まず後者（到達率のみ品目別）**を試す。
-- `Region.port` を実効容量として扱い、港湾がリンクの `max_throughput` とは別に
-  ノード側の上限を作る。これが Stage 2D の封鎖対象になる。
+```rust
+pub struct Region {
+    // ...
+    pub import_flow: f32,   // その日この港が実際に通した輸入量（診断と 2D の封鎖対象）
+}
+
+pub struct Faction {
+    // ...
+    pub import_plan: [f32; GOOD_COUNT],  // 品目ごとの希望輸入量/日
+}
+```
+
+- `Action::SetImportPlan { good: Good, rate: f32 }`。輸入できるのは Food と Energy のみとし、
+  それ以外を指定する行動は `ActionError` で弾く（`rate` は 0 以上、上限でクランプ）。
+- 港ごとの輸入容量:
+  `port_capacity(region) = region.port * IMPORT_PER_PORT * (1 - devastation)`
+  対象は**自領かつ非係争**の地域のみ。敵部隊がいる港は機能しない。
+- **必ず港ノードごとに勘定する**こと。単一の national な数値に畳んではいけない。
+  2D の封鎖は個別の港を潰す操作であり、合算値しか持っていないと表現できなくなる。
+- 対価: 輸入は無償ではない。Machinery を輸出して支払う。
+  `IMPORT_COST_MACHINERY_PER_GOOD` を `balance.rs` に置き、在庫が足りなければ
+  買える量まで輸入を絞る（Phase 3 の貿易・外交で相手勢力との取引に置き換える）。
+
+1 tick の手順:
+1. 港ごとの容量を求め、合計する（内訳は保持する）
+2. 希望輸入量の合計を容量で頭打ちにする
+3. 支払える Machinery の量でさらに頭打ちにする
+4. 実際の輸入量を品目別に在庫へ加算し、対価を差し引く
+5. 各港の `import_flow` に、その港の容量比で按分した実績を記録する
+
+### 2. 港湾・インフラによるノード側の上限
+
+現在の補給伝播はリンクの `max_throughput` だけで頭打ちになる。
+これに**ノード側の上限**を足す。
+
+```
+node_throughput(region) =
+    NODE_BASE
+  + region.effective_infrastructure() * NODE_INFRA
+  + region.port * NODE_PORT
+```
+
+補給伝播の緩和式を次のように変える:
+```
+cap[j] = max(cap[j], min(
+    cap[i] * kind.retention() * (0.55 + 0.45 * effective_infra[j]),
+    kind.max_throughput(),
+    node_throughput(j),
+))
+```
+
+これにより、鉄道が通っていても**インフラの壊れた地域は補給を中継できない**。
+2B の戦災がそのまま兵站の詰まりになり、企画書 §8 の
+「重要地点＝鉄道ジャンクション・都市・港湾」が意味を持つ。
+
+### 3. 品目別の到達率（案 A）
+
+地域ごとの在庫と実輸送は導入しない（案 B）。国家プールのまま、
+**前線への到達率だけを品目別**にする。
+
+現在 `distribute_supply` は Munitions のみを配っている。これを Munitions と Arms の
+2 品目に広げる。両者は同じスループットを奪い合う。
+
+```rust
+pub struct Faction {
+    // ...
+    pub logistics_priority: [f32; GOOD_COUNT],  // Munitions と Arms の取り合いの比率
+}
+```
+
+- `Action::SetLogisticsPriority { good: Good, weight: f32 }`
+- Munitions の到達率は従来どおり `unit.supply` になる
+- Arms の到達率は **`ReinforceUnit` の実効量**を制限する。前線に装備が届かなければ、
+  国庫に装備があっても部隊は定数まで戻らない
+- **どちらかを固定で優先してはいけない**。この種の固定優先順位は、これまでに
+  4 件（治安の累積・民需の後回し・徴兵プールの一方通行・エネルギーの先取り）
+  同じ形の欠陥を生んでいる。必ず `logistics_priority` の比で按分する
+
+### AI
+
+- `import_plan`: Food / Energy の不足分を見て設定する。`shortage` が出ているなら
+  不足量を埋めるだけの輸入を要求し、Machinery の在庫が薄いときは絞る
+- `logistics_priority`: 部隊の平均 `supply` が低ければ Munitions 寄り、
+  部隊の平均 `strength` が低ければ Arms 寄りにする
+
+### 影響範囲
+
+- `Observation::encode()` に `import_flow` と `node_throughput` を加える。固定長を維持し、
+  長さ定数を更新する
+- headless の最終盤面に輸入量の列、勢力サマリに輸入・輸出の行を足す。`--json` にも出す
+
+### Stage 2C の受け入れ基準
+
+- `cargo build --workspace` 警告 0、`cargo test --workspace` 全通過
+- 決定論維持（同 seed で `--json` がバイト一致）
+- 新規テスト
+  - `imports_feed_food_poor_faction`: 工業中枢を保有する勢力が、輸入によって
+    `shortage` 1.0 への張り付きから脱する（**2A で見つかった構造的飢餓の回帰ガード**）
+  - `import_requires_payment`: 対価となる Machinery がなければ輸入されない
+  - `import_capacity_is_per_port`: 港のある地域を失うと、その港の容量ぶんだけ輸入が減る
+  - `devastated_port_imports_less`: 戦災を受けた港の輸入容量が落ちる
+  - `contested_port_does_not_import`: 敵部隊のいる港は輸入しない
+  - `node_throughput_limits_supply`: インフラの壊れた中継地域が、鉄道容量に関わらず
+    奥への補給を制限する
+  - `logistics_priority_splits_delivery`: 比率を動かすと Munitions と Arms の
+    到達率の大小が入れ替わる
+  - `arms_delivery_limits_reinforcement`: 国庫に装備があっても、前線への到達率が低ければ
+    `ReinforceUnit` が満額入らない
+- seed 1/2/3 が 720 日完走し、どの勢力も長期保有する自国コアで
+  `shortage` が 1.0 に張り付かない
 
 ---
 

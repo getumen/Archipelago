@@ -1,7 +1,7 @@
 //! The map (regions, links, terrain) and the mutable game state
 //! (factions, units, supply) that every tick system reads and writes.
 
-use crate::balance::{INFRA_DAMAGE_SHARE, WORKFORCE_SHARE};
+use crate::balance::{INFRA_DAMAGE_SHARE, NODE_BASE, NODE_INFRA, NODE_PORT, WORKFORCE_SHARE};
 use crate::construction::Construction;
 use crate::good::{Good, GOOD_COUNT};
 use crate::ids::{FactionId, RegionId, UnitId};
@@ -110,6 +110,13 @@ pub struct Region {
     /// (`Action::Build`/`Action::CancelBuild`, `construction::tick_construction`).
     /// Discarded (`None`) whenever the region changes hands.
     pub construction: Option<Construction>,
+    /// Stage 2C (docs/phase2-spec.md "1. 海上輸入"): the volume this port
+    /// actually imported *today*, recomputed every tick by
+    /// `trade::tick_imports`. Kept per region rather than folded into a
+    /// single national figure — Stage 2D blockades individual ports, which
+    /// only a per-port number can express. Zero for non-port and for
+    /// contested/foreign regions.
+    pub import_flow: f32,
 }
 
 impl Region {
@@ -147,6 +154,17 @@ impl Region {
         self.industry_total() * 0.5 + self.port * 4.0
     }
 
+    /// Stage 2C node-side throughput cap (docs/phase2-spec.md "2. 港湾・
+    /// インフラによるノード側の上限"): how much this region can relay
+    /// *itself*, independent of what any single incoming link allows.
+    /// `logistics::recompute_supply` applies this as an extra `min()` term
+    /// alongside each link's own `max_throughput()`, so a region with wrecked
+    /// or absent infrastructure chokes supply passing through it even when
+    /// the rail line into it is intact.
+    pub fn node_throughput(&self) -> f32 {
+        NODE_BASE + self.effective_infrastructure() * NODE_INFRA + self.port * NODE_PORT
+    }
+
     pub fn labor_ratio(&self) -> f32 {
         let workforce = self.population * WORKFORCE_SHARE;
         ((workforce - self.mobilized) / workforce).clamp(0.15, 1.0)
@@ -181,9 +199,38 @@ pub struct Faction {
     pub civilian_ration: f32,
     pub war_support: f32,
     pub stability: f32,
+    /// Worst of `shortage_by_good[Food]`/`[Energy]`/`[Machinery]` - a single
+    /// scalar `politics::tick_politics` uses for unrest pressure. Consumers
+    /// that need to know *which* commodity is actually short (e.g. deciding
+    /// what to import) must read `shortage_by_good` instead - collapsing to
+    /// this one number loses exactly that distinction.
     pub shortage: f32,
     pub casualties: f32,
     pub supply_ratio: f32,
+    /// External code review fix (Stage 2C): unmet civilian demand this tick
+    /// for `Food`, `Energy` and `Machinery` specifically, in `0..=1`,
+    /// indexed by `Good::index()` (every other index stays `0.0` - no other
+    /// good is civilian-rationed). `economy::tick_economy` sets these from
+    /// the same per-commodity `consume()` calls that already fed the
+    /// collapsed `shortage` scalar above; `agents::set_trade_policy` reads
+    /// this directly so an import plan for one commodity isn't sized off
+    /// whichever commodity happens to be worst.
+    pub shortage_by_good: [f32; GOOD_COUNT],
+    /// Stage 2C sea imports (docs/phase2-spec.md "1. 海上輸入",
+    /// `Action::SetImportPlan`): desired import rate per commodity, indexed
+    /// by `Good::index()`. Only `Food` and `Energy` are ever nonzero — the
+    /// action layer rejects any other good — but the field stays
+    /// `[f32; GOOD_COUNT]` so it lines up with every other per-commodity
+    /// array in the codebase.
+    pub import_plan: [f32; GOOD_COUNT],
+    /// Stage 2C per-commodity delivery (docs/phase2-spec.md "3. 品目別の
+    ///到達率", `Action::SetLogisticsPriority`): priority weight per
+    /// commodity used to split the shared regional supply throughput
+    /// between Munitions upkeep and Arms delivery, the same mechanism
+    /// `industry_priority` already uses to split a contended production
+    /// input. Only `Munitions` and `Arms` are read by
+    /// `logistics::distribute_supply`.
+    pub logistics_priority: [f32; GOOD_COUNT],
     pub alive: bool,
 }
 

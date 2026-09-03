@@ -226,6 +226,14 @@ pub fn tick_economy(world: &mut World) {
         stock[Good::Arms.index()] += actual_arms;
 
         faction.shortage = food_shortage.max(energy_shortage).max(machinery_shortage);
+        // External code review fix (Stage 2C): keep each commodity's own
+        // shortage alongside the collapsed worst-of-three scalar above, so
+        // a consumer that cares which good is actually short (Stage 2C's
+        // import planner) doesn't have to guess from the aggregate.
+        faction.shortage_by_good = [0.0; GOOD_COUNT];
+        faction.shortage_by_good[Good::Food.index()] = food_shortage;
+        faction.shortage_by_good[Good::Energy.index()] = energy_shortage;
+        faction.shortage_by_good[Good::Machinery.index()] = machinery_shortage;
 
         // Demobilization: conscripts sitting idle in the pool (drafted but
         // not assigned to a unit) trickle back to the civilian workforce

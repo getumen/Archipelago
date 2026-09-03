@@ -4,7 +4,7 @@
 //! surrounding labels are Japanese too so the two read as one table.
 
 use archipelago_sim::event::Event;
-use archipelago_sim::good::ALL_GOODS;
+use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::World;
 
@@ -92,6 +92,26 @@ pub fn print_faction_table(world: &World) {
             .map(|g| format!("{}={:.1}", g.label(), faction.stock[g.index()]))
             .collect();
         println!("  {}  在庫: {}", pad_right("", 8), stock_line.join(" "));
+
+        // Stage 2C (docs/phase2-spec.md "Stage 2C"): import plan (what the
+        // faction is asking to bring in) and the total actually landed
+        // today, summed across every owned port's `import_flow`.
+        let plan_line: Vec<String> = [Good::Food, Good::Energy]
+            .iter()
+            .map(|g| format!("{}={:.1}", g.label(), faction.import_plan[g.index()]))
+            .collect();
+        let landed: f32 = world
+            .regions
+            .iter()
+            .filter(|r| r.owner == faction.id)
+            .map(|r| r.import_flow)
+            .sum();
+        println!(
+            "  {}  輸入計画: {}  実績: {:.1}",
+            pad_right("", 8),
+            plan_line.join(" "),
+            landed,
+        );
     }
 }
 
@@ -99,18 +119,20 @@ pub fn print_final_board(world: &World) {
     println!();
     println!("=== 最終盤面 (day {}) ===", world.day);
     println!(
-        "{}  {}  治安    補給    戦災",
+        "{}  {}  治安    補給    戦災     輸入   ノード上限",
         pad_right("地域", 12),
         pad_right("所有勢力", 10),
     );
     for region in &world.regions {
         println!(
-            "{}  {}  {:5.1}  {:6.1}  {:5.1}%",
+            "{}  {}  {:5.1}  {:6.1}  {:5.1}%  {:5.1}  {:8.1}",
             pad_right(&region.name, 12),
             pad_right(&world.faction(region.owner).name, 10),
             region.unrest,
             world.supply[region.id.index()],
             region.devastation * 100.0,
+            region.import_flow,
+            region.node_throughput(),
         );
     }
 }

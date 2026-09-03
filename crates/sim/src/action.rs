@@ -2,12 +2,13 @@
 //! world mutations. Invalid actions are rejected, never panicked on.
 
 use crate::balance::{
-    CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
-    UNIT_START_ORG_RATIO,
+    CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, IMPORT_PLAN_RATE_MAX, UNIT_EQUIPMENT, UNIT_MANPOWER,
+    UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
+use crate::logistics;
 use crate::military::{move_required, Movement, Unit};
 use crate::world::World;
 
@@ -22,6 +23,15 @@ pub enum Action {
     SetCivilianRation(f32),
     Build { region: RegionId, project: Project },
     CancelBuild { region: RegionId },
+    /// Stage 2C sea imports (docs/phase2-spec.md "1. 海上輸入"): set the
+    /// desired daily import rate for `good`. Only `Food` and `Energy` are
+    /// importable - any other good is rejected with `ActionError::InvalidValue`.
+    SetImportPlan { good: Good, rate: f32 },
+    /// Stage 2C per-commodity delivery (docs/phase2-spec.md "3. 品目別の
+    /// 到達率"): set the priority weight `logistics::distribute_supply` uses
+    /// to split contended regional throughput between Munitions and Arms
+    /// delivery for `good`.
+    SetLogisticsPriority { good: Good, weight: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,6 +68,10 @@ pub fn apply_action(
         Action::SetCivilianRation(value) => apply_set_civilian_ration(world, faction, value),
         Action::Build { region, project } => apply_build(world, faction, region, project),
         Action::CancelBuild { region } => apply_cancel_build(world, faction, region),
+        Action::SetImportPlan { good, rate } => apply_set_import_plan(world, faction, good, rate),
+        Action::SetLogisticsPriority { good, weight } => {
+            apply_set_logistics_priority(world, faction, good, weight)
+        }
     }
 }
 
@@ -147,6 +161,9 @@ fn apply_recruit(
         organization: UNIT_ORG * UNIT_START_ORG_RATIO,
         morale: 1.0,
         supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_region: region_id,
         experience: 0.0,
         alive: true,
     });
@@ -162,18 +179,50 @@ fn apply_reinforce(
     if world.has_enemy_units(unit.location, faction) {
         return Err(ActionError::RegionContested);
     }
+
+    // External code review fix (Stage 2C): `arms_delivery`/`arms_budget`
+    // are stamped by `logistics::distribute_supply`, which runs once a
+    // tick *before* movement. If this unit has moved since that stamp
+    // (`arms_delivery_region != location`), the cached numbers describe a
+    // region it has already left - trust them and a unit could finish
+    // marching out of a well-supplied region into a cut-off one and still
+    // reinforce at the old, high ratio. Recompute fresh for the *current*
+    // region on the spot instead of trying to invalidate/track the cache
+    // from `military::tick_movement` (deriving on demand here is the
+    // simpler thing to reason about: one call site, no extra bookkeeping
+    // needed anywhere movement happens), then stamp the refreshed numbers
+    // back onto the unit so a second `ReinforceUnit` against it later in
+    // this same batch sees the already-fresh, already-being-spent budget
+    // rather than recomputing - and re-granting - it again.
+    if unit.arms_delivery_region != unit.location {
+        let (ratio, budget) = logistics::instantaneous_arms_delivery(world, unit_id);
+        let unit = world.unit_mut(unit_id);
+        unit.arms_delivery = ratio;
+        unit.arms_budget = budget;
+        unit.arms_delivery_region = unit.location;
+    }
+
+    let unit = world.unit(unit_id);
     let need_manpower = (UNIT_MANPOWER - unit.manpower).max(0.0);
     let need_equipment = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
+    // External code review fix (Stage 2C): `arms_budget` is a real
+    // allowance that gets spent down below, not a ratio re-applied to
+    // whatever gap remains - the pre-fix `need_equipment * arms_delivery`
+    // let repeated `ReinforceUnit` actions in one batch compound past a
+    // single tick's delivery allowance (each call recomputed the ratio
+    // against the now-smaller remaining gap instead of a shrinking budget).
+    let deliverable_equipment = need_equipment.min(unit.arms_budget.max(0.0));
 
     let f = world.faction(faction);
     let fill_manpower = need_manpower.min(f.manpower);
-    let fill_equipment = need_equipment.min(f.stock[Good::Arms.index()]);
+    let fill_equipment = deliverable_equipment.min(f.stock[Good::Arms.index()]);
 
     world.faction_mut(faction).manpower -= fill_manpower;
     world.faction_mut(faction).stock[Good::Arms.index()] -= fill_equipment;
     let unit = world.unit_mut(unit_id);
     unit.manpower += fill_manpower;
     unit.equipment += fill_equipment;
+    unit.arms_budget = (unit.arms_budget - fill_equipment).max(0.0);
     Ok(())
 }
 
@@ -211,6 +260,39 @@ fn apply_set_civilian_ration(
         return Err(ActionError::InvalidValue);
     }
     world.faction_mut(faction).civilian_ration = value;
+    Ok(())
+}
+
+/// `Action::SetImportPlan` (docs/phase2-spec.md "1. 海上輸入"): only `Food`
+/// and `Energy` are importable - any other good is rejected outright. A
+/// valid good's `rate` is clamped to `0.0..=IMPORT_PLAN_RATE_MAX` rather than
+/// rejected, per the spec's "rate は 0 以上、上限でクランプ".
+fn apply_set_import_plan(
+    world: &mut World,
+    faction: FactionId,
+    good: Good,
+    rate: f32,
+) -> Result<(), ActionError> {
+    if good != Good::Food && good != Good::Energy {
+        return Err(ActionError::InvalidValue);
+    }
+    world.faction_mut(faction).import_plan[good.index()] = rate.clamp(0.0, IMPORT_PLAN_RATE_MAX);
+    Ok(())
+}
+
+/// `Action::SetLogisticsPriority` (docs/phase2-spec.md "3. 品目別の到達率"):
+/// same validation shape as `apply_set_industry_priority` - only the
+/// `Munitions`/`Arms` weights are ever read by `logistics::distribute_supply`.
+fn apply_set_logistics_priority(
+    world: &mut World,
+    faction: FactionId,
+    good: Good,
+    weight: f32,
+) -> Result<(), ActionError> {
+    if !(0.0..=1.0).contains(&weight) {
+        return Err(ActionError::InvalidValue);
+    }
+    world.faction_mut(faction).logistics_priority[good.index()] = weight;
     Ok(())
 }
 

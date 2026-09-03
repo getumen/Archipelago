@@ -3,6 +3,7 @@
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG};
+use archipelago_sim::good::{Good, GOOD_COUNT};
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::military::{move_required, Movement, Unit};
 use archipelago_sim::observation::Observation;
@@ -69,6 +70,9 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
         organization: UNIT_ORG,
         morale: 1.0,
         supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_region: region,
         experience: 0.0,
         alive: true,
     });
@@ -96,5 +100,60 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
     assert!(
         !move_actions.contains(&(reserve_unit_id, target)),
         "with the quota already filled, the freshly added reserve unit should stay home: {move_actions:?}"
+    );
+}
+
+/// External code review fix (Stage 2C): `set_trade_policy` used to scale
+/// *both* the Food and the Energy import request off the aggregate
+/// `Faction::shortage` (the worst of Food/Energy/Machinery), so a faction
+/// that was only short on Food would still request a full-scale Energy
+/// import too - the two plans then compete for the same port capacity and
+/// the same Machinery payment, crowding out the import that's actually
+/// needed. With Food short and Energy fully stocked, the requested Energy
+/// rate must be ~0 and Food must get a real request.
+#[test]
+fn import_plan_targets_the_deficient_commodity() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    {
+        let f = world.faction_mut(faction);
+        // Aggregate shortage stays nonzero (as it would from Food alone),
+        // but only Food is actually short - Energy is fully served.
+        f.shortage = 0.6;
+        f.shortage_by_good = [0.0; GOOD_COUNT];
+        f.shortage_by_good[Good::Food.index()] = 0.6;
+        f.shortage_by_good[Good::Energy.index()] = 0.0;
+        // Plenty of Machinery on hand so the low-Machinery throttle
+        // (`IMPORT_MACHINERY_LOW_DAYS`) doesn't suppress the request and
+        // mask the effect under test.
+        f.stock[Good::Machinery.index()] = 10_000.0;
+    }
+
+    let obs = Observation { faction, world: &world };
+    let mut actions = Vec::new();
+    crate::set_trade_policy(faction, &obs, &mut actions);
+
+    let food_rate = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::SetImportPlan { good: Good::Food, rate } => Some(*rate),
+            _ => None,
+        })
+        .expect("expected a Food import plan action");
+    let energy_rate = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::SetImportPlan { good: Good::Energy, rate } => Some(*rate),
+            _ => None,
+        })
+        .expect("expected an Energy import plan action");
+
+    assert!(
+        energy_rate < 0.01,
+        "Energy is fully stocked and should not be requested just because Food is short: {energy_rate}"
+    );
+    assert!(
+        food_rate > 1.0,
+        "Food is short and should get a real import request in place of the crowded-out Energy demand: {food_rate}"
     );
 }

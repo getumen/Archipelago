@@ -34,6 +34,31 @@ pub struct Unit {
     pub organization: f32,
     pub morale: f32,
     pub supply: f32,
+    /// Stage 2C per-commodity delivery (docs/phase2-spec.md "3. 品目別の
+    /// 到達率"): the fraction of this unit's equipment gap the supply
+    /// network can currently deliver, in `0..=1`, eased toward its target
+    /// the same way `supply` is (`logistics::distribute_supply`,
+    /// `SUPPLY_SMOOTHING`). Read `arms_budget`, not this ratio, when
+    /// deciding how much equipment can still land this tick - see its doc.
+    pub arms_delivery: f32,
+    /// External code review fix (Stage 2C): the absolute equipment units
+    /// still deliverable to this unit *this tick*, reset from scratch every
+    /// time `logistics::distribute_supply` runs (`gap * arms_delivery` as
+    /// of that moment) rather than eased/accumulated. `action::apply_reinforce`
+    /// spends this down as it delivers equipment, so N `ReinforceUnit`
+    /// actions against the same unit in one batch can never together
+    /// deliver more than one tick's allowance - reapplying `arms_delivery`
+    /// to the shrinking remainder each call (the pre-fix behaviour) let a
+    /// large enough N fill almost the whole gap regardless of the ratio.
+    pub arms_budget: f32,
+    /// The region `arms_delivery`/`arms_budget` were last computed for
+    /// (stamped from `location` by `distribute_supply`, which runs before
+    /// movement each tick). `apply_reinforce` compares this against the
+    /// unit's *current* `location` to detect a same-day move that has left
+    /// the cached ratio describing a region the unit already left, and
+    /// recomputes on the spot rather than trusting it - see
+    /// `logistics::instantaneous_arms_delivery`.
+    pub arms_delivery_region: RegionId,
     pub experience: f32,
     pub alive: bool,
 }
