@@ -1,7 +1,12 @@
 //! Spec §9 acceptance tests for the simulation core.
 
-use crate::action::{Action, ActionError};
-use crate::balance::{CIVILIAN_ENERGY_DEMAND_PER_POP, OCCUPATION_RATE, UNIT_DEATH_MANPOWER};
+use crate::action::{self, Action, ActionError};
+use crate::balance::{
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
+    CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, OCCUPATION_RATE,
+    UNIT_DEATH_MANPOWER,
+};
+use crate::construction::{self, Construction, Project};
 use crate::economy;
 use crate::good::{Good, GOOD_COUNT};
 use crate::ids::{FactionId, RegionId};
@@ -652,6 +657,452 @@ fn civilian_demand_is_served_before_industry() {
         f.stock[Good::Steel.index()] < 0.02,
         "with no Energy left after civilians, Steel output should be cut to ~zero: steel={}",
         f.stock[Good::Steel.index()]
+    );
+}
+
+/// Stage 2B acceptance test: a region that saw combat should end up with
+/// higher `devastation`, and that in turn should pull its effective
+/// production capacity below the nominal figure.
+#[test]
+fn combat_devastates_region() {
+    let mut world = scenario::build_world();
+    let intruder = world
+        .units
+        .iter()
+        .position(|u| u.owner == FactionId(1))
+        .unwrap();
+    world.units[intruder].location = RegionId(3);
+    world.units[intruder].movement = None;
+
+    let devastation_before = world.region(RegionId(3)).devastation;
+    assert_eq!(devastation_before, 0.0);
+
+    let mut rng = Rng::new(1);
+    let mut events = Vec::new();
+    military::tick_combat(&mut world, &mut rng, &mut events);
+
+    let region = world.region(RegionId(3));
+    assert!(
+        region.devastation > devastation_before,
+        "expected combat to raise devastation, got {}",
+        region.devastation
+    );
+
+    let nominal = region.capacity[Good::Steel.index()];
+    let effective = region.effective_capacity(Good::Steel);
+    assert!(
+        effective < nominal,
+        "expected devastation to reduce effective capacity below nominal: \
+         nominal={nominal}, effective={effective}"
+    );
+}
+
+/// Stage 2B acceptance test: the tick a region's ownership flips, its
+/// effective production capacity should sit far below its nominal capacity
+/// — occupation does not hand over a usable economy immediately.
+#[test]
+fn captured_region_produces_less() {
+    let mut world = scenario::build_world();
+    // Region 8 (Shikoku) starts undefended by its owner, faction 2 (same
+    // setup as `occupation_flips_owner`).
+    let region_id = RegionId(8);
+    let mover = world
+        .units
+        .iter()
+        .position(|u| u.owner == FactionId(0))
+        .unwrap();
+    world.units[mover].location = region_id;
+    world.units[mover].movement = None;
+
+    let mut events = Vec::new();
+    // `OCCUPATION_RATE` (30) needs 4 ticks to clear the 100-point capture
+    // threshold (see `occupation_flips_owner`).
+    for _ in 0..4 {
+        military::tick_occupation(&mut world, &mut events);
+    }
+    assert_eq!(world.region(region_id).owner, FactionId(0));
+
+    let region = world.region(region_id);
+    assert!(
+        region.devastation > 0.0,
+        "expected capture to spike devastation"
+    );
+
+    let nominal: f32 = crate::good::ALL_GOODS
+        .iter()
+        .filter(|&&g| g != Good::Food)
+        .map(|&g| region.capacity[g.index()])
+        .sum();
+    let effective = region.industry_total();
+    assert!(
+        effective < nominal * 0.75,
+        "expected freshly captured region's effective industry to sit far below \
+         nominal: nominal={nominal}, effective={effective}"
+    );
+}
+
+/// Stage 2B acceptance test: recovery from `devastation` (docs/phase2-spec.md
+/// Stage 2B's recovery formula) must be markedly slower in a high-unrest
+/// region than in a calm one, at equal devastation and stability.
+#[test]
+fn unrest_slows_reconstruction() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    world.faction_mut(faction).stability = 100.0;
+
+    // Regions 0 and 1 both belong to faction 0 (see FACTION_SPECS).
+    let calm = RegionId(0);
+    let unruly = RegionId(1);
+    world.region_mut(calm).devastation = 0.5;
+    world.region_mut(calm).unrest = 0.0;
+    world.region_mut(unruly).devastation = 0.5;
+    world.region_mut(unruly).unrest = 90.0;
+
+    construction::tick_devastation_recovery(&mut world);
+
+    let calm_recovery = 0.5 - world.region(calm).devastation;
+    let unruly_recovery = 0.5 - world.region(unruly).devastation;
+
+    assert!(
+        calm_recovery > unruly_recovery,
+        "expected the calm region to recover more: calm={calm_recovery}, unruly={unruly_recovery}"
+    );
+    assert!(
+        unruly_recovery < calm_recovery * 0.3,
+        "expected high unrest to recover markedly slower, not just slightly: \
+         calm={calm_recovery}, unruly={unruly_recovery}"
+    );
+}
+
+/// Stage 2B acceptance test: a completed `Capacity(Steel)` project raises
+/// the region's Steel capacity by `CAPACITY_STEP` and clears the project.
+#[test]
+fn construction_raises_capacity() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region_id = world.faction(faction).capital;
+
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Steel.index()] = 1000.0;
+
+    let steel_before = world.region(region_id).capacity[Good::Steel.index()];
+
+    world.region_mut(region_id).construction = Some(Construction {
+        project: Project::Capacity(Good::Steel),
+        // One tick's worth of fully-funded progress away from completion.
+        invested: CONSTRUCTION_REQUIRED_CAPACITY - CONSTRUCTION_RATE,
+        required: CONSTRUCTION_REQUIRED_CAPACITY,
+    });
+
+    construction::tick_construction(&mut world);
+
+    let steel_after = world.region(region_id).capacity[Good::Steel.index()];
+    assert!(
+        steel_after > steel_before,
+        "expected Capacity(Steel) completion to raise Steel capacity: \
+         before={steel_before}, after={steel_after}"
+    );
+    assert!(
+        world.region(region_id).construction.is_none(),
+        "expected the completed project to clear from the region"
+    );
+}
+
+/// Regression test for the P2 construction-overshoot bug: the tick that
+/// completes a project must only ever be charged for the progress it
+/// actually credits (`required - invested`), not a full `CONSTRUCTION_RATE`
+/// with the excess silently discarded. Runs a project to completion across
+/// ticks where a Steel shortage forces fractional progress, so `invested`
+/// never lands on a clean multiple of `CONSTRUCTION_RATE` and the final tick
+/// has a partial remainder — exactly the case that used to overcharge.
+#[test]
+fn construction_total_cost_matches_required_progress() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region_id = world.faction(faction).capital;
+
+    // A `required` that isn't a multiple of `CONSTRUCTION_RATE`, so even the
+    // very last tick can't land on a whole `CONSTRUCTION_RATE` step.
+    let required = 5.0_f32;
+    world.region_mut(region_id).construction = Some(Construction {
+        project: Project::Repair,
+        invested: 0.0,
+        required,
+    });
+
+    let mut machinery_spent = 0.0_f32;
+    let mut steel_spent = 0.0_f32;
+
+    let tick = |world: &mut crate::world::World,
+                    machinery_stock: f32,
+                    steel_stock: f32,
+                    machinery_spent: &mut f32,
+                    steel_spent: &mut f32| {
+        world.faction_mut(faction).stock[Good::Machinery.index()] = machinery_stock;
+        world.faction_mut(faction).stock[Good::Steel.index()] = steel_stock;
+        construction::tick_construction(world);
+        *machinery_spent += machinery_stock - world.faction(faction).stock[Good::Machinery.index()];
+        *steel_spent += steel_stock - world.faction(faction).stock[Good::Steel.index()];
+    };
+
+    // Plenty of Machinery, but a Steel shortage (0.7 against a fully-funded
+    // per-tick cost of `CONSTRUCTION_RATE * CONSTRUCTION_STEEL_PER_POINT` =
+    // 2.0) caps each of these ticks' progress at a fraction of
+    // `CONSTRUCTION_RATE`, driving `invested` to a non-multiple of it.
+    for _ in 0..3 {
+        tick(&mut world, 1000.0, 0.7, &mut machinery_spent, &mut steel_spent);
+    }
+    assert!(
+        world.region(region_id).construction.is_some(),
+        "project should still be in progress after the shortage ticks"
+    );
+
+    // Fully fund the rest; the project should complete within a few ticks,
+    // with the final tick's remaining progress short of a full
+    // `CONSTRUCTION_RATE`.
+    for _ in 0..10 {
+        if world.region(region_id).construction.is_none() {
+            break;
+        }
+        tick(&mut world, 1000.0, 1000.0, &mut machinery_spent, &mut steel_spent);
+    }
+
+    assert!(
+        world.region(region_id).construction.is_none(),
+        "expected the project to complete once fully funded"
+    );
+
+    let expected_machinery = required * CONSTRUCTION_MACHINERY_PER_POINT;
+    let expected_steel = required * CONSTRUCTION_STEEL_PER_POINT;
+
+    assert!(
+        (machinery_spent - expected_machinery).abs() < 1e-3,
+        "expected total Machinery spent to equal required * per-point rate exactly, not more: \
+         spent={machinery_spent}, expected={expected_machinery}"
+    );
+    assert!(
+        (steel_spent - expected_steel).abs() < 1e-3,
+        "expected total Steel spent to equal required * per-point rate exactly, not more: \
+         spent={steel_spent}, expected={expected_steel}"
+    );
+}
+
+/// Stage 2B acceptance test: `Action::Build` against a region with enemy
+/// units present must be rejected, not silently accepted.
+#[test]
+fn build_rejected_when_contested() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    let intruder = world
+        .units
+        .iter()
+        .position(|u| u.owner == FactionId(1))
+        .unwrap();
+    world.units[intruder].location = capital;
+    world.units[intruder].movement = None;
+
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::Build { region: capital, project: Project::Infrastructure },
+    );
+
+    assert_eq!(result, Err(ActionError::RegionContested));
+    assert!(world.region(capital).construction.is_none());
+}
+
+/// Stage 2B acceptance test: devastating a corridor region that supply
+/// relays through should reduce what reaches the region behind it, the same
+/// way a contested/owner-changed corridor does in `supply_corridor_cut`.
+#[test]
+fn devastation_reduces_supply_throughput() {
+    let mut world = scenario::build_world();
+    logistics::recompute_supply(&mut world);
+    let before = world.supply[RegionId(1).index()];
+
+    // Region 2 is the only corridor between region 1 and the industrial
+    // heartland at region 3 (see `supply_corridor_cut`); devastating it
+    // (without changing its owner) should still choke what it relays onward.
+    world.region_mut(RegionId(2)).devastation = 0.9;
+    logistics::recompute_supply(&mut world);
+    let after = world.supply[RegionId(1).index()];
+
+    assert!(
+        after < before * 0.9,
+        "expected devastating the relay corridor to reduce downstream supply: \
+         before={before}, after={after}"
+    );
+}
+
+/// Regression test for the code-review finding that Steel had an
+/// unconditional first claim on Energy: with Energy scarce and Steel
+/// already sitting on a large stockpile, Machinery and Munitions must still
+/// get a share of Energy and produce something this tick - not be starved
+/// to zero just because Steel's own capacity could burn the whole scarce
+/// stock by itself.
+#[test]
+fn energy_is_shared_not_monopolised_by_steel() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    {
+        let f = world.faction_mut(faction);
+        f.stability = 100.0;
+        f.stock = [0.0; GOOD_COUNT];
+        // Already sitting on a large Steel stockpile - the review's
+        // scenario - so this isn't a case of Steel merely being needed too.
+        f.stock[Good::Steel.index()] = 500.0;
+    }
+    let owned: Vec<usize> = world
+        .regions
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.owner == faction)
+        .map(|(i, _)| i)
+        .collect();
+    for &i in &owned {
+        world.regions[i].infrastructure = 1.0;
+        world.regions[i].unrest = 0.0;
+        world.regions[i].population = 100.0;
+        world.regions[i].capacity = [0.0; GOOD_COUNT];
+        // Energy is scarce; Steel, Machinery and Munitions all want far
+        // more of it than is available, so whichever one gets an
+        // unconditional first claim can starve the other two to zero.
+        world.regions[i].capacity[Good::Energy.index()] = 0.3;
+        world.regions[i].capacity[Good::Steel.index()] = 100.0;
+        world.regions[i].capacity[Good::Machinery.index()] = 100.0;
+        world.regions[i].capacity[Good::Munitions.index()] = 100.0;
+    }
+
+    economy::tick_economy(&mut world);
+
+    let f = world.faction(faction);
+    assert!(
+        f.stock[Good::Machinery.index()] > 0.0,
+        "Machinery should still get a share of scarce Energy despite Steel's \
+         stockpile and appetite: {}",
+        f.stock[Good::Machinery.index()]
+    );
+    assert!(
+        f.stock[Good::Munitions.index()] > 0.0,
+        "Munitions should still get a share of scarce Energy despite Steel's \
+         stockpile and appetite: {}",
+        f.stock[Good::Munitions.index()]
+    );
+}
+
+/// Stage 2A acceptance test for the fix: `industry_priority` doesn't just
+/// split Steel between Machinery and Munitions, it also splits a scarce
+/// Energy stock across Steel, Machinery and Munitions - raising a good's
+/// weight should raise its Energy-bound output relative to a competing
+/// consumer's.
+#[test]
+fn industry_priority_controls_energy_split() {
+    let build = |steel_weight: f32, machinery_weight: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                // Steel and Machinery both want far more Energy than is
+                // available; Munitions is silenced (zero capacity and zero
+                // weight) so it doesn't dilute the two-way comparison.
+                region.capacity[Good::Energy.index()] = 0.3;
+                region.capacity[Good::Steel.index()] = 100.0;
+                region.capacity[Good::Machinery.index()] = 100.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 100.0;
+            }
+        }
+        let f = world.faction_mut(faction);
+        f.stability = 100.0;
+        // Start Steel at zero so Machinery's own Steel-input consumption
+        // (drawn from whatever Steel was produced this tick) doesn't hide
+        // behind a large pre-existing stockpile - the final stock is
+        // exactly what each good produced, net of what the other consumed.
+        f.stock = [0.0; GOOD_COUNT];
+        f.industry_priority[Good::Steel.index()] = steel_weight;
+        f.industry_priority[Good::Machinery.index()] = machinery_weight;
+        f.industry_priority[Good::Munitions.index()] = 0.0;
+
+        economy::tick_economy(&mut world);
+        let stock = world.faction(faction).stock;
+        (stock[Good::Steel.index()], stock[Good::Machinery.index()])
+    };
+
+    let (steel_favored_steel, steel_favored_machinery) = build(0.8, 0.2);
+    let (machinery_favored_steel, machinery_favored_machinery) = build(0.2, 0.8);
+
+    assert!(
+        steel_favored_steel > steel_favored_machinery,
+        "weighting Steel higher should out-produce Machinery: \
+         steel={steel_favored_steel}, machinery={steel_favored_machinery}"
+    );
+    assert!(
+        machinery_favored_machinery > machinery_favored_steel,
+        "weighting Machinery higher should out-produce Steel: \
+         steel={machinery_favored_steel}, machinery={machinery_favored_machinery}"
+    );
+}
+
+/// Stage 2B acceptance test for the fix: `military::tick_recovery`'s
+/// organization-regeneration term must read `effective_infrastructure`
+/// (devastation-adjusted), not the raw `infrastructure` field - a unit
+/// sitting in a region flattened by fighting should recover organization
+/// more slowly than one in an intact region with the same nominal
+/// infrastructure.
+#[test]
+fn devastation_slows_organisation_recovery() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let unit_ids: Vec<_> = world
+        .units
+        .iter()
+        .filter(|u| u.owner == faction)
+        .map(|u| u.id)
+        .collect();
+    assert!(
+        unit_ids.len() >= 2,
+        "need two of faction 0's units for this comparison"
+    );
+    let intact_unit = unit_ids[0];
+    let devastated_unit = unit_ids[1];
+
+    // Regions 0 and 1 both belong to faction 0 (see FACTION_SPECS); give
+    // them identical nominal infrastructure and differ only in devastation.
+    let intact_region = RegionId(0);
+    let devastated_region = RegionId(1);
+    world.region_mut(intact_region).infrastructure = 1.0;
+    world.region_mut(intact_region).devastation = 0.0;
+    world.region_mut(devastated_region).infrastructure = 1.0;
+    world.region_mut(devastated_region).devastation = 0.9;
+
+    for &(id, region) in &[(intact_unit, intact_region), (devastated_unit, devastated_region)] {
+        let unit = world.unit_mut(id);
+        unit.location = region;
+        unit.movement = None;
+        unit.organization = 0.0;
+        unit.supply = 1.0;
+    }
+
+    let fought = vec![false; world.units.len()];
+    let mut events = Vec::new();
+    military::tick_recovery(&mut world, &fought, &mut events);
+
+    let intact_org = world.unit(intact_unit).organization;
+    let devastated_org = world.unit(devastated_unit).organization;
+
+    assert!(
+        devastated_org < intact_org,
+        "expected a devastated region to regenerate organization more slowly: \
+         intact={intact_org}, devastated={devastated_org}"
+    );
+    assert!(
+        intact_org > 0.0,
+        "sanity check: the intact region should still regenerate some organization"
     );
 }
 

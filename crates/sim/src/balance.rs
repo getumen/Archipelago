@@ -132,3 +132,65 @@ pub const STABILITY_ADAPT_RATE: f32 = 0.02;
 pub const UNIT_DEATH_MANPOWER: f32 = 0.05;
 /// Supply ratio below which unsupplied attrition kicks in.
 pub const ATTRITION_SUPPLY_THRESHOLD: f32 = 0.25;
+
+/// Stage 2B war-damage/reconstruction model (docs/phase2-spec.md "Stage
+/// 2B — インフラと建設・戦災"): `Region::devastation` (0..1) makes holding
+/// territory not the same as being able to use it.
+///
+/// How much of `devastation` bites into `Region::effective_infrastructure`
+/// (which both `economy`'s efficiency term and `logistics`'s relay
+/// propagation read instead of the raw field): `effective_infra =
+/// infrastructure * (1 - devastation * INFRA_DAMAGE_SHARE)`. Kept below 1.0
+/// so a fully devastated region's infrastructure is crippled, not zeroed —
+/// `effective_capacity` (a flat `* (1 - devastation)`) already carries the
+/// harsher, unscaled penalty for production itself.
+pub const INFRA_DAMAGE_SHARE: f32 = 0.6;
+
+/// `devastation` gained per point of raw combat damage dealt in a region
+/// this tick (the sum of `military::tick_combat`'s per-side `dmg_side`,
+/// before it's split across units and converted to casualties — the same
+/// scale `COMBAT_DAMAGE` operates on). A single skirmish nudges devastation
+/// up a little; a region that stays a front line for weeks grinds toward
+/// fully devastated.
+pub const DEVASTATION_PER_COMBAT_DAMAGE: f32 = 0.001;
+
+/// One-time `devastation` spike applied the instant a region's owner
+/// changes (looting, sabotage, the fighting that won it) — on top of
+/// whatever combat damage already accrued during the occupation fight.
+pub const DEVASTATION_ON_CAPTURE: f32 = 0.35;
+
+/// Base daily fraction of `devastation` recovered, before the unrest/
+/// stability scaling in `construction::tick_devastation_recovery`:
+/// `recovery = DEVASTATION_RECOVERY * (1 - unrest/100) * (0.5 + 0.5 *
+/// stability/100)`. An unruly occupied region (`unrest` near 100) recovers
+/// almost nothing on its own.
+pub const DEVASTATION_RECOVERY: f32 = 0.01;
+
+/// Building-point throughput a region's construction project advances by
+/// per day when fully funded (`construction::tick_construction`); the
+/// actual rate is scaled down to whatever fraction of its Machinery/Steel
+/// cost the faction's stock can cover that tick, so a starved project slows
+/// rather than stalling outright.
+pub const CONSTRUCTION_RATE: f32 = 2.0;
+/// Machinery consumed, from the national stock, per building point of
+/// progress funded.
+pub const CONSTRUCTION_MACHINERY_PER_POINT: f32 = 0.5;
+/// Steel consumed, from the national stock, per building point of progress funded.
+pub const CONSTRUCTION_STEEL_PER_POINT: f32 = 1.0;
+
+/// Building points required to complete each `Project` variant
+/// (`construction::required_points`) — at `CONSTRUCTION_RATE` fully funded,
+/// `Infrastructure` takes 50 days, `Port` 40, `Capacity` 30, `Repair` 20;
+/// `Repair` is deliberately the cheapest so it's a real alternative to
+/// passive `DEVASTATION_RECOVERY`, not a strictly worse one.
+pub const CONSTRUCTION_REQUIRED_INFRASTRUCTURE: f32 = 100.0;
+pub const CONSTRUCTION_REQUIRED_PORT: f32 = 80.0;
+pub const CONSTRUCTION_REQUIRED_CAPACITY: f32 = 60.0;
+pub const CONSTRUCTION_REQUIRED_REPAIR: f32 = 40.0;
+
+/// Effect size of each completed project (`construction::apply_completion`),
+/// per docs/phase2-spec.md Stage 2B's completion-effect table.
+pub const INFRA_STEP: f32 = 0.15;
+pub const PORT_STEP: f32 = 0.3;
+pub const CAPACITY_STEP: f32 = 1.0;
+pub const REPAIR_STEP: f32 = 0.3;

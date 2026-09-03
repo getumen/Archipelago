@@ -67,10 +67,11 @@ const FACTION_MANPOWER: f32 = 12.0;
 /// modest buffer so the chain isn't starved on day one.
 const FACTION_STOCK: [f32; GOOD_COUNT] = [200.0, 100.0, 80.0, 40.0, 400.0, 250.0];
 const FACTION_CONSCRIPTION: f32 = 0.5;
-/// Initial industry priority: an even split between Machinery and
-/// Munitions, the only two goods contending for shared Steel/Energy input
-/// in Stage 2A.
-const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.5, 0.5, 0.0];
+/// Initial industry priority: an even three-way split of Energy between
+/// Steel, Machinery and Munitions, and an even split of Steel between
+/// Machinery and Munitions - the goods that contend for shared Energy/Steel
+/// input in Stage 2A (see `economy::tick_economy`).
+const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.5, 0.5, 0.5, 0.0];
 const FACTION_WAR_SUPPORT: f32 = 60.0;
 const FACTION_STABILITY: f32 = 80.0;
 
@@ -105,6 +106,8 @@ pub fn build_world() -> World {
             occupation: 0.0,
             occupier: None,
             links: Vec::new(),
+            devastation: 0.0,
+            construction: None,
         })
         .collect();
 

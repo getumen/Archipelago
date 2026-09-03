@@ -9,9 +9,10 @@ use std::collections::{BTreeSet, VecDeque};
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER,
-    UNIT_EQUIPMENT, UNIT_MANPOWER,
+    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, COMBAT_SUPPLY_MULT, MACHINERY_INPUT_STEEL,
+    MUNITIONS_INPUT_STEEL, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
 };
+use archipelago_sim::construction::Project;
 use archipelago_sim::good::Good;
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::observation::Observation;
@@ -61,6 +62,16 @@ const RATION_STABILITY_FLOOR: f32 = 60.0;
 /// Arms counts as "critically short" for rationing purposes (mirrors
 /// `RECRUIT_STOCK_MARGIN`'s notion of a comfortable buffer).
 const ARMS_LOW_UNIT_MARGIN: f32 = 1.5;
+/// `Region::devastation` above which the agent's top build priority
+/// (docs/phase2-spec.md Stage 2B) is repairing a damaged own region rather
+/// than expanding capacity or infrastructure elsewhere.
+const REPAIR_THRESHOLD: f32 = 0.35;
+/// Minimum days of Arms-equivalent Machinery/Steel stock (see
+/// `machinery_limited_arms_days` in `set_policy`) that must remain before
+/// the agent will spend on construction at all - so building never eats
+/// into the stockpile the war effort itself needs (Stage 2B: "Machinery /
+/// Steel の在庫が軍需の余裕分を下回っている間は着工しない").
+const BUILD_STOCK_RESERVE_DAYS: f32 = 15.0;
 
 /// Decides for one faction every `period` days (offset by faction id so the
 /// three AIs don't all act on the same day), per mvp-spec.md §7.
@@ -103,6 +114,7 @@ impl Agent for HeuristicAgent {
         set_policy(self.faction, obs, &mut actions);
         reinforce(self.faction, obs, &mut actions);
         recruit(self.faction, obs, &mut actions);
+        build(self.faction, obs, &mut actions);
         offensive(self.faction, self.caution, obs, &mut actions);
 
         let already_moved: BTreeSet<UnitId> = actions
@@ -265,6 +277,137 @@ fn safe_own_regions(faction: FactionId, obs: &Observation) -> Vec<RegionId> {
         .collect();
     regions.sort_by_key(|r| r.0);
     regions
+}
+
+/// Build priorities (docs/phase2-spec.md Stage 2B):
+/// 1. Repair an own, uncontested, sufficiently devastated region.
+/// 2. Otherwise, add `Capacity` for whichever good is the production
+///    chain's structural bottleneck, at a safe, high-infrastructure region.
+/// 3. Otherwise, raise `Infrastructure` at a front region.
+///
+/// Gated behind `BUILD_STOCK_RESERVE_DAYS`: while Machinery/Steel stock is
+/// below the war effort's own short-term reserve, the agent does not start
+/// or continue directing new resources into construction (an already
+/// in-progress project run by `construction::tick_construction` still
+/// slows down instead of stalling - this gate only stops *new* orders).
+fn build(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let f = obs.world.faction(faction);
+    let machinery_days = f.stock[Good::Machinery.index()] / ARMS_INPUT_MACHINERY;
+    let steel_days = f.stock[Good::Steel.index()] / ARMS_INPUT_STEEL;
+    if machinery_days < BUILD_STOCK_RESERVE_DAYS || steel_days < BUILD_STOCK_RESERVE_DAYS {
+        return;
+    }
+
+    if let Some(region) = repair_target(faction, obs) {
+        actions.push(Action::Build { region, project: Project::Repair });
+        return;
+    }
+
+    if let Some(good) = bottleneck_good(obs) {
+        if let Some(region) = safest_high_infra_region(faction, obs) {
+            actions.push(Action::Build { region, project: Project::Capacity(good) });
+            return;
+        }
+    }
+
+    let mut front = obs.front_regions();
+    front.sort_by_key(|r| r.0);
+    let region = front.into_iter().find(|&r| {
+        obs.world.region(r).construction.is_none() && !obs.world.has_enemy_units(r, faction)
+    });
+    if let Some(region) = region {
+        actions.push(Action::Build { region, project: Project::Infrastructure });
+    }
+}
+
+/// The most devastated own, uncontested region with no project already
+/// running, if any is past `REPAIR_THRESHOLD`.
+fn repair_target(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    let mut candidates = obs.own_regions();
+    candidates.sort_by_key(|r| r.0);
+    candidates
+        .into_iter()
+        .filter(|&r| {
+            let region = obs.world.region(r);
+            region.devastation > REPAIR_THRESHOLD
+                && region.construction.is_none()
+                && !obs.world.has_enemy_units(r, faction)
+        })
+        .fold(None, |best: Option<(RegionId, f32)>, r| {
+            let d = obs.world.region(r).devastation;
+            match best {
+                Some((_, best_d)) if d <= best_d => best,
+                _ => Some((r, d)),
+            }
+        })
+        .map(|(r, _)| r)
+}
+
+/// The good whose *national* effective capacity structurally can't fund
+/// what downstream production needs from it - `Steel` first, since both
+/// `Machinery` and `Munitions` (and `Arms`, via `Steel`) draw on it, then
+/// `Machinery` for `Arms` specifically. `None` when nothing owned is
+/// structurally starved this way.
+fn bottleneck_good(obs: &Observation) -> Option<Good> {
+    let mut steel_cap = 0.0f32;
+    let mut machinery_cap = 0.0f32;
+    let mut munitions_cap = 0.0f32;
+    let mut arms_cap = 0.0f32;
+    for r in obs.own_regions() {
+        let region = obs.world.region(r);
+        steel_cap += region.effective_capacity(Good::Steel);
+        machinery_cap += region.effective_capacity(Good::Machinery);
+        munitions_cap += region.effective_capacity(Good::Munitions);
+        arms_cap += region.effective_capacity(Good::Arms);
+    }
+
+    let steel_needed = machinery_cap * MACHINERY_INPUT_STEEL
+        + munitions_cap * MUNITIONS_INPUT_STEEL
+        + arms_cap * ARMS_INPUT_STEEL;
+    if steel_cap < steel_needed {
+        return Some(Good::Steel);
+    }
+
+    let machinery_needed = arms_cap * ARMS_INPUT_MACHINERY;
+    if machinery_cap < machinery_needed {
+        return Some(Good::Machinery);
+    }
+
+    None
+}
+
+/// The safest place to expand capacity: an own, uncontested, non-front
+/// region with no project running, preferring the highest infrastructure so
+/// the new capacity is actually usable at good efficiency; falls back to
+/// any safe own region without a project if every own region is on the front.
+fn safest_high_infra_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    let front: BTreeSet<RegionId> = obs.front_regions().into_iter().collect();
+    let mut own = obs.own_regions();
+    own.sort_by_key(|r| r.0);
+
+    let interior_best = own
+        .iter()
+        .copied()
+        .filter(|r| {
+            !front.contains(r)
+                && obs.world.region(*r).construction.is_none()
+                && !obs.world.has_enemy_units(*r, faction)
+        })
+        .fold(None, |best: Option<(RegionId, f32)>, r| {
+            let infra = obs.world.region(r).infrastructure;
+            match best {
+                Some((_, best_infra)) if infra <= best_infra => best,
+                _ => Some((r, infra)),
+            }
+        })
+        .map(|(r, _)| r);
+    if interior_best.is_some() {
+        return interior_best;
+    }
+
+    own.into_iter().find(|&r| {
+        obs.world.region(r).construction.is_none() && !obs.world.has_enemy_units(r, faction)
+    })
 }
 
 /// From every uncontested own region, picks the best adjacent target

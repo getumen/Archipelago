@@ -9,8 +9,9 @@ use crate::world::World;
 
 /// Per-region field count in `Observation::encode()`: `[owned, population,
 /// infrastructure, supply, unrest, own_power, enemy_power]` (7 fixed
-/// fields) followed by `capacity[GOOD_COUNT]`.
-pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT;
+/// fields) followed by `capacity[GOOD_COUNT]`, then `[devastation,
+/// construction_progress]` (Stage 2B, 2 fixed fields).
+pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2;
 
 /// Faction-scalar field count in `Observation::encode()`: `manpower`,
 /// `stock[GOOD_COUNT]`, `war_support`, `stability`, `unit_count`.
@@ -107,8 +108,11 @@ impl<'a> Observation<'a> {
     /// Fixed length `ENCODING_LEN` (`regions.len() * REGION_FIELD_COUNT +
     /// FACTION_FIELD_COUNT`): per-region `[owned, population,
     /// infrastructure, supply, unrest, own_power, enemy_power,
-    /// capacity[GOOD_COUNT]...]`, then faction scalars `[manpower,
-    /// stock[GOOD_COUNT]..., war_support, stability, unit_count]`.
+    /// capacity[GOOD_COUNT]..., devastation, construction_progress]`, then
+    /// faction scalars `[manpower, stock[GOOD_COUNT]..., war_support,
+    /// stability, unit_count]`. `construction_progress` is
+    /// `invested / required` in `0..=1`, or `0.0` when no project is
+    /// in progress.
     pub fn encode(&self) -> Vec<f32> {
         let mut out = Vec::with_capacity(ENCODING_LEN);
         for region in &self.world.regions {
@@ -122,6 +126,12 @@ impl<'a> Observation<'a> {
             for g in 0..GOOD_COUNT {
                 out.push(region.capacity[g]);
             }
+            out.push(region.devastation);
+            let progress = match &region.construction {
+                Some(c) if c.required > 0.0 => (c.invested / c.required).clamp(0.0, 1.0),
+                _ => 0.0,
+            };
+            out.push(progress);
         }
         let faction = self.world.faction(self.faction);
         out.push(faction.manpower);

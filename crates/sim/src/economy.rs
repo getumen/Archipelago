@@ -19,10 +19,20 @@
 //! 3. Civilians draw `Food` and `Energy` from that stock (see
 //!    `Faction::civilian_ration`); the worst-served of the two so far
 //!    seeds `Faction::shortage`.
-//! 4. `Steel` is capped by what's left of the `Energy` stock.
-//! 5. `Machinery` and `Munitions` both draw on `Steel` and what's left of
-//!    `Energy` stock; when the shared input can't cover both at their full
-//!    potential, it is split between them by `Faction::industry_priority`.
+//! 4. `Steel`, `Machinery` and `Munitions` all draw on the same `Energy`
+//!    stock left after civilians (a review flagged the earlier version of
+//!    this stage, which gave `Steel` an unconditional first claim on
+//!    `Energy` - the same hardcoded-precedence defect shape as #3 and the
+//!    Phase 1 unrest accumulator - so a scarce `Energy` stock could starve
+//!    `Machinery` and `Munitions` to zero no matter what a faction actually
+//!    wanted): the `Energy` stock is split into a budget per good by
+//!    `Faction::industry_priority[Steel]/[Machinery]/[Munitions]`, the same
+//!    mechanism step 5 already used to split `Steel` between `Machinery`
+//!    and `Munitions`. `Machinery` and `Munitions` also draw on `Steel`
+//!    produced by this same step.
+//! 5. `Machinery` and `Munitions` share `Steel` output; when it can't cover
+//!    both at their full potential, it is split between them by
+//!    `Faction::industry_priority`.
 //! 6. Civilians draw `Machinery` from what industry left behind, folding
 //!    into `Faction::shortage` the same way.
 //! 7. `Arms` is capped by what's left of the `Machinery` and `Steel` stock.
@@ -69,7 +79,7 @@ pub fn tick_economy(world: &mut World) {
     // §4.1's formula, now applied uniformly instead of Food having its own).
     let mut efficiency = vec![0.0f32; n_regions];
     for (i, region) in world.regions.iter().enumerate() {
-        efficiency[i] = (region.infrastructure.max(0.2)
+        efficiency[i] = (region.effective_infrastructure().max(0.2)
             * region.labor_ratio()
             * (1.0 - region.unrest / 150.0))
             .clamp(0.2, 1.0);
@@ -85,7 +95,7 @@ pub fn tick_economy(world: &mut World) {
         total_pop[f] += region.population;
         let e = efficiency[region.id.index()];
         for good in ALL_GOODS {
-            potential[f][good.index()] += region.capacity[good.index()] * e;
+            potential[f][good.index()] += region.effective_capacity(good) * e;
         }
     }
 
@@ -121,15 +131,46 @@ pub fn tick_economy(world: &mut World) {
         let food_shortage = consume(&mut stock[Good::Food.index()], food_need, ration);
         let energy_shortage = consume(&mut stock[Good::Energy.index()], energy_need, ration);
 
-        // Step 3: Steel, capped by what's left of the Energy stock.
+        // Step 3: Steel, Machinery and Munitions all contend for the same
+        // Energy stock, so it is split into a per-good budget by
+        // `industry_priority` up front (falling back to an even three-way
+        // split if every weight is zero) - exactly the mechanism step 4
+        // below already used to split Steel between Machinery and
+        // Munitions, now reused instead of letting Steel take an
+        // unconditional first claim. Each good's budget is a fixed share of
+        // the Energy stock as it stood before any of the three produced
+        // anything this tick, so one good leaving its budget unspent
+        // (because its own potential is the binding constraint) doesn't
+        // hand the rest to another good this tick — the same
+        // no-redistribution behaviour step 4 already relies on for Steel.
+        let w_steel = faction.industry_priority[Good::Steel.index()].max(0.0);
+        let w_machinery = faction.industry_priority[Good::Machinery.index()].max(0.0);
+        let w_munitions = faction.industry_priority[Good::Munitions.index()].max(0.0);
+
+        let energy_weight_sum = w_steel + w_machinery + w_munitions;
+        let (energy_share_steel, energy_share_machinery, energy_share_munitions) =
+            if energy_weight_sum > 0.0 {
+                (
+                    w_steel / energy_weight_sum,
+                    w_machinery / energy_weight_sum,
+                    w_munitions / energy_weight_sum,
+                )
+            } else {
+                (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+            };
+
+        let energy_stock = stock[Good::Energy.index()];
+        let energy_budget_steel = energy_stock * energy_share_steel;
+        let energy_budget_machinery = energy_stock * energy_share_machinery;
+        let energy_budget_munitions = energy_stock * energy_share_munitions;
+
         let actual_steel = pot[Good::Steel.index()]
-            .min(input_limit(stock[Good::Energy.index()], STEEL_INPUT_ENERGY))
+            .min(input_limit(energy_budget_steel, STEEL_INPUT_ENERGY))
             .max(0.0);
-        stock[Good::Energy.index()] =
-            (stock[Good::Energy.index()] - actual_steel * STEEL_INPUT_ENERGY).max(0.0);
         stock[Good::Steel.index()] += actual_steel;
 
-        // Step 4: Machinery & Munitions share Steel and Energy. The shared
+        // Step 4: Machinery & Munitions share Steel output (produced just
+        // above) and their own Energy budget from step 3. The shared Steel
         // input is split into a per-good budget by `industry_priority`
         // (falling back to an even split if both weights are zero), then
         // each good is capped by its own potential and by what its share of
@@ -139,21 +180,16 @@ pub fn tick_economy(world: &mut World) {
         // good this tick — but it is deterministic, keeps the shared input
         // conserved, and makes `industry_priority`'s ratio directly control
         // how the contended input is split, which is all Stage 2A asks for.
-        let w_machinery = faction.industry_priority[Good::Machinery.index()].max(0.0);
-        let w_munitions = faction.industry_priority[Good::Munitions.index()].max(0.0);
-        let weight_sum = w_machinery + w_munitions;
-        let (share_machinery, share_munitions) = if weight_sum > 0.0 {
-            (w_machinery / weight_sum, w_munitions / weight_sum)
+        let steel_weight_sum = w_machinery + w_munitions;
+        let (share_machinery, share_munitions) = if steel_weight_sum > 0.0 {
+            (w_machinery / steel_weight_sum, w_munitions / steel_weight_sum)
         } else {
             (0.5, 0.5)
         };
 
         let steel_stock = stock[Good::Steel.index()];
-        let energy_stock = stock[Good::Energy.index()];
         let steel_budget_machinery = steel_stock * share_machinery;
         let steel_budget_munitions = steel_stock * share_munitions;
-        let energy_budget_machinery = energy_stock * share_machinery;
-        let energy_budget_munitions = energy_stock * share_munitions;
 
         let actual_machinery = pot[Good::Machinery.index()]
             .min(input_limit(steel_budget_machinery, MACHINERY_INPUT_STEEL))
@@ -165,8 +201,9 @@ pub fn tick_economy(world: &mut World) {
             .max(0.0);
 
         let steel_used = actual_machinery * MACHINERY_INPUT_STEEL + actual_munitions * MUNITIONS_INPUT_STEEL;
-        let energy_used =
-            actual_machinery * MACHINERY_INPUT_ENERGY + actual_munitions * MUNITIONS_INPUT_ENERGY;
+        let energy_used = actual_steel * STEEL_INPUT_ENERGY
+            + actual_machinery * MACHINERY_INPUT_ENERGY
+            + actual_munitions * MUNITIONS_INPUT_ENERGY;
         stock[Good::Steel.index()] = (steel_stock - steel_used).max(0.0);
         stock[Good::Energy.index()] = (energy_stock - energy_used).max(0.0);
         stock[Good::Machinery.index()] += actual_machinery;

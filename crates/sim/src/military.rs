@@ -3,10 +3,10 @@
 
 use crate::balance::{
     ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
-    CAPTURE_UNREST, COMBAT_DAMAGE, EQUIPMENT_LOSS_PER_DAMAGE, MANPOWER_LOSS_PER_DAMAGE,
-    MORALE_REGEN, OCCUPATION_DECAY, OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN, ORG_REGEN,
-    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN,
-    WAR_SUPPORT_LOSS_PENALTY,
+    CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE, DEVASTATION_PER_COMBAT_DAMAGE,
+    EQUIPMENT_LOSS_PER_DAMAGE, MANPOWER_LOSS_PER_DAMAGE, MORALE_REGEN, OCCUPATION_DECAY,
+    OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN, ORG_REGEN, UNIT_DEATH_MANPOWER,
+    UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN, WAR_SUPPORT_LOSS_PENALTY,
 };
 use crate::event::Event;
 use crate::ids::{FactionId, RegionId, UnitId};
@@ -157,12 +157,18 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         let total_power: f32 = power.iter().sum();
 
         let mut battle_casualties = 0.0f32;
+        // Raw damage dealt in this region today, summed across every side
+        // regardless of who inflicts or receives it — the physical
+        // destruction that feeds `Region::devastation`, independent of the
+        // manpower/equipment casualties it also causes.
+        let mut region_damage = 0.0f32;
         for (side_idx, &side_faction) in factions_present.iter().enumerate() {
             let enemy_power = total_power - power[side_idx];
             if enemy_power <= 0.0 {
                 continue;
             }
             let dmg_side = enemy_power * COMBAT_DAMAGE * rng.range(0.85, 1.15);
+            region_damage += dmg_side;
             let side_power = power[side_idx];
             if side_power <= 0.0 {
                 continue;
@@ -202,6 +208,10 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                 world.faction_mut(side_faction).casualties += manpower_loss;
             }
         }
+
+        let devastated = world.region_mut(region_id);
+        devastated.devastation =
+            (devastated.devastation + region_damage * DEVASTATION_PER_COMBAT_DAMAGE).min(1.0);
 
         events.push(Event::Battle {
             region: region_id,
@@ -252,7 +262,7 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
         let mut manpower = unit.manpower;
 
         if !is_fighting && !marching {
-            let infra = world.region(unit.location).infrastructure;
+            let infra = world.region(unit.location).effective_infrastructure();
             organization += ORG_REGEN * (0.3 + 0.7 * unit.supply) * (0.6 + 0.4 * infra);
         }
         if !is_fighting {
@@ -390,6 +400,12 @@ pub fn tick_occupation(world: &mut World, events: &mut Vec<Event>) {
             region.occupation = 0.0;
             region.occupier = None;
             region.unrest += CAPTURE_UNREST;
+            // A region changing hands is a war-damage spike of its own
+            // (looting, sabotage, the fighting that won it) on top of
+            // whatever combat damage already accrued, and any project the
+            // previous owner had underway does not carry over.
+            region.devastation = (region.devastation + DEVASTATION_ON_CAPTURE).min(1.0);
+            region.construction = None;
             events.push(Event::RegionCaptured {
                 region: region_id,
                 from: owner,

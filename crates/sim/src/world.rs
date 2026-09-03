@@ -1,7 +1,8 @@
 //! The map (regions, links, terrain) and the mutable game state
 //! (factions, units, supply) that every tick system reads and writes.
 
-use crate::balance::WORKFORCE_SHARE;
+use crate::balance::{INFRA_DAMAGE_SHARE, WORKFORCE_SHARE};
+use crate::construction::Construction;
 use crate::good::{Good, GOOD_COUNT};
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::military::Unit;
@@ -99,18 +100,44 @@ pub struct Region {
     pub occupation: f32,
     pub occupier: Option<FactionId>,
     pub links: Vec<Link>,
+    /// War damage, `0..1` (Stage 2B, docs/phase2-spec.md "Stage 2B — インフラ
+    /// と建設・戦災"): holding a region isn't the same as being able to use
+    /// it. Read through `effective_capacity`/`effective_infrastructure`
+    /// rather than directly — every production and supply-propagation read
+    /// of `capacity`/`infrastructure` must see the devastated value.
+    pub devastation: f32,
+    /// The region's single in-progress build project, if any
+    /// (`Action::Build`/`Action::CancelBuild`, `construction::tick_construction`).
+    /// Discarded (`None`) whenever the region changes hands.
+    pub construction: Option<Construction>,
 }
 
 impl Region {
-    /// Sum of every commodity's capacity except `Food` — this region's
-    /// contribution to war-relevant industry (Stage 2A redefinition of the
-    /// Phase 1 `industry` field that `World::industry_total` and
-    /// `supply_source`/`value` below depend on).
+    /// `capacity[good]` degraded by war damage — what this region can
+    /// actually produce today, as opposed to what it could produce undamaged.
+    pub fn effective_capacity(&self, good: Good) -> f32 {
+        self.capacity[good.index()] * (1.0 - self.devastation)
+    }
+
+    /// `infrastructure` degraded by war damage. Read this everywhere
+    /// `infrastructure` used to be read directly for production efficiency,
+    /// supply-network propagation (`economy`, `logistics`), or a unit's
+    /// organization regeneration (`military::tick_recovery`) — devastation
+    /// caps `INFRA_DAMAGE_SHARE` of infrastructure's contribution rather
+    /// than all of it, since even a wrecked region keeps some road/rail bed.
+    pub fn effective_infrastructure(&self) -> f32 {
+        self.infrastructure * (1.0 - self.devastation * INFRA_DAMAGE_SHARE)
+    }
+
+    /// Sum of every commodity's *effective* (devastation-adjusted) capacity
+    /// except `Food` — this region's contribution to war-relevant industry
+    /// (Stage 2A redefinition of the Phase 1 `industry` field that
+    /// `World::industry_total` and `supply_source`/`value` below depend on).
     pub fn industry_total(&self) -> f32 {
         let mut total = 0.0;
         for good in crate::good::ALL_GOODS {
             if good != Good::Food {
-                total += self.capacity[good.index()];
+                total += self.effective_capacity(good);
             }
         }
         total

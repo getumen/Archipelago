@@ -133,16 +133,115 @@ national な単一プールで解く（地域ごとの在庫は Stage 2C で導�
 
 ---
 
-## Stage 2B — インフラと建設・戦災（概要）
+## Stage 2B — インフラと建設・戦災
 
-- `Action::Build { region, project }`。`project` は `Infrastructure` / `Port` / `Capacity(Good)`。
-  Machinery と Steel を数十日かけて消費する建設キューとして持つ。
-- 戦闘と占領が `infrastructure` と `capacity` を損傷させる。占領直後の地域は
-  生産能力が大きく落ち、時間とともに回復する（回復速度は治安に依存）。
-- これにより「領土を取ったのに生産が上がらない」状況が生まれ、
-  占領の価値が単純な塗り絵にならない（企画書 §21-2）。
+目的は「**領土を取っても生産基盤は壊れている**」を成立させること。
+2A までは占領した瞬間に地域の生産能力がそのまま手に入る。これでは
+占領が単純な塗り絵になり、企画書 §21-2 の差別化が効かない。
 
-詳細は Stage 2A 着地後に確定する。
+### 戦災（devastation）
+
+地域に単一の被害度を持たせる。品目ごとに被害を分けても意思決定は増えないため、
+1 つのスカラーにまとめる。
+
+```rust
+pub struct Region {
+    // ...
+    pub devastation: f32,  // 0..1
+}
+```
+
+実効値:
+```
+effective_capacity[g] = capacity[g] * (1 - devastation)
+effective_infra       = infrastructure * (1 - devastation * INFRA_DAMAGE_SHARE)
+```
+`effective_infra` は生産効率と**補給網の伝播**の両方に効く（`logistics` は
+`Region.infrastructure` を直接読んでいるので、実効値を返すメソッド経由に統一すること）。
+これにより、戦場になった回廊は補給を通しにくくなる。
+
+発生:
+- 戦闘のあった地域は、その日の戦闘被害に比例して `devastation` が増える
+  （`DEVASTATION_PER_COMBAT_DAMAGE`）
+- 所有者が変わった瞬間に一度だけ大きく増える（`DEVASTATION_ON_CAPTURE`）
+
+回復:
+```
+recovery = DEVASTATION_RECOVERY * (1 - unrest/100) * (0.5 + 0.5 * stability/100)
+devastation = (devastation - recovery).max(0)
+```
+治安の悪い占領地はほとんど復興しない。企画書 §11 の「地方独立運動」に繋がる素地でもある。
+
+### 建設
+
+地域ごとに 1 件だけ進行させる。
+
+```rust
+pub enum Project { Infrastructure, Port, Capacity(Good), Repair }
+
+pub struct Construction {
+    pub project: Project,
+    pub invested: f32,
+    pub required: f32,
+}
+
+pub struct Region {
+    // ...
+    pub construction: Option<Construction>,
+}
+```
+
+- `Action::Build { region: RegionId, project: Project }` — 自領・非係争・進行中の工事なし、が条件
+- `Action::CancelBuild { region: RegionId }` — 投入済みリソースは戻らない
+- 毎 tick、各工事は `CONSTRUCTION_RATE` ぶんの建設ポイントを進めようとし、
+  その対価として Machinery と Steel を `CONSTRUCTION_MACHINERY_PER_POINT` /
+  `CONSTRUCTION_STEEL_PER_POINT` の比で在庫から消費する。
+  在庫が足りなければ足りる比率まで進捗が落ちる（工事は止まらず遅くなる）。
+- 完成時の効果:
+
+| Project | 効果 |
+|---|---|
+| `Infrastructure` | `infrastructure += INFRA_STEP`（上限 1.0） |
+| `Port` | `port += PORT_STEP` |
+| `Capacity(g)` | `capacity[g] += CAPACITY_STEP` |
+| `Repair` | `devastation -= REPAIR_STEP`（下限 0.0） |
+
+`Repair` は受動回復より速い明示的な選択肢とする。占領地を早く使えるようにするか、
+前線に資源を回すかがトレードオフになる。
+
+工事の進捗は所有者が変わっても引き継がない（`construction = None` にする）。
+
+### AI
+
+`HeuristicAgent` の建設優先度:
+
+1. 自領で `devastation > REPAIR_THRESHOLD` かつ非係争なら `Repair`
+2. 生産のボトルネックになっている品目があれば、安全な高インフラ地域に `Capacity(その品目)`
+3. それ以外は前線地域の `Infrastructure`
+
+ただし Machinery / Steel の在庫が軍需の余裕分を下回っている間は着工しない
+（建設で戦争遂行能力を食い潰さない）。
+
+### 影響範囲
+
+- `Observation::encode()` に `devastation` と工事進捗を加える。固定長は維持し、
+  長さ定数を更新する。
+- headless の最終盤面に `devastation` 列を追加する。`--json` にも出す。
+- `logistics` と `economy` が `Region.infrastructure` を直接読んでいる箇所を
+  実効値メソッドに置き換える。
+
+### Stage 2B の受け入れ基準
+
+- `cargo build --workspace` 警告 0、`cargo test --workspace` 全通過
+- 決定論維持（同 seed で `--json` がバイト一致）
+- 新規テスト
+  - `combat_devastates_region`: 戦闘のあった地域の `devastation` が上がり、実効生産が落ちる
+  - `captured_region_produces_less`: 占領直後の地域の実効生産能力が名目を大きく下回る
+  - `unrest_slows_reconstruction`: 治安が悪い地域は復興が明確に遅い
+  - `construction_raises_capacity`: `Build(Capacity(Steel))` の完成で産出が増える
+  - `build_rejected_when_contested`: 敵部隊のいる地域への `Build` が `ActionError` になる
+  - `devastation_reduces_supply_throughput`: 戦災地域を経由する補給が落ちる
+- seed 1/2/3 が 720 日完走し、占領直後の地域の生産寄与が時間とともに立ち上がる
 
 ---
 

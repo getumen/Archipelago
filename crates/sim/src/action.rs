@@ -5,6 +5,7 @@ use crate::balance::{
     CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
     UNIT_START_ORG_RATIO,
 };
+use crate::construction::{required_points, Construction, Project};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::military::{move_required, Movement, Unit};
@@ -19,6 +20,8 @@ pub enum Action {
     SetConscription(f32),
     SetIndustryPriority { good: Good, weight: f32 },
     SetCivilianRation(f32),
+    Build { region: RegionId, project: Project },
+    CancelBuild { region: RegionId },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,6 +35,10 @@ pub enum ActionError {
     InsufficientManpower,
     InsufficientEquipment,
     InvalidValue,
+    /// `Action::Build` on a region that already has a project in progress.
+    AlreadyBuilding,
+    /// `Action::CancelBuild` on a region with no project in progress.
+    NoConstruction,
 }
 
 pub fn apply_action(
@@ -49,6 +56,8 @@ pub fn apply_action(
             apply_set_industry_priority(world, faction, good, weight)
         }
         Action::SetCivilianRation(value) => apply_set_civilian_ration(world, faction, value),
+        Action::Build { region, project } => apply_build(world, faction, region, project),
+        Action::CancelBuild { region } => apply_cancel_build(world, faction, region),
     }
 }
 
@@ -202,5 +211,58 @@ fn apply_set_civilian_ration(
         return Err(ActionError::InvalidValue);
     }
     world.faction_mut(faction).civilian_ration = value;
+    Ok(())
+}
+
+/// `Action::Build` (docs/phase2-spec.md Stage 2B): own region, not
+/// contested, no project already running.
+fn apply_build(
+    world: &mut World,
+    faction: FactionId,
+    region_id: RegionId,
+    project: Project,
+) -> Result<(), ActionError> {
+    let region = world
+        .regions
+        .get(region_id.index())
+        .ok_or(ActionError::RegionNotOwned)?;
+    if region.owner != faction {
+        return Err(ActionError::RegionNotOwned);
+    }
+    if world.has_enemy_units(region_id, faction) {
+        return Err(ActionError::RegionContested);
+    }
+    if region.construction.is_some() {
+        return Err(ActionError::AlreadyBuilding);
+    }
+
+    world.region_mut(region_id).construction = Some(Construction {
+        project,
+        invested: 0.0,
+        required: required_points(project),
+    });
+    Ok(())
+}
+
+/// `Action::CancelBuild` (docs/phase2-spec.md Stage 2B): resources already
+/// invested are forfeited — the `Construction` is simply discarded, not
+/// refunded.
+fn apply_cancel_build(
+    world: &mut World,
+    faction: FactionId,
+    region_id: RegionId,
+) -> Result<(), ActionError> {
+    let region = world
+        .regions
+        .get(region_id.index())
+        .ok_or(ActionError::RegionNotOwned)?;
+    if region.owner != faction {
+        return Err(ActionError::RegionNotOwned);
+    }
+    if region.construction.is_none() {
+        return Err(ActionError::NoConstruction);
+    }
+
+    world.region_mut(region_id).construction = None;
     Ok(())
 }

@@ -35,7 +35,7 @@ pub fn recompute_supply(world: &mut World) {
                 if world.regions[j].owner != owner_i {
                     continue;
                 }
-                let infra_j = world.regions[j].infrastructure;
+                let infra_j = world.regions[j].effective_infrastructure();
                 let v = (cap_i * link.kind.retention() * (0.55 + 0.45 * infra_j))
                     .min(link.kind.max_throughput());
                 if v > cap[j] {

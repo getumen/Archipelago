@@ -2,6 +2,7 @@
 //! and the action-intake gate that runs ahead of it.
 
 use crate::action::{self, Action, ActionError};
+use crate::construction;
 use crate::economy;
 use crate::event::Event;
 use crate::ids::FactionId;
@@ -45,12 +46,15 @@ impl Simulation {
     }
 
     /// Advances the simulation by one day, in the fixed tick order from the
-    /// spec: economy, supply, movement, combat, recovery, occupation,
-    /// politics, then survival bookkeeping.
+    /// spec: economy, construction, supply, movement, combat, recovery,
+    /// occupation, politics, devastation recovery, then survival bookkeeping.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
 
         economy::tick_economy(&mut self.world);
+        // Construction draws Machinery/Steel from what production just
+        // left in stock, the same way every other consumer in the tick does.
+        construction::tick_construction(&mut self.world);
         logistics::recompute_supply(&mut self.world);
         logistics::distribute_supply(&mut self.world);
         military::tick_movement(&mut self.world);
@@ -58,6 +62,9 @@ impl Simulation {
         military::tick_recovery(&mut self.world, &report.fought, &mut events);
         military::tick_occupation(&mut self.world, &mut events);
         politics::tick_politics(&mut self.world, &report.casualties);
+        // Runs after politics so it sees today's freshly computed
+        // unrest/stability, per the Stage 2B recovery formula.
+        construction::tick_devastation_recovery(&mut self.world);
 
         for f_idx in 0..self.world.factions.len() {
             let faction_id = FactionId(f_idx as u32);

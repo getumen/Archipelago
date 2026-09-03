@@ -99,17 +99,18 @@ pub fn print_final_board(world: &World) {
     println!();
     println!("=== 最終盤面 (day {}) ===", world.day);
     println!(
-        "{}  {}  治安    補給",
+        "{}  {}  治安    補給    戦災",
         pad_right("地域", 12),
         pad_right("所有勢力", 10),
     );
     for region in &world.regions {
         println!(
-            "{}  {}  {:5.1}  {:6.1}",
+            "{}  {}  {:5.1}  {:6.1}  {:5.1}%",
             pad_right(&region.name, 12),
             pad_right(&world.faction(region.owner).name, 10),
             region.unrest,
             world.supply[region.id.index()],
+            region.devastation * 100.0,
         );
     }
 }
