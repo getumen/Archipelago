@@ -181,6 +181,7 @@ pub(super) fn setup(
         commands.spawn((
             Text2d::new(zone.name.clone()),
             TextFont { font: font.0.clone().into(), font_size: 11.0.into(), ..default() },
+            japanese_label_layout(),
             TextColor(Color::srgba(0.85, 0.88, 0.92, 0.8)),
             label_shadow(),
             Anchor(Vec2::new(-dx, -dy) * 0.5),
@@ -274,6 +275,7 @@ pub(super) fn setup(
         commands.spawn((
             Text2d::new(region.name.clone()),
             TextFont { font: font.0.clone().into(), font_size: REGION_LABEL_FONT_SIZE.into(), ..default() },
+            japanese_label_layout(),
             TextColor(Color::WHITE),
             label_shadow(),
             Anchor(Vec2::new(-dx, -dy) * 0.5),
@@ -377,6 +379,73 @@ fn text_font(size: f32, font: &Handle<Font>) -> TextFont {
     TextFont { font: font.clone().into(), font_size: size.into(), ..default() }
 }
 
+/// `TextLayout` for a single-line Japanese map/status label (region and
+/// sea-zone names, the top bar's one-line status): never soft-wraps.
+///
+/// This is correct typography independent of anything below: these labels
+/// must never wrap in the first place - `label_push_directions`-driven
+/// placement (this module's own doc above) positions each one assuming it
+/// stays a single line, and the top bar is a single status line by design.
+/// `NoWrap` says so explicitly rather than relying on these labels merely
+/// never being long enough to need to.
+///
+/// ## ICU4X segmentation: why this does *not* silence the stderr warning
+///
+/// Running this client (any platform) prints "ICU4X data error: No
+/// segmentation model for complex script: Chinese/Japanese" on stderr
+/// once per text entity per layout - confirmed on this (Linux) machine by
+/// running the client and counting the lines. The proximate cause: Bevy
+/// 0.19's text stack goes through Parley 0.9.0 (pinned exactly by
+/// `bevy_text` 0.19.1's own `Cargo.toml` - `version = "0.9.0"`, so Cargo's
+/// feature unification cannot pull in a newer, semver-incompatible Parley
+/// release such as 0.11.x even indirectly), which in turn depends on
+/// `icu_segmenter` 2.3.0 with only its `compiled_data` feature (not
+/// `lstm`/`auto`). Verified with `cargo tree -p archipelago-game -f "{p}
+/// {f}"`: `icu_segmenter v2.3.0 compiled_data` is the only feature ever
+/// listed for it, unless this crate pulls in `icu_segmenter` itself with
+/// `auto` - it was tried; see below for why that doesn't help either.
+///
+/// It would be tempting to read this as "enable `icu_segmenter`'s `auto`
+/// feature from `apps/game` and Cargo's feature unification will turn it
+/// on for Parley's copy too" (`icu_segmenter` is a single shared crate
+/// instance across the whole dependency graph once unified) - and that
+/// part is true; `cargo tree` does show the feature lands on the shared
+/// crate. But reading Parley 0.9.0's own source
+/// (`parley-0.9.0/src/analysis/mod.rs`, `AnalysisDataSources::
+/// word_segmenter`/`line_segmenter`) shows every segmenter it builds is
+/// constructed via `WordSegmenter::new_for_non_complex_scripts`/
+/// `LineSegmenter::new_for_non_complex_scripts` - the one constructor
+/// family that *never* loads Chinese/Japanese (or Thai/Lao/Khmer/Myanmar)
+/// data, no matter which `icu_segmenter` Cargo features are compiled in.
+/// Loading that data requires calling one of `icu_segmenter`'s own
+/// `load_dictionary`/`load_auto`/`new_dictionary`/`new_auto` APIs, and
+/// nothing in Parley 0.9.0 ever calls any of them (confirmed by grep - zero
+/// matches for any of those names in that crate's source). So turning the
+/// feature on changes what *compiles into* `icu_segmenter` but not what
+/// Parley *calls* - the segmentation data stays unloaded regardless, and
+/// enabling `auto`/`lstm` was reverted as dead weight (confirmed inert,
+/// not merely unhelpful) rather than kept "just in case".
+///
+/// `word_segmenter()` above is also called unconditionally for every text
+/// layout (regardless of `LineBreak`/wrap policy - it feeds
+/// `Boundary::Word` marks used elsewhere in Parley, not line wrapping
+/// specifically), so no choice of Bevy `LineBreak` on any entity avoids
+/// triggering it either - confirmed empirically: switching every panel in
+/// this module to `LineBreak::AnyCharacter` and every label here to
+/// `NoWrap`, then running the exact same scenario, produced the exact same
+/// stderr line count (8336 lines over an identical 180-frame run) as the
+/// unmodified client. This is an upstream Parley 0.9.0 limitation with no
+/// fix reachable from this crate's `Cargo.toml` or its `TextLayout`
+/// choices - not silenced (docs/conventions.md §3 forbids suppressing a
+/// real signal), just correctly diagnosed as out of this crate's reach.
+/// The message is cosmetic-only: this client already renders Japanese
+/// correctly with it printing (confirmed by screenshot, both here and by
+/// the project owner on macOS, where the window opens and text renders
+/// normally despite the same stderr noise).
+fn japanese_label_layout() -> TextLayout {
+    TextLayout::linebreak(LineBreak::NoWrap)
+}
+
 fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
     // Top bar: date / scenario / speed.
     commands.spawn((
@@ -388,6 +457,7 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
         },
         Text::new(String::new()),
         text_font(18.0, font),
+        japanese_label_layout(),
         TextColor(Color::WHITE),
         TopBarText,
     ));
