@@ -59,7 +59,7 @@
 use bevy::prelude::*;
 
 use archipelago_sim::action::{Action, ActionError};
-use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER};
+use archipelago_sim::balance::{ATTRITION_SUPPLY_THRESHOLD, UNIT_EQUIPMENT, UNIT_MANPOWER};
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
@@ -546,8 +546,8 @@ pub(super) fn sync_unit_panel(
         let (row_line, reinforce_reason) = match unit {
             Some(u) => (
                 format!(
-                    "#{} {}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2} 経験{:.1}",
-                    u.id.0, u.name, u.manpower, u.equipment, u.organization, u.morale, u.supply, u.experience
+                    "#{} {}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}",
+                    u.id.0, u.name, u.manpower, u.equipment, u.organization, u.morale, u.supply, supply_attrition_marker(u.supply), u.experience
                 ),
                 reinforce_disabled_reason(world, player_faction, u.station),
             ),
@@ -578,6 +578,21 @@ pub(super) fn sync_unit_panel(
 
     if let Ok(mut text) = overflow.single_mut() {
         text.0 = if ids.len() > MAX_UNIT_ROWS { format!("...ほか {} 隊", ids.len() - MAX_UNIT_ROWS) } else { String::new() };
+    }
+}
+
+/// Usability fix (play-test finding #2 - "nothing tells the player when a
+/// number is in trouble"): `military::tick_organization_and_morale` already
+/// bleeds manpower/organization off any unit whose own `supply` sits below
+/// `ATTRITION_SUPPLY_THRESHOLD`, every tick, whether or not it's fighting -
+/// this just names that same threshold back to the player next to the
+/// number it explains, rather than leaving them to notice their army
+/// quietly shrinking with no visible cause.
+fn supply_attrition_marker(supply: f32) -> &'static str {
+    if supply < ATTRITION_SUPPLY_THRESHOLD {
+        "※損耗中"
+    } else {
+        ""
     }
 }
 
@@ -1532,5 +1547,45 @@ mod tests {
         let mut sim = world.resource_mut::<SimRes>();
         sim.0.tick();
         assert!(sim.0.last_human_actions().is_empty(), "accepting with nothing pending must not queue AcceptTreaty, but got {:?}", sim.0.last_human_actions());
+    }
+
+    /// Play-test finding #2's regression guard for the unit panel: a unit
+    /// whose `supply` has dropped below `ATTRITION_SUPPLY_THRESHOLD` - the
+    /// exact point `military::tick_organization_and_morale` starts bleeding
+    /// its manpower/organization every tick, fighting or not - must show
+    /// `supply_attrition_marker`'s text next to its 補給 figure; a
+    /// fully-supplied unit must not. Checked this fails when broken:
+    /// temporarily changed `supply_attrition_marker`'s comparison to
+    /// `supply < 0.0` (never true) - the "below threshold" assertion below
+    /// then fails.
+    #[test]
+    fn unit_panel_marks_supply_below_the_attrition_threshold() {
+        let mut world = World::new();
+        let mut sim = player_sim();
+        let unit_id = sim.0.world().units.iter().find(|u| u.owner == FactionId(0) && u.alive).expect("faction 0 starts with a living unit").id;
+        assert!(
+            sim.0.world().unit(unit_id).supply >= ATTRITION_SUPPLY_THRESHOLD,
+            "test precondition: the unit must start fully supplied, not already in attrition"
+        );
+        sim.0.sim.world.unit_mut(unit_id).supply = ATTRITION_SUPPLY_THRESHOLD - 0.1;
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedUnits([unit_id.0].into_iter().collect()));
+        world.insert_resource(UnitPanelSlots::default());
+
+        world.spawn((Visibility::Hidden, UnitPanelRoot));
+        world.spawn((Visibility::Hidden, UnitRowContainer(0)));
+        world.spawn((Text::new(String::new()), UnitRowText(0)));
+        world.spawn((Text::new(String::new()), UnitReinforceReason(0)));
+        world.spawn((Text::new(String::new()), UnitPanelOverflowText));
+        for kind in [UnitActionKind::Hold, UnitActionKind::Reinforce, UnitActionKind::Disband] {
+            world.spawn((BackgroundColor(COLOR_ENABLED), UnitActionButton { slot: 0, kind }));
+        }
+
+        run(&mut world, sync_unit_panel);
+
+        let mut q = world.query::<(&UnitRowText, &Text)>();
+        let row_text = q.iter(&world).find(|(r, _)| r.0 == 0).map(|(_, t)| t.0.clone()).expect("slot 0 must have been rendered");
+        assert!(row_text.contains("※損耗中"), "supply below ATTRITION_SUPPLY_THRESHOLD must be marked, got: {row_text}");
     }
 }

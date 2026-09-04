@@ -18,7 +18,26 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCapture
 
 use archipelago_sim::ids::RegionId;
 
-use super::{MainCamera, RegionLayout};
+use super::{MainCamera, RegionLayout, SimRes};
+
+/// `--screenshot-after <frames>` / `--screenshot-at-day <day>` (`main.rs`'s
+/// own doc): when the automated capture fires.
+///
+/// `AfterFrames` (Stage 7A's original, unchanged behavior) counts client
+/// frames since startup - which tracks game *days* only when the frame rate
+/// and `Speed` happen to hold steady, so it cannot reliably aim a shot at a
+/// specific day (confirmed against a real play session: the same
+/// `--screenshot-after` value landed on different days across runs).
+/// `AtDay` instead waits for `SimRes::world().day` to actually reach the
+/// target - the same day number a player would name when describing what
+/// they saw, and the target `app::run` reads to decide whether this run
+/// needs to advance unattended in the first place (see `app::run`'s own
+/// doc for that half).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotTrigger {
+    AfterFrames(u32),
+    AtDay(u32),
+}
 
 /// Present as a resource only when `--screenshot <path>` was given -
 /// `app::run` inserts this conditionally, so `maybe_capture_screenshot`
@@ -32,10 +51,10 @@ use super::{MainCamera, RegionLayout};
 /// framing instead. They never affect anything but initial UI-panel
 /// visibility/toggle state or the camera's own `Transform` - not scenario,
 /// seed, or any simulated day's outcome.
-#[derive(Resource, Clone, Default)]
+#[derive(Resource, Clone)]
 pub struct ScreenshotConfig {
     pub path: String,
-    pub after_frames: u32,
+    pub trigger: ScreenshotTrigger,
     pub open_diplomacy: bool,
     pub open_newspaper: bool,
     /// `--debug-open-policy`: Stage 8B's policy panel, same rationale as
@@ -87,9 +106,12 @@ pub(super) fn apply_debug_camera(
     ortho.scale = config.camera_zoom;
 }
 
-/// Counts frames since startup and, once `ScreenshotConfig::after_frames`
-/// have elapsed, spawns a `Screenshot` of the primary window and stops
-/// counting (`triggered`) so it fires exactly once. The observers attached
+/// Once `ScreenshotConfig::trigger` fires - `AfterFrames(n)`: this many
+/// client frames have elapsed; `AtDay(d)`: the simulated day has reached
+/// `d` (read from `SimRes`, already advanced this frame by `sim_control::
+/// advance_simulation`, which this system runs `.after(..)` - `app::run`'s
+/// own doc) - spawns a `Screenshot` of the primary window and stops
+/// checking (`triggered`) so it fires exactly once. The observers attached
 /// to that entity save the PNG (`save_to_disk`) and then queue `AppExit` -
 /// both run once `ScreenshotCaptured` fires (asynchronously, a few frames
 /// later, once the GPU readback lands), so the process always exits only
@@ -97,6 +119,7 @@ pub(super) fn apply_debug_camera(
 pub(super) fn maybe_capture_screenshot(
     mut commands: Commands,
     config: Option<Res<ScreenshotConfig>>,
+    sim: Res<SimRes>,
     mut frame_count: Local<u32>,
     mut triggered: Local<bool>,
 ) {
@@ -107,7 +130,15 @@ pub(super) fn maybe_capture_screenshot(
         return;
     }
     *frame_count += 1;
-    if *frame_count < config.after_frames {
+    let ready = match config.trigger {
+        ScreenshotTrigger::AfterFrames(frames) => *frame_count >= frames,
+        // `>=`, not `==`: at `Speed::X5`/`X20` several days tick within one
+        // frame (`sim_control`'s own module doc - ticks per frame, not per
+        // second), so the exact target day can be stepped over inside a
+        // single frame rather than ever landing on it precisely.
+        ScreenshotTrigger::AtDay(day) => sim.0.world().day >= day,
+    };
+    if !ready {
         return;
     }
     *triggered = true;

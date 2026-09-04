@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use bevy::prelude::*;
 
-pub use screenshot::ScreenshotConfig;
+pub use screenshot::{ScreenshotConfig, ScreenshotTrigger};
 
 use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::action::Action;
@@ -421,11 +421,22 @@ pub(crate) struct SupplyOnlyLegendRow;
 ///
 /// `screenshot`, when given, makes this run's own `Update` schedule (see
 /// `screenshot::maybe_capture_screenshot`) capture the primary window to
-/// disk after `ScreenshotConfig::after_frames` frames and exit with status
-/// 0 - this never reaches into `SimRes`/`SimDriver` on its own; the
-/// simulated days that accumulate before the shot are purely a side effect
-/// of `sim_control::advance_simulation` already running every unpaused
-/// frame at the default `Speed::X1`.
+/// disk once `ScreenshotConfig::trigger` fires and exit with status 0 -
+/// this never reaches into `SimRes`/`SimDriver` on its own; the simulated
+/// days that accumulate before the shot are purely a side effect of
+/// `sim_control::advance_simulation` already running every unpaused frame.
+///
+/// A `ScreenshotTrigger::AtDay` target changes two more startup defaults
+/// below (`start_paused`/`SpeedRes`), both otherwise untouched by
+/// `screenshot` at all: a live `--play` run normally starts paused
+/// (docs/phase7-spec.md "`--play` 指定時は一時停止で開始する") with nobody
+/// at the keyboard to press `Space`/`1`/`2`/`3` first, which would leave an
+/// `AtDay` target forever unreached in an unattended `--screenshot` run -
+/// so this run instead starts unpaused, at `Speed::X20`, whenever a day
+/// target is what it's waiting for. `AfterFrames` needs neither override -
+/// it was already reachable from a paused `--play` run (day 0, held on
+/// frame 1 by `SpeedRes::paused`), and Stage 7B's own "starts paused" rule
+/// for a *live* player stays exactly as specified otherwise.
 ///
 /// `cjk_font_override` is `main.rs`'s already-parsed `--cjk-font <path>` -
 /// see `fonts::load`/`fonts::resolve` for how it's combined with
@@ -477,7 +488,12 @@ pub fn run(
     // first day's board can actually be looked at before anything moves.
     // Observing-only (no `--play`) and a `--replay` run (nothing left for
     // the player to decide) both keep Stage 7A's running-at-1x default.
-    let start_paused = player_faction.is_some() && !is_replay;
+    //
+    // Overridden only by an `AtDay` screenshot target - see this function's
+    // own doc, "A `ScreenshotTrigger::AtDay` target changes two more
+    // startup defaults".
+    let day_targeted_screenshot = matches!(screenshot.as_ref().map(|c| c.trigger), Some(ScreenshotTrigger::AtDay(_)));
+    let start_paused = player_faction.is_some() && !is_replay && !day_targeted_screenshot;
 
     // Verification-only conveniences (`--debug-*`, `screenshot::ScreenshotConfig`'s
     // own doc): with no keyboard at the wheel before an automated screenshot
@@ -512,10 +528,25 @@ pub fn run(
 
     app.insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.10)))
         .insert_resource(SimRes(SimDriver::new_with_player(world, seed, player_faction, replay_days)))
-        .insert_resource(SpeedRes { last_active: Speed::X1, paused: start_paused })
+        .insert_resource(SpeedRes {
+            // `X20` only for the unattended `AtDay` case (this function's
+            // own doc) - reaching, say, day 719 at `X1` would need 719
+            // frames instead of ~36. Every other run keeps Stage 7A's `X1`
+            // default, unchanged.
+            last_active: if day_targeted_screenshot { Speed::X20 } else { Speed::X1 },
+            paused: start_paused,
+        })
         .insert_resource(SelectedRegion(debug_select_region))
         .insert_resource(SelectedSeaZone::default())
-        .insert_resource(SelectedFaction(FactionId(0)))
+        // Usability fix (play-test finding #1): defaults to the `--play`ed
+        // faction, not always `FactionId(0)` - a player starting as any
+        // faction other than the first now sees their own nation in the
+        // left-hand panel from the very first frame, not some other
+        // faction's view of them (`ui::update_faction_panel`'s own doc has
+        // the full story). Observing-only (`player_faction == None`) keeps
+        // the original `FactionId(0)` default - there is no "player's own"
+        // faction to prefer.
+        .insert_resource(SelectedFaction(player_faction.unwrap_or(FactionId(0))))
         .insert_resource(EventLog::default())
         .insert_resource(ScenarioMeta { name: scenario_name, max_days })
         .insert_resource(RegionLayout(positions))
