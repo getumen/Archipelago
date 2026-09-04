@@ -4179,6 +4179,93 @@ fn default_scenario_dimensions_match_embedded_json() {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 7A (docs/phase7-spec.md "Stage 7A — 観る", "地域の座標"): the optional
+// per-region `position` field `apps/game` uses to place regions on the map.
+// ---------------------------------------------------------------------------
+
+/// `scenario_position_is_optional`: `MINI_VALID_SCENARIO` (used throughout
+/// this file's Stage 6A tests) names no `position` field on any region at
+/// all - exactly the shape of every scenario written before Stage 7A - and
+/// must keep parsing, validating and building a `World` exactly as before,
+/// with every region's `Region::position` coming back `None`. This is the
+/// regression guard against Stage 7A's own field ever silently becoming
+/// required: before `parse_position` was written to treat a missing
+/// `position` key as `Ok(None)` (`require_object_field`'s ordinary "missing
+/// field" behaviour used everywhere else in this module), this test fails
+/// with `ScenarioError::Schema` naming `position` - confirmed by temporarily
+/// routing `position` through `require_object_field` while writing this test.
+#[test]
+fn scenario_position_is_optional() {
+    let world = scenario::load_str(MINI_VALID_SCENARIO).expect("a scenario with no `position` field anywhere must still load");
+    assert_eq!(world.regions.len(), 3);
+    for region in &world.regions {
+        assert_eq!(region.position, None, "region `{}` must default to no position when the field is absent", region.name);
+    }
+
+    // A scenario naming `position` on some regions but not others: each
+    // region's own `position` is independent - not an all-or-nothing switch
+    // for the whole file.
+    let mixed = MINI_VALID_SCENARIO.replacen(
+        r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,"#,
+        r#"{ "id": "a", "name": "A", "position": [12.5, -3.0], "terrain": "plain", "population": 10.0,"#,
+        1,
+    );
+    let world = scenario::load_str(&mixed).expect("a scenario naming `position` on only one region must still load");
+    assert_eq!(world.region(RegionId(0)).position, Some([12.5, -3.0]));
+    assert_eq!(world.region(RegionId(1)).position, None, "an untouched region's position must stay None");
+    assert_eq!(world.region(RegionId(2)).position, None);
+}
+
+/// A `position` field that *is* present but malformed - the wrong number of
+/// elements, or a non-numeric element - is a hard `ScenarioError::Schema`,
+/// never a silent `None` (this module's own "壊れたデータで暗黙に既定値へ落
+/// ちないこと" discipline, applied to Stage 7A's own new field exactly like
+/// every other field `parse_region` reads).
+#[test]
+fn malformed_scenario_position_is_rejected() {
+    let one_element = MINI_VALID_SCENARIO.replacen(
+        r#""links": [ { "to": "b", "kind": "rail" } ] },"#,
+        r#""links": [ { "to": "b", "kind": "rail" } ], "position": [1.0] },"#,
+        1,
+    );
+    match scenario::load_str(&one_element) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("position"), "expected the error to name `position`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a 1-element position, got {other:?}"),
+    }
+
+    let non_numeric = MINI_VALID_SCENARIO.replacen(
+        r#""links": [ { "to": "b", "kind": "rail" } ] },"#,
+        r#""links": [ { "to": "b", "kind": "rail" } ], "position": ["x", 1.0] },"#,
+        1,
+    );
+    match scenario::load_str(&non_numeric) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("position"), "expected the error to name `position`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a non-numeric position, got {other:?}"),
+    }
+}
+
+/// Both shipped scenarios were given real coordinates by Stage 7A
+/// (docs/phase7-spec.md "`scenarios/mvp.json` と `scenarios/japan47.json` の
+/// 両方に座標を入れる") - every region in each file must actually carry a
+/// `position`, not merely be allowed to.
+#[test]
+fn shipped_scenarios_have_positions_everywhere() {
+    let mvp = scenario::build_world();
+    for region in &mvp.regions {
+        assert!(region.position.is_some(), "scenarios/mvp.json region `{}` is missing `position`", region.name);
+    }
+
+    let japan47 = scenario::load_str(&load_japan47_str()).expect("scenarios/japan47.json must load");
+    for region in &japan47.regions {
+        assert!(region.position.is_some(), "scenarios/japan47.json region `{}` is missing `position`", region.name);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stage 6B (docs/phase6-spec.md "Stage 6B — 47 都道府県マップ"):
 // `scenarios/japan47.json`, the 47-prefecture scale-up of the 10-region MVP
 // map. `cargo test` runs with this crate's own directory as the working

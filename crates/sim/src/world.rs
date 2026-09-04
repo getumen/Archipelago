@@ -238,6 +238,15 @@ pub struct Region {
     /// only a per-port number can express. Zero for non-port and for
     /// contested/foreign regions.
     pub import_flow: f32,
+    /// Stage 7A (docs/phase7-spec.md "地域の座標"): this region's map
+    /// coordinate, `[x, y]`, if the scenario authored one
+    /// (`scenario::RegionDef::position`'s doc). `None` when it didn't -
+    /// `apps/game::layout` computes a deterministic fallback for the whole
+    /// map in that case rather than this crate guessing a default.
+    /// Cosmetic only: nothing in `crate::sim`/`crate::world`/any tick system
+    /// ever reads this field, so it cannot affect - and Stage 7A's own
+    /// regression guard confirms it does not affect - simulation outcomes.
+    pub position: Option<[f32; 2]>,
 }
 
 impl Region {

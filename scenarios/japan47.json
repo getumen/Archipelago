@@ -3,6 +3,10 @@
     {
       "id": "hokkaido",
       "name": "北海道",
+      "position": [
+        614.0,
+        -37.6
+      ],
       "terrain": "plain",
       "population": 520.0,
       "capacity": {
@@ -26,6 +30,10 @@
     {
       "id": "aomori",
       "name": "青森県",
+      "position": [
+        589.6,
+        -127.2
+      ],
       "terrain": "hill",
       "population": 120.0,
       "capacity": {
@@ -57,6 +65,10 @@
     {
       "id": "iwate",
       "name": "岩手県",
+      "position": [
+        606.0,
+        -172
+      ],
       "terrain": "hill",
       "population": 118.0,
       "capacity": {
@@ -87,6 +99,10 @@
     {
       "id": "akita",
       "name": "秋田県",
+      "position": [
+        564.0,
+        -171.2
+      ],
       "terrain": "hill",
       "population": 93.0,
       "capacity": {
@@ -117,6 +133,10 @@
     {
       "id": "miyagi",
       "name": "宮城県",
+      "position": [
+        601.8,
+        -228.4
+      ],
       "terrain": "plain",
       "population": 230.0,
       "capacity": {
@@ -147,6 +167,10 @@
     {
       "id": "yamagata",
       "name": "山形県",
+      "position": [
+        566.1,
+        -223.9
+      ],
       "terrain": "hill",
       "population": 105.0,
       "capacity": {
@@ -181,6 +205,10 @@
     {
       "id": "fukushima",
       "name": "福島県",
+      "position": [
+        580.1,
+        -257.1
+      ],
       "terrain": "hill",
       "population": 180.0,
       "capacity": {
@@ -223,6 +251,10 @@
     {
       "id": "ibaraki",
       "name": "茨城県",
+      "position": [
+        587.7,
+        -298.4
+      ],
       "terrain": "plain",
       "population": 285.0,
       "capacity": {
@@ -257,6 +289,10 @@
     {
       "id": "tochigi",
       "name": "栃木県",
+      "position": [
+        554.2,
+        -282.2
+      ],
       "terrain": "plain",
       "population": 190.0,
       "capacity": {
@@ -291,6 +327,10 @@
     {
       "id": "gunma",
       "name": "群馬県",
+      "position": [
+        523.6,
+        -301.7
+      ],
       "terrain": "plain",
       "population": 190.0,
       "capacity": {
@@ -329,6 +369,10 @@
     {
       "id": "saitama",
       "name": "埼玉県",
+      "position": [
+        556.7,
+        -320
+      ],
       "terrain": "plain",
       "population": 735.0,
       "capacity": {
@@ -371,6 +415,10 @@
     {
       "id": "chiba",
       "name": "千葉県",
+      "position": [
+        591.8,
+        -336.5
+      ],
       "terrain": "plain",
       "population": 628.0,
       "capacity": {
@@ -401,6 +449,10 @@
     {
       "id": "tokyo",
       "name": "東京都",
+      "position": [
+        520.3,
+        -344.1
+      ],
       "terrain": "urban",
       "population": 1400.0,
       "capacity": {
@@ -435,6 +487,10 @@
     {
       "id": "kanagawa",
       "name": "神奈川県",
+      "position": [
+        561.4,
+        -362.7
+      ],
       "terrain": "urban",
       "population": 923.0,
       "capacity": {
@@ -465,6 +521,10 @@
     {
       "id": "niigata",
       "name": "新潟県",
+      "position": [
+        520.8,
+        -244
+      ],
       "terrain": "plain",
       "population": 215.0,
       "capacity": {
@@ -503,6 +563,10 @@
     {
       "id": "toyama",
       "name": "富山県",
+      "position": [
+        454.0,
+        -294.1
+      ],
       "terrain": "hill",
       "population": 102.0,
       "capacity": {
@@ -537,6 +601,10 @@
     {
       "id": "ishikawa",
       "name": "石川県",
+      "position": [
+        419.2,
+        -284.8
+      ],
       "terrain": "hill",
       "population": 111.0,
       "capacity": {
@@ -567,6 +635,10 @@
     {
       "id": "fukui",
       "name": "福井県",
+      "position": [
+        398.7,
+        -314.4
+      ],
       "terrain": "plain",
       "population": 75.0,
       "capacity": {
@@ -601,6 +673,10 @@
     {
       "id": "yamanashi",
       "name": "山梨県",
+      "position": [
+        482.8,
+        -325.5
+      ],
       "terrain": "mountain",
       "population": 80.0,
       "capacity": {
@@ -639,6 +715,10 @@
     {
       "id": "nagano",
       "name": "長野県",
+      "position": [
+        489.6,
+        -289.9
+      ],
       "terrain": "mountain",
       "population": 202.0,
       "capacity": {
@@ -681,6 +761,10 @@
     {
       "id": "gifu",
       "name": "岐阜県",
+      "position": [
+        433.5,
+        -323.6
+      ],
       "terrain": "mountain",
       "population": 195.0,
       "capacity": {
@@ -727,6 +811,10 @@
     {
       "id": "shizuoka",
       "name": "静岡県",
+      "position": [
+        489.3,
+        -372.3
+      ],
       "terrain": "plain",
       "population": 360.0,
       "capacity": {
@@ -761,6 +849,10 @@
     {
       "id": "aichi",
       "name": "愛知県",
+      "position": [
+        456.0,
+        -354.1
+      ],
       "terrain": "urban",
       "population": 750.0,
       "capacity": {
@@ -791,6 +883,10 @@
     {
       "id": "mie",
       "name": "三重県",
+      "position": [
+        427.6,
+        -379.3
+      ],
       "terrain": "plain",
       "population": 172.0,
       "capacity": {
@@ -829,6 +925,10 @@
     {
       "id": "shiga",
       "name": "滋賀県",
+      "position": [
+        408.2,
+        -349.1
+      ],
       "terrain": "plain",
       "population": 141.0,
       "capacity": {
@@ -863,6 +963,10 @@
     {
       "id": "kyoto",
       "name": "京都府",
+      "position": [
+        373.4,
+        -339.9
+      ],
       "terrain": "urban",
       "population": 254.0,
       "capacity": {
@@ -901,6 +1005,10 @@
     {
       "id": "osaka",
       "name": "大阪府",
+      "position": [
+        382.4,
+        -378
+      ],
       "terrain": "urban",
       "population": 878.0,
       "capacity": {
@@ -935,6 +1043,10 @@
     {
       "id": "hyogo",
       "name": "兵庫県",
+      "position": [
+        346.1,
+        -363.8
+      ],
       "terrain": "urban",
       "population": 540.0,
       "capacity": {
@@ -974,6 +1086,10 @@
     {
       "id": "nara",
       "name": "奈良県",
+      "position": [
+        406.5,
+        -408.4
+      ],
       "terrain": "hill",
       "population": 130.0,
       "capacity": {
@@ -1008,6 +1124,10 @@
     {
       "id": "wakayama",
       "name": "和歌山県",
+      "position": [
+        371.2,
+        -415.1
+      ],
       "terrain": "hill",
       "population": 90.0,
       "capacity": {
@@ -1038,6 +1158,10 @@
     {
       "id": "tottori",
       "name": "鳥取県",
+      "position": [
+        332.3,
+        -330.2
+      ],
       "terrain": "hill",
       "population": 55.0,
       "capacity": {
@@ -1068,6 +1192,10 @@
     {
       "id": "shimane",
       "name": "島根県",
+      "position": [
+        279.7,
+        -339.8
+      ],
       "terrain": "hill",
       "population": 65.0,
       "capacity": {
@@ -1098,6 +1226,10 @@
     {
       "id": "okayama",
       "name": "岡山県",
+      "position": [
+        310.3,
+        -358.7
+      ],
       "terrain": "plain",
       "population": 186.0,
       "capacity": {
@@ -1133,6 +1265,10 @@
     {
       "id": "hiroshima",
       "name": "広島県",
+      "position": [
+        255.7,
+        -378.5
+      ],
       "terrain": "hill",
       "population": 278.0,
       "capacity": {
@@ -1168,6 +1304,10 @@
     {
       "id": "yamaguchi",
       "name": "山口県",
+      "position": [
+        221.3,
+        -391.5
+      ],
       "terrain": "hill",
       "population": 132.0,
       "capacity": {
@@ -1198,6 +1338,10 @@
     {
       "id": "tokushima",
       "name": "徳島県",
+      "position": [
+        338.9,
+        -399.3
+      ],
       "terrain": "hill",
       "population": 70.0,
       "capacity": {
@@ -1233,6 +1377,10 @@
     {
       "id": "kagawa",
       "name": "香川県",
+      "position": [
+        303.3,
+        -394
+      ],
       "terrain": "hill",
       "population": 93.0,
       "capacity": {
@@ -1264,6 +1412,10 @@
     {
       "id": "ehime",
       "name": "愛媛県",
+      "position": [
+        271.5,
+        -410.9
+      ],
       "terrain": "hill",
       "population": 130.0,
       "capacity": {
@@ -1299,6 +1451,10 @@
     {
       "id": "kochi",
       "name": "高知県",
+      "position": [
+        302.5,
+        -429.9
+      ],
       "terrain": "hill",
       "population": 68.0,
       "capacity": {
@@ -1325,6 +1481,10 @@
     {
       "id": "fukuoka",
       "name": "福岡県",
+      "position": [
+        187.5,
+        -403.7
+      ],
       "terrain": "urban",
       "population": 510.0,
       "capacity": {
@@ -1359,6 +1519,10 @@
     {
       "id": "saga",
       "name": "佐賀県",
+      "position": [
+        161.6,
+        -428.7
+      ],
       "terrain": "hill",
       "population": 80.0,
       "capacity": {
@@ -1385,6 +1549,10 @@
     {
       "id": "nagasaki",
       "name": "長崎県",
+      "position": [
+        150.3,
+        -462.9
+      ],
       "terrain": "hill",
       "population": 128.0,
       "capacity": {
@@ -1407,6 +1575,10 @@
     {
       "id": "kumamoto",
       "name": "熊本県",
+      "position": [
+        191.3,
+        -449.6
+      ],
       "terrain": "plain",
       "population": 171.0,
       "capacity": {
@@ -1441,6 +1613,10 @@
     {
       "id": "oita",
       "name": "大分県",
+      "position": [
+        224.4,
+        -430.4
+      ],
       "terrain": "plain",
       "population": 111.0,
       "capacity": {
@@ -1471,6 +1647,10 @@
     {
       "id": "miyazaki",
       "name": "宮崎県",
+      "position": [
+        216.8,
+        -483.6
+      ],
       "terrain": "plain",
       "population": 105.0,
       "capacity": {
@@ -1501,6 +1681,10 @@
     {
       "id": "kagoshima",
       "name": "鹿児島県",
+      "position": [
+        182.4,
+        -497.6
+      ],
       "terrain": "hill",
       "population": 155.0,
       "capacity": {
@@ -1532,6 +1716,10 @@
     {
       "id": "okinawa",
       "name": "沖縄県",
+      "position": [
+        67.2,
+        -711.6
+      ],
       "terrain": "hill",
       "population": 146.0,
       "capacity": {

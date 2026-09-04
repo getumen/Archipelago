@@ -1,0 +1,56 @@
+[package]
+name = "archipelago-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Stage 7A (docs/phase7-spec.md "Stage 7A — 観る"): the first Bevy client.
+# Bevy belongs to this crate alone - `crates/sim`/`crates/agents` never gain
+# it (docs/design.md §17: "Simulation Core は Bevy に依存しない").
+#
+# `default-features = false` plus this exact feature list is the
+# already-verified-buildable set for an X11-only, audio-less, gamepad-less
+# environment (docs/phase7-spec.md "ビルド構成"): `wayland` needs
+# `wayland-client` dev headers this machine doesn't have, and audio/gamepad
+# need `alsa`/`libudev` dev headers it doesn't have either.
+[dependencies.bevy]
+version = "0.19"
+default-features = false
+features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "bevy_ui",
+    "bevy_text",
+    "bevy_asset",
+    "x11",
+    "png",
+    "default_font",
+    "multi_threaded",
+    # Stage 7A build note (see this crate's own module doc / the final
+    # report handed back with this stage): docs/phase7-spec.md's feature
+    # list above compiles, but a Bevy 0.19 checkout with *only* those
+    # features has no render backend wired up for `Sprite`/`Text2d`/UI
+    # `Node` at all - `bevy_sprite`/`bevy_ui` are the data-only crates;
+    # the systems that actually draw them live behind the separate
+    # `bevy_sprite_render`/`bevy_ui_render` features, which the spec's list
+    # omits. Without them the window opens but stays blank - nothing in
+    # docs/phase7-spec.md's own "描画" section could ever be satisfied.
+    # Added here after confirming neither pulls in `wayland`/`alsa`/
+    # `libudev` (this build still needs no system package beyond X11's).
+    "bevy_sprite_render",
+    "bevy_ui_render",
+]
+
+[dependencies]
+archipelago-sim = { path = "../../crates/sim" }
+archipelago-agents = { path = "../../crates/agents" }
+
+[lib]
+name = "archipelago_game"
+path = "src/lib.rs"
+
+[[bin]]
+name = "archipelago-game"
+path = "src/main.rs"

@@ -222,6 +222,16 @@ pub struct RegionDef {
     pub infrastructure: f32,
     pub port: f32,
     pub links: Vec<LinkDef>,
+    /// Stage 7A (docs/phase7-spec.md "地域の座標"): where `apps/game` draws
+    /// this region on the map, `[x, y]` in an arbitrary client-side unit -
+    /// nothing in `crate::world`/`crate::sim` ever reads it. **Optional**,
+    /// deliberately: every scenario written before Stage 7A (and any hand-
+    /// written one a user supplies later) has no `position` field at all,
+    /// and must keep parsing exactly as before (`scenario_position_is_
+    /// optional`) - a scenario with no coordinates falls back to a
+    /// deterministic graph layout computed client-side (`apps/game::layout`),
+    /// never to a silently-guessed default here.
+    pub position: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -307,6 +317,29 @@ fn parse_capacity(v: &Value, path: &str) -> Result<[f32; GOOD_COUNT], ScenarioEr
     Ok(out)
 }
 
+/// Parses the optional `position` field (docs/phase7-spec.md "地域の座標":
+/// `{ "position": [x, y] }`). `None` if the field is absent entirely - the
+/// common case for every scenario predating Stage 7A. `Some(Err(_))` if it
+/// is present but malformed (not a 2-element array of finite numbers) -
+/// callers propagate that as a hard `ScenarioError::Schema`, never silently
+/// dropping a garbled coordinate to `None` (the same "never fall back to an
+/// implicit default on broken data" discipline this module's own doc names).
+fn parse_position(v: &Value, path: &str) -> Result<Option<[f32; 2]>, ScenarioError> {
+    let Some(value) = v.get("position") else {
+        return Ok(None);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    let arr = value.as_array().ok_or_else(|| schema_err(format!("`{path}.position` must be an array of 2 numbers")))?;
+    if arr.len() != 2 {
+        return Err(schema_err(format!("`{path}.position` must have exactly 2 elements, got {}", arr.len())));
+    }
+    let x = arr[0].as_f32().ok_or_else(|| schema_err(format!("`{path}.position[0]` must be a finite number")))?;
+    let y = arr[1].as_f32().ok_or_else(|| schema_err(format!("`{path}.position[1]` must be a finite number")))?;
+    Ok(Some([x, y]))
+}
+
 fn parse_link(v: &Value, path: &str) -> Result<LinkDef, ScenarioError> {
     let to = require_str(v, path, "to")?;
     let kind_key = require_str(v, path, "kind")?;
@@ -334,7 +367,8 @@ fn parse_region(v: &Value, path: &str) -> Result<RegionDef, ScenarioError> {
         .enumerate()
         .map(|(i, l)| parse_link(l, &format!("{links_path}[{i}]")))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(RegionDef { id, name, terrain, population, capacity, infrastructure, port, links })
+    let position = parse_position(v, path)?;
+    Ok(RegionDef { id, name, terrain, population, capacity, infrastructure, port, links, position })
 }
 
 fn parse_sea_zone(v: &Value, path: &str) -> Result<SeaZoneDef, ScenarioError> {
@@ -602,6 +636,7 @@ impl Scenario {
                 devastation: 0.0,
                 construction: None,
                 import_flow: 0.0,
+                position: def.position,
             })
             .collect();
 
@@ -727,7 +762,7 @@ impl Scenario {
                             })
                             .collect(),
                     );
-                    Value::obj(vec![
+                    let mut pairs = vec![
                         ("id", Value::str(r.id.clone())),
                         ("name", Value::str(r.name.clone())),
                         ("terrain", Value::str(r.terrain.key())),
@@ -736,7 +771,11 @@ impl Scenario {
                         ("infrastructure", Value::f32num(r.infrastructure)),
                         ("port", Value::f32num(r.port)),
                         ("links", links),
-                    ])
+                    ];
+                    if let Some([x, y]) = r.position {
+                        pairs.push(("position", Value::arr(vec![Value::f32num(x), Value::f32num(y)])));
+                    }
+                    Value::obj(pairs)
                 })
                 .collect(),
         );

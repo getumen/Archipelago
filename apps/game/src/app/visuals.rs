@@ -1,0 +1,154 @@
+//! Per-frame visual sync: region fill color (owner, mixed toward the
+//! occupier's color as `occupation` progresses - docs/phase7-spec.md "占領
+//! 進行中は所有者色と占領者色の混色にする"), sea zone tint (whichever
+//! faction currently holds the most `SeaZone::control`), and unit markers
+//! (position, visibility, color, plus spawning a marker for any unit
+//! created since the last frame - e.g. a fresh recruit).
+//!
+//! Every system here only *reads* `SimRes` - never writes it. This is what
+//! keeps rendering incapable of feeding anything back into the simulation
+//! (docs/phase7-spec.md §0's central invariant).
+
+use bevy::prelude::*;
+
+use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER};
+
+use super::palette::{faction_color, NEUTRAL};
+use super::setup::station_position;
+use super::{RegionLayout, RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, UnitMarker};
+
+pub(super) fn sync_region_visuals(
+    sim: Res<SimRes>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    query: Query<(&RegionMarker, &MeshMaterial2d<ColorMaterial>)>,
+) {
+    let world = sim.0.world();
+    for (marker, material_handle) in &query {
+        let region = world.region(marker.0);
+        let owner_color = faction_color(region.owner.index());
+        let color = match region.occupier {
+            Some(occupier) if region.occupation > 0.0 => {
+                let occupier_color = faction_color(occupier.index());
+                owner_color.mix(&occupier_color, region.occupation.clamp(0.0, 1.0))
+            }
+            _ => owner_color,
+        };
+        if let Some(mut mat) = materials.get_mut(&material_handle.0)
+            && mat.color != color
+        {
+            mat.color = color;
+        }
+    }
+}
+
+/// Sea-zone tint: the color of whichever faction currently holds the
+/// highest `SeaZone::control` share there, faded toward `NEUTRAL` by how
+/// contested it is (`1.0 - top_share` mixed in) - a zone with one faction at
+/// `control == 1.0` reads as fully that faction's color; a zone nobody
+/// controls (`control` all `0.0`) reads as plain neutral gray.
+pub(super) fn sync_sea_zone_visuals(
+    sim: Res<SimRes>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    query: Query<(&SeaZoneMarker, &MeshMaterial2d<ColorMaterial>)>,
+) {
+    let world = sim.0.world();
+    for (marker, material_handle) in &query {
+        let zone = world.sea_zone(marker.0);
+        let mut best: Option<(usize, f32)> = None;
+        for (f, &c) in zone.control.iter().enumerate() {
+            if best.is_none_or(|(_, best_c)| c > best_c) {
+                best = Some((f, c));
+            }
+        }
+        let base = match best {
+            Some((f, c)) if c > 0.0 => faction_color(f).mix(&NEUTRAL, 1.0 - c),
+            _ => NEUTRAL,
+        };
+        let color = base.with_alpha(0.18);
+        if let Some(mut mat) = materials.get_mut(&material_handle.0)
+            && mat.color != color
+        {
+            mat.color = color;
+        }
+    }
+}
+
+/// Small offset applied to each of a station's units so several markers at
+/// the same region/sea-zone don't fully overlap - a deterministic ring
+/// (ordered by `UnitId`, which is stable and never reordered) rather than
+/// anything randomized, so the same board always draws the same way.
+fn ring_offset(index: usize, count: usize, radius: f32) -> Vec2 {
+    if count <= 1 {
+        return Vec2::ZERO;
+    }
+    let angle = (index as f32 / count as f32) * std::f32::consts::TAU;
+    Vec2::new(angle.cos(), angle.sin()) * radius
+}
+
+pub(super) fn sync_unit_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    sim: Res<SimRes>,
+    layout: Res<RegionLayout>,
+    sea_centers: Res<SeaZoneCenters>,
+    mut existing: Query<(&UnitMarker, &mut Transform, &mut Visibility, &MeshMaterial2d<ColorMaterial>)>,
+) {
+    let world = sim.0.world();
+
+    let mut known = std::collections::HashSet::new();
+    for (marker, _, _, _) in &existing {
+        known.insert(marker.0.index());
+    }
+    for unit in &world.units {
+        if !known.contains(&unit.id.index()) {
+            commands.spawn((
+                Mesh2d(meshes.add(RegularPolygon::new(6.0, 3))),
+                MeshMaterial2d(materials.add(ColorMaterial::from_color(faction_color(unit.owner.index())))),
+                Transform::from_xyz(0.0, 0.0, 1.0),
+                Visibility::Hidden,
+                UnitMarker(unit.id),
+            ));
+        }
+    }
+
+    // Group alive units sharing a station so `ring_offset` can spread them
+    // out, ordered by `UnitId` for determinism.
+    let mut by_station: std::collections::BTreeMap<(u8, u32), Vec<archipelago_sim::ids::UnitId>> = std::collections::BTreeMap::new();
+    for unit in &world.units {
+        if !unit.alive {
+            continue;
+        }
+        let key = match unit.station {
+            archipelago_sim::world::Station::Region(r) => (0u8, r.0),
+            archipelago_sim::world::Station::Sea(z) => (1u8, z.0),
+        };
+        by_station.entry(key).or_default().push(unit.id);
+    }
+    let mut slot_of: std::collections::HashMap<u32, (usize, usize)> = std::collections::HashMap::new();
+    for units in by_station.values() {
+        let count = units.len();
+        for (slot, id) in units.iter().enumerate() {
+            slot_of.insert(id.0, (slot, count));
+        }
+    }
+
+    for (marker, mut transform, mut visibility, material_handle) in &mut existing {
+        let Some(unit) = world.units.iter().find(|u| u.id == marker.0) else { continue };
+        if !unit.alive {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        *visibility = Visibility::Visible;
+        let [cx, cy] = station_position(unit.station, &layout.0, &sea_centers.0);
+        let (slot, count) = slot_of.get(&marker.0.0).copied().unwrap_or((0, 1));
+        let offset = ring_offset(slot, count, 14.0);
+        transform.translation.x = cx + offset.x;
+        transform.translation.y = cy + offset.y;
+        let strength = ((unit.manpower / UNIT_MANPOWER) + (unit.equipment / UNIT_EQUIPMENT)) / 2.0;
+        transform.scale = Vec3::splat(strength.clamp(0.4, 1.3));
+        if let Some(mut mat) = materials.get_mut(&material_handle.0) {
+            mat.color = faction_color(unit.owner.index());
+        }
+    }
+}
