@@ -242,20 +242,28 @@ fn japan_hex_scenario_produces_a_real_war() {
 }
 
 // ---------------------------------------------------------------------
-// "No faction is permanently insolvent" - only asserted for `mvp`.
+// "No faction is permanently insolvent" - now asserted for `japan_hex` too.
 //
-// Measured directly (see this suite's development notes / this file's own
-// git history): on `japan_hex` seed 2, six of the eight factions spend
-// 479-615 of the run's 720 days sitting at zero munitions while alive -
-// this is CLAUDE.md's own documented, *not yet fixed* residual item
-// ("japan_hex の小国が軍需品を維持できない件", listed under 残件). Committing
-// an always-passing assertion for `japan_hex` here would mean picking a
-// tolerance loose enough to hide that real, tracked defect - exactly the
-// "a test that only fails when the game stops being a game" failure mode
-// this suite exists to avoid making worse. `mvp`'s own worst streak (127
-// days, one faction, while it stays alive the whole run) is comfortably
-// under the floor below, which is why `mvp` carries this property and
-// `japan_hex` does not, yet.
+// Originally measured (see this file's own git history): on `japan_hex`
+// seed 2, six of the eight factions spent 479-615 of the run's 720 days
+// sitting at zero munitions while alive - CLAUDE.md's own documented
+// residual item ("japan_hex の小国が軍需品を維持できない件", 残件). Traced
+// (not assumed - see `crates/agents/src/lib.rs`'s `disband_excess`/
+// `naval_recruit`/`CHRONIC_LOW_MUNITIONS_FLOOR` doc comments for the full
+// account) to `unit_cap`'s/`NAVY_MIN_FLEETS`'s own floors: a faction reduced
+// to a handful of regions can have a national Munitions *potential* below
+// what even one land unit or fleet's upkeep draws, and neither floor ever
+// let the AI shrink the force enough to relieve it - a one-way absorbing
+// state with no recovery path at all (docs/conventions.md §6). Fixed by
+// letting `disband_excess`/`disband_excess_naval` shed force from *within*
+// those floors once a faction's own `Faction::stock[Munitions]` (not the
+// flow-based `munitions_insolvent`, which can misread "solvent" while the
+// stock itself never leaves zero - see `CHRONIC_LOW_MUNITIONS_FLOOR`'s doc)
+// has sat at the insolvency floor for a sustained streak, and by closing the
+// matching hole in `recruit`/`naval_recruit` that would otherwise rebuild
+// the exact unit just shed. `mvp`'s own worst streak (127 days, one
+// faction, while it stays alive the whole run) stays comfortably under the
+// floor below.
 // ---------------------------------------------------------------------
 
 /// "Hundreds of consecutive days" (this task's own framing) starts well
@@ -265,17 +273,34 @@ fn japan_hex_scenario_produces_a_real_war() {
 /// tight enough to still catch a real absorbing state.
 const INSOLVENCY_STREAK_LIMIT_DAYS: u32 = 250;
 
-#[test]
-fn mvp_no_faction_is_permanently_insolvent() {
-    let t = run_trajectory(scenario::build_world(), 1, 720);
+fn assert_no_faction_is_permanently_insolvent(t: &Trajectory, scenario_label: &str) {
     for (idx, &streak) in t.max_insolvent_streak_days.iter().enumerate() {
         assert!(
             streak < INSOLVENCY_STREAK_LIMIT_DAYS,
-            "mvp seed 1: faction {idx} spent {streak} consecutive days alive with essentially zero munitions \
+            "{scenario_label}: faction {idx} spent {streak} consecutive days alive with essentially zero munitions \
              (limit {INSOLVENCY_STREAK_LIMIT_DAYS}) - this is the absorbing-state shape docs/conventions.md §6 warns \
              about (\"状態には必ず回復経路を持たせる\"): once a faction can't produce munitions it can't fight its \
              way back to being able to, ever"
         );
+    }
+}
+
+#[test]
+fn mvp_no_faction_is_permanently_insolvent() {
+    let t = run_trajectory(scenario::build_world(), 1, 720);
+    assert_no_faction_is_permanently_insolvent(&t, "mvp seed 1");
+}
+
+/// `japan_hex`-scale, so gated behind `#[ignore]` for runtime only (this
+/// suite's module doc) - covers seeds 1-3, the range this property was
+/// measured and fixed against.
+#[test]
+#[ignore]
+fn japan_hex_no_faction_is_permanently_insolvent() {
+    for seed in [1u64, 2, 3] {
+        let world = scenario::load_file("../../scenarios/japan_hex.json").expect("scenarios/japan_hex.json must load");
+        let t = run_trajectory(world, seed, 720);
+        assert_no_faction_is_permanently_insolvent(&t, &format!("japan_hex seed {seed}"));
     }
 }
 

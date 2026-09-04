@@ -91,6 +91,47 @@ const DISBAND_SOLVENCY_SUPPLY_RATIO: f32 = 0.5;
 /// failed to keep up - a faction with a week or more of stock in the bank
 /// is not insolvent no matter how bad this tick's delivery ratio looks.
 const DISBAND_SOLVENCY_BUFFER_DAYS: f32 = 7.0;
+/// Consecutive `HeuristicAgent::decide_for_llm` calls (this agent's own,
+/// `period`-days apart - `HeuristicAgent::with_peace_disposition`'s
+/// `PERIOD` == 4, so this is roughly 60 days) `Faction::stock[Munitions]`
+/// must sit at or under `CHRONIC_LOW_MUNITIONS_FLOOR` in a row before
+/// `disband_excess` will shed a unit from *within* `unit_cap`'s own floor,
+/// rather than only when the head count already clears `cap`. A single low
+/// tick is not enough on its own - a faction ramping up early in a war, or
+/// shrugging off a border skirmish, dips through zero for a tick or two as
+/// a matter of course, and trimming a real fighting unit over that is worse
+/// than the zero-Munitions streak it would prevent. Checked this matters:
+/// without this gate (trimming on the very first low tick), `mvp` seed 1's
+/// own early-game dip started disbanding units it would otherwise have
+/// kept, which cost it the war it currently wins outright (`Outcome::
+/// Victory` regresses to `Stalemate`) and made its own worst insolvency
+/// streak *worse* (534 days, up from 127) - fewer units meant less
+/// territory meant less industry meant a deeper hole, the opposite of what
+/// this fix is for. 15 ticks is comfortably past `mvp`'s own early
+/// fluctuations (its worst streak recovers on its own well inside that
+/// window) while still small next to `INSOLVENCY_STREAK_LIMIT_DAYS`'s
+/// 250-day bar - the case this exists for on `scenarios/japan_hex.json`
+/// (400+ day permanent streaks) blows past this threshold in the first
+/// couple of weeks and starts shrinking almost immediately.
+const CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM: u32 = 15;
+/// Mirrors `apps/headless/tests/scenario_acceptance.rs`'s own
+/// `MUNITIONS_INSOLVENT_FLOOR` (`<= 0.01` rather than `== 0.0`, so float
+/// noise from a tick that nets out to a hair above zero doesn't reset a
+/// real streak): the same "the stockpile has not meaningfully recovered"
+/// reading that suite measures directly off `Faction::stock[Munitions]`,
+/// used here instead of `munitions_insolvent`'s `supply_ratio` term for
+/// gauging whether `unit_cap`'s floor is chronically unaffordable.
+/// `supply_ratio` is a *delivered/demanded flow* ratio, not a stock level -
+/// measured on `scenarios/japan_hex.json` seed 2's 四国連合: a single unit's
+/// upkeep is covered ~53% by that tick's own trickle of production, so
+/// `supply_ratio` sits comfortably above `DISBAND_SOLVENCY_SUPPLY_RATIO`
+/// (0.5) and `munitions_insolvent` reads `false`, even though
+/// `logistics::distribute_supply` drains that same tick's production
+/// straight back out (it always serves demand up to whatever's in stock,
+/// every tick) and `Faction::stock[Munitions]` itself never once leaves
+/// zero. A flow ratio above 0.5 does not mean the stockpile is recovering;
+/// only the stock itself can say that.
+const CHRONIC_LOW_MUNITIONS_FLOOR: f32 = 0.01;
 /// `civilian_ration` used when Munitions/Arms are critically short and
 /// stability can still absorb it (design.md §9's civilian/war trade-off):
 /// squeeze civilian Food/Energy/Machinery delivery down to this fraction to
@@ -921,6 +962,17 @@ pub struct HeuristicAgent {
     /// `choose_opening_focus`'s doc for how that same ambiguity is avoided
     /// for the *other* factions' choices instead.
     focus_initialized: bool,
+    /// Consecutive `decide_for_llm` calls (this agent's own, `period`-days
+    /// apart) in a row where `Faction::stock[Munitions]` has read at or
+    /// under `CHRONIC_LOW_MUNITIONS_FLOOR` - `disband_excess`'s own doc
+    /// explains why a single low tick isn't enough to shed a unit from
+    /// *within* `unit_cap`'s floor, and `CHRONIC_LOW_MUNITIONS_FLOOR`'s doc
+    /// explains why this reads the stock directly rather than
+    /// `munitions_insolvent`. Reset to `0` the moment a call reads the stock
+    /// above that floor, so a faction that recovers even briefly has to
+    /// build the streak back up from scratch rather than carrying a stale
+    /// near-threshold count into its next rough patch.
+    chronic_insolvency_ticks: u32,
 }
 
 /// Default per-faction caution spread (mvp-spec.md §7 suggests this
@@ -1060,6 +1112,7 @@ impl HeuristicAgent {
             period: PERIOD,
             offset: faction.0 % PERIOD,
             focus_initialized: false,
+            chronic_insolvency_ticks: 0,
         }
     }
 
@@ -1105,9 +1158,17 @@ impl HeuristicAgent {
         }
 
         reinforce(self.faction, obs, &mut actions);
-        recruit(self.faction, obs, &mut actions);
-        disband_excess(self.faction, obs, &mut actions);
-        naval_recruit(self.faction, obs, &mut actions);
+        self.chronic_insolvency_ticks = if obs.world.faction(self.faction).stock[Good::Munitions.index()]
+            <= CHRONIC_LOW_MUNITIONS_FLOOR
+        {
+            self.chronic_insolvency_ticks.saturating_add(1)
+        } else {
+            0
+        };
+        recruit(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
+        disband_excess(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
+        naval_recruit(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
+        disband_excess_naval(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         build(self.faction, obs, &mut actions);
 
         // Stage 3A AI (docs/phase3-spec.md: "stability が REGIME_CHANGE_THRESHOLD
@@ -1493,7 +1554,7 @@ fn reinforce(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 /// Raises a new corps at the capital, or failing that the safest, most
 /// industrious region held, as long as the faction can afford it and isn't
 /// already well-manned relative to its industrial base.
-fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+fn recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let cap = unit_cap(faction, obs);
     if own_unit_count(obs, Domain::Land) as f32 >= cap {
@@ -1509,6 +1570,21 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     // to feed, and must not immediately rebuild whatever `disband_excess`
     // last cut for exactly that reason.
     if munitions_insolvent(faction, obs) {
+        return;
+    }
+    // Same chronic-stock gate `disband_excess` uses for its own within-`cap`
+    // trim (`CHRONIC_LOW_MUNITIONS_FLOOR`'s doc): `munitions_insolvent`
+    // alone isn't enough here, because it can read "solvent" purely from
+    // `supply_ratio` while the stock itself has been stuck at the floor for
+    // as long as `disband_excess` has been actively cutting - without this,
+    // measured on `scenarios/japan_hex.json` seed 2's 四国連合: this
+    // function rebuilt, in the very same tick, exactly the unit
+    // `disband_excess` had just cut for chronic insolvency (`supply_ratio`
+    // for one unit alone sat at ~0.53-0.58, above `DISBAND_SOLVENCY_
+    // SUPPLY_RATIO`), forever netting to zero change and permanently
+    // pinning `Faction::stock[Munitions]` at zero - the same one-way
+    // absorbing state, just re-entered every single tick instead of once.
+    if chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM {
         return;
     }
 
@@ -1603,15 +1679,43 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 /// This is what keeps the war on japan_hex from going quiet: a faction
 /// actively fighting for territory it can't yet feed only ever loses its
 /// *weakest* rear units down to what its economy can carry, never units
-/// engaged at the front, and `unit_cap`'s own `3.0` floor means it is never
-/// talked down toward zero - only back to a size it can actually sustain,
-/// which is a faction able to keep fighting, not one disarmed into
-/// irrelevance.
+/// engaged at the front.
+///
+/// `unit_cap`'s own `3.0` floor was originally meant to stop this from
+/// talking a faction down toward zero at all - "a faction able to keep
+/// fighting, not one disarmed into irrelevance". Measured false on
+/// `scenarios/japan_hex.json`: a handful of factions reduced to a few
+/// regions have a national Munitions *potential*
+/// (`economy::tick_economy`'s `pot[Munitions]` - capacity-bounded, set by
+/// how much Munitions-producing land they still hold, not by any input
+/// budget - no amount of spare Steel/Energy share can raise it) below what
+/// even a single unit's upkeep draws. `total` then never clears `cap`, so
+/// the trim above never fires, and the floor that was meant to guarantee a
+/// fighting force instead pins the faction into exactly the one-way
+/// absorbing state docs/conventions.md §6 warns against - just expressed as
+/// permanent zero Munitions instead of a ballooning head count, and with no
+/// recovery path at all: `recruit`'s own `munitions_insolvent` gate already
+/// stops it from making the shortfall worse, but nothing before this ever
+/// made it better. Once the stockpile itself is genuinely, *persistently*
+/// stuck at the floor even inside `cap` (`chronic_insolvency_ticks` past
+/// `CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM` - tracked off
+/// `Faction::stock[Munitions]` directly, not `munitions_insolvent`; see
+/// `CHRONIC_LOW_MUNITIONS_FLOOR`'s doc for why `supply_ratio` can't be
+/// trusted for this specific read, and the ticks constant's own doc for why
+/// a single low tick must not be enough here), this now sheds one more unit
+/// anyway - gradual (one at a time, not a wipeout), since `decide` reruns
+/// this every time the agent acts, so the force keeps shrinking - possibly
+/// to zero land units, for a faction whose production can't cover even one
+/// - until demand finally clears whatever production is left, whatever
+/// size `cap`'s floor claimed should have been enough. The same
+/// `recruit`/`munitions_insolvent` hysteresis that already stops the
+/// over-cap case above from oscillating stops this from immediately
+/// rebuilding what it just shed.
 ///
 /// Land-only, mirroring `unit_cap`/`recruit`'s own land-only scope - fleets
 /// are sized by `NAVY_MIN_FLEETS` instead, a different mechanism this fix
 /// deliberately leaves untouched.
-fn disband_excess(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+fn disband_excess(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
     let cap = unit_cap(faction, obs);
     let land_units: Vec<UnitId> = obs
         .own_units()
@@ -1619,11 +1723,48 @@ fn disband_excess(faction: FactionId, obs: &Observation, actions: &mut Vec<Actio
         .filter(|&u| obs.world.unit(u).station.domain() == Domain::Land)
         .collect();
     let total = land_units.len() as f32;
-    if total <= cap || !munitions_insolvent(faction, obs) {
+    if total <= 0.0 {
         return;
     }
 
-    let excess = (total - cap).round().max(0.0) as usize;
+    // Trim toward `cap` in one pass when a head count clearing it is the
+    // overshoot (the original shape this fix covers - territory/industry
+    // lost after the army was raised for a bigger economy) *and*
+    // `munitions_insolvent` agrees the economy genuinely can't keep up
+    // (that function's own doc: the two-signal check that tells a real
+    // shortfall apart from a merely cut-off front). Once already at or
+    // under `cap`, that same two-signal check is the wrong instrument -
+    // `CHRONIC_LOW_MUNITIONS_FLOOR`'s doc has the measured case where
+    // `supply_ratio` alone reads "fine" forever while the stock itself
+    // never leaves zero - so this instead reads `Faction::stock[Munitions]`
+    // directly, over a streak long enough to rule out routine noise
+    // (`CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM`'s doc): only once that
+    // streak has run long enough to call it chronic does the floor itself
+    // count as unaffordable, and even then only one unit is shed per call,
+    // leaving the next tick's fresh read to decide whether another cut is
+    // still warranted.
+    //
+    // The two branches are combined with `max`, not `if`/`else if`: a
+    // faction sitting a fraction of a unit above `cap` (e.g. `total == 5`,
+    // `cap == 4.9`) rounds `total - cap` down to `0`, so the over-cap branch
+    // alone can compute "nothing to trim" even while `munitions_insolvent`
+    // reads true - which used to suppress the chronic branch entirely
+    // whenever it happened to share the same `if` (an `else if` never runs
+    // once the first arm's condition is true, regardless of what it
+    // actually computed). Measured on `scenarios/japan_hex.json` seed 2's
+    // 近畿府: exactly this rounding zeroed the over-cap branch every tick for
+    // 250+ consecutive days while genuinely chronic, because `total` sat a
+    // hair above `cap` the whole time.
+    let over_cap_excess = if total > cap && munitions_insolvent(faction, obs) {
+        (total - cap).round().max(0.0) as usize
+    } else {
+        0
+    };
+    let chronic_excess = if chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM { 1 } else { 0 };
+    let excess = over_cap_excess.max(chronic_excess);
+    if excess == 0 {
+        return;
+    }
 
     let mut eligible: Vec<UnitId> =
         land_units.into_iter().filter(|&u| !unit_contested(obs.world, obs.world.unit(u), faction)).collect();
@@ -1700,7 +1841,18 @@ fn port_zones(faction: FactionId, obs: &Observation, own: bool) -> BTreeSet<SeaZ
 /// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, point 1):
 /// keeps at least `NAVY_MIN_FLEETS` fleets in being, built at the faction's
 /// best safe port, the same affordability gate `recruit` uses for land units.
-fn naval_recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+///
+/// `chronic_insolvency_ticks` gate: the same one `recruit` now carries (see
+/// that function's own doc) - without it, this rebuilds, in the same tick,
+/// exactly the fleet `disband_excess_naval` just cut for chronic
+/// insolvency, since `NAVY_MIN_FLEETS` is a flat constant with no
+/// industry-derived cap of its own to fall below in the first place, unlike
+/// land's `unit_cap`. Measured on `scenarios/japan_hex.json` seed 2's
+/// 中部同盟: once every land unit was gone, its last fleet(s) alone kept
+/// national Munitions demand just above zero forever, pinning
+/// `Faction::stock[Munitions]` at zero for 400+ consecutive days even
+/// though the faction held territory and was otherwise functioning.
+fn naval_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     if own_unit_count(obs, Domain::Sea) as f32 >= NAVY_MIN_FLEETS {
         return;
@@ -1710,8 +1862,81 @@ fn naval_recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action
     {
         return;
     }
+    // Only blocks once `disband_excess_naval` would actually be cutting
+    // (that function's own doc: gated on the land force already being
+    // gone) - otherwise this would refuse to rebuild toward
+    // `NAVY_MIN_FLEETS` during an ordinary early-game dip that never
+    // touches an existing fleet at all, for no benefit.
+    if own_unit_count(obs, Domain::Land) == 0
+        && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM
+    {
+        return;
+    }
     if let Some(region) = best_own_port_region(faction, obs) {
         actions.push(Action::RecruitUnit { region, domain: Domain::Sea });
+    }
+}
+
+/// The sea-domain mirror of `disband_excess` - see that function's own doc
+/// for the full account of why a chronically-unaffordable floor needs a
+/// shrink path at all. `NAVY_MIN_FLEETS` is already a flat constant (unlike
+/// `unit_cap`, it never falls with lost territory), so in practice fleet
+/// count never exceeds it under normal play and only the within-floor,
+/// chronic-stock branch ever fires here - the over-floor branch is kept
+/// anyway so this reads the same way `disband_excess` does and stays
+/// correct if that ever changes.
+fn disband_excess_naval(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
+    let sea_units: Vec<UnitId> = obs
+        .own_units()
+        .into_iter()
+        .filter(|&u| obs.world.unit(u).station.domain() == Domain::Sea)
+        .collect();
+    let total = sea_units.len() as f32;
+    if total <= 0.0 {
+        return;
+    }
+
+    // The within-floor branch only kicks in once the land force is already
+    // gone (`own_unit_count(.., Domain::Land) == 0`) - land units are more
+    // numerous and cheaper to raise back, so `disband_excess`'s own chronic
+    // trim gets first claim on relieving the economy; only once that's
+    // exhausted its own headroom is a fleet - a proportionally much bigger
+    // cut, at `NAVY_MIN_FLEETS` == 2 - fair game. Checked this matters:
+    // without it, `mvp` seed 1's own early-game dip (well inside land's
+    // 15-tick chronic window, so `disband_excess` itself never trims
+    // anything there) still cost a fleet the moment this branch fired
+    // unconditionally, which regressed `mvp` from `Outcome::Victory` to
+    // `Outcome::Stalemate` - the same class of over-eager trim
+    // `CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM`'s own doc already measured
+    // once for land, just proportionally worse here since one fleet is half
+    // of `mvp`'s entire navy.
+    // Combined with `max`, not `if`/`else if` - see `disband_excess`'s own
+    // doc for why an `else if` here can silently swallow a genuinely
+    // chronic case whenever `total` sits a fraction of a fleet above
+    // `NAVY_MIN_FLEETS`.
+    let land_is_gone = own_unit_count(obs, Domain::Land) == 0;
+    let over_cap_excess = if total > NAVY_MIN_FLEETS && munitions_insolvent(faction, obs) {
+        (total - NAVY_MIN_FLEETS).round().max(0.0) as usize
+    } else {
+        0
+    };
+    let chronic_excess =
+        if land_is_gone && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM { 1 } else { 0 };
+    let excess = over_cap_excess.max(chronic_excess);
+    if excess == 0 {
+        return;
+    }
+
+    let mut eligible: Vec<UnitId> =
+        sea_units.into_iter().filter(|&u| !unit_contested(obs.world, obs.world.unit(u), faction)).collect();
+    eligible.sort_by(|&a, &b| {
+        let power_a = obs.world.unit(a).combat_power();
+        let power_b = obs.world.unit(b).combat_power();
+        power_a.partial_cmp(&power_b).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+    });
+
+    for &unit in eligible.iter().take(excess) {
+        actions.push(Action::DisbandUnit { unit });
     }
 }
 
