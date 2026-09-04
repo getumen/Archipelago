@@ -10,10 +10,12 @@ use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::{LinkKind, Station};
 
 use super::fonts::AppFont;
+use super::overlay;
 use super::palette::faction_color;
 use super::{
     EventLogText, FactionPanelText, InspectText, MainCamera, PlayerPanelText, RegionLayout,
-    RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
+    RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, SupplyOnlyLegendRow, TopBarText,
+    UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -65,10 +67,58 @@ fn label_shadow() -> Text2dShadow {
 /// Sea zones are drawn behind (`z` below) every region/link/unit.
 const Z_SEA_ZONE: f32 = -10.0;
 const Z_SEA_ZONE_LABEL: f32 = -9.5;
-const Z_LINK: f32 = -1.0;
+pub(super) const Z_LINK: f32 = -1.0;
+/// Where `overlay::sync_supply_overlay` raises a chokepoint/active-route
+/// link segment to while the overlay is on - above every region's own fill
+/// (`Z_REGION`) so a short link between two adjacent, densely-packed
+/// regions (common on `japan47`) isn't hidden under their circles, but
+/// below `Z_REGION_LABEL` so it never covers a name.
+pub(super) const Z_LINK_HIGHLIGHT: f32 = 0.25;
+/// Where a saturated chokepoint link renders - above `Z_LINK_HIGHLIGHT`
+/// (so it always wins over an ordinary active route it happens to cross or
+/// sit beside) but still below `Z_REGION_LABEL`. See `overlay`'s own module
+/// doc for why a chokepoint is deliberately the single most visually
+/// dominant mark this overlay ever draws.
+pub(super) const Z_LINK_CHOKEPOINT: f32 = 0.35;
 const Z_REGION: f32 = 0.0;
+/// Stage 7C's supply-overlay ring (`overlay::sync_supply_overlay`) - just
+/// above the region's own fill, below its label and any construction
+/// marker, so it always reads as "around this region" rather than
+/// competing with either.
+const Z_SUPPLY_RING: f32 = 0.2;
+/// Stage 7C's in-progress-construction marker (`overlay::sync_construction_markers`).
+const Z_CONSTRUCTION: f32 = 0.3;
+/// Stage 7C follow-up: a saturated-chokepoint marker at a same-owner link's
+/// midpoint (`overlay`'s own module doc has the whole rationale) - above
+/// `Z_LINK_CHOKEPOINT` so it always wins over the link segment it sits on,
+/// still below `Z_REGION_LABEL`.
+const Z_CHOKEPOINT_MARKER: f32 = 0.4;
 const Z_REGION_LABEL: f32 = 0.5;
 const Z_UNIT: f32 = 1.0;
+
+/// A chokepoint marker's own local mesh size (world units at `Transform::
+/// scale == 1`). `overlay::sync_supply_overlay` rescales this every frame
+/// to `Vec3::splat(camera_zoom)` (the orthographic projection's current
+/// `scale`), which exactly cancels that same `scale` in Bevy's world-to-
+/// screen conversion - so the marker always renders at this many *screen*
+/// pixels regardless of how far the camera is zoomed in or out, or how
+/// long or short the underlying link is. That's the whole point: a
+/// saturated strait/tunnel segment must be as findable at the default
+/// whole-map fitted view as a saturated rail line, and a link-thickness
+/// scale alone (`overlay::CHOKEPOINT_SCALE`) can't guarantee that - a link
+/// only a few world units long shrinks to sub-pixel at map-fit zoom no
+/// matter how many times its own thickness is multiplied.
+pub(super) const CHOKEPOINT_MARKER_RADIUS: f32 = 6.0;
+
+/// Supply-ring thickness (world units) - the annulus `overlay::sync_supply_overlay`
+/// recolors every frame while the overlay is on.
+const SUPPLY_RING_THICKNESS: f32 = 4.0;
+const SUPPLY_RING_GAP: f32 = 2.0;
+
+/// In-progress-construction marker radius and offset from the region's own
+/// circle - small and off to one side so it never obscures the region's
+/// owner-color fill or its supply ring.
+const CONSTRUCTION_MARKER_RADIUS: f32 = 5.0;
 
 pub(super) fn region_radius(population: f32) -> f32 {
     (population.max(0.0).sqrt() * POP_SCALE).clamp(MIN_REGION_RADIUS, MAX_REGION_RADIUS)
@@ -150,6 +200,23 @@ pub(super) fn setup(
                 continue;
             }
             spawn_link(&mut commands, &mut meshes, &mut materials, &layout.0, region.id, link.to, link.kind);
+
+            // Stage 7C follow-up's chokepoint marker (`CHOKEPOINT_MARKER_RADIUS`'s
+            // own doc): one per link pair, at the link's midpoint, pre-spawned
+            // hidden and shown/rescaled every frame by
+            // `overlay::sync_supply_overlay` exactly like `SupplyRingMarker`/
+            // `ConstructionMarker` above - never spawned/despawned at runtime,
+            // since the link graph itself never changes, only which links are
+            // *currently* saturated.
+            let [x1, y1] = layout.0[region.id.index()];
+            let [x2, y2] = layout.0[link.to.index()];
+            commands.spawn((
+                Mesh2d(meshes.add(RegularPolygon::new(CHOKEPOINT_MARKER_RADIUS, 4))),
+                MeshMaterial2d(materials.add(ColorMaterial::from_color(overlay::COLOR_CHOKEPOINT))),
+                Transform::from_xyz((x1 + x2) / 2.0, (y1 + y2) / 2.0, Z_CHOKEPOINT_MARKER),
+                Visibility::Hidden,
+                super::ChokepointMarker { a: region.id, b: link.to },
+            ));
         }
     }
 
@@ -170,6 +237,31 @@ pub(super) fn setup(
             Transform::from_xyz(x, y, Z_REGION),
             RegionMarker(region.id),
         ));
+
+        // Stage 7C's supply-network overlay ring (docs/phase7-spec.md "1."):
+        // pre-spawned hidden (`Visibility::Hidden`), toggled visible and
+        // recolored every frame by `overlay::sync_supply_overlay` while `L`
+        // has the overlay on.
+        commands.spawn((
+            Mesh2d(meshes.add(Annulus::new(radius + SUPPLY_RING_GAP, radius + SUPPLY_RING_GAP + SUPPLY_RING_THICKNESS))),
+            MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::NONE))),
+            Transform::from_xyz(x, y, Z_SUPPLY_RING),
+            Visibility::Hidden,
+            super::SupplyRingMarker(region.id),
+        ));
+
+        // Stage 7C's in-progress-construction marker (docs/phase7-spec.md
+        // "3."): pre-spawned hidden, shown (and its fill alpha driven by
+        // progress) only while `Region::construction.is_some()` -
+        // `overlay::sync_construction_markers`.
+        commands.spawn((
+            Mesh2d(meshes.add(Circle::new(CONSTRUCTION_MARKER_RADIUS))),
+            MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::NONE))),
+            Transform::from_xyz(x + radius * 0.7, y + radius * 0.7, Z_CONSTRUCTION),
+            Visibility::Hidden,
+            super::ConstructionMarker(region.id),
+        ));
+
         let [dx, dy] = region_label_dirs[region.id.index()];
         let label_pos = Vec2::new(x, y) + Vec2::new(dx, dy) * (radius + LABEL_MARGIN);
         // The anchor sits on the side of the label facing the region (so
@@ -213,7 +305,7 @@ pub(super) fn station_position(station: Station, region_pos: &[[f32; 2]], sea_po
     }
 }
 
-fn link_style(kind: LinkKind) -> (f32, Color, bool) {
+pub(super) fn link_style(kind: LinkKind) -> (f32, Color, bool) {
     // (thickness, color, dashed)
     match kind {
         LinkKind::Rail => (5.0, Color::srgb(0.85, 0.85, 0.88), false),
@@ -254,6 +346,7 @@ fn spawn_link(
             Mesh2d(mesh),
             MeshMaterial2d(material),
             Transform::from_xyz((x1 + x2) / 2.0, (y1 + y2) / 2.0, Z_LINK).with_rotation(Quat::from_rotation_z(angle)),
+            super::LinkVisualMarker { a: from, b: to, kind },
         ));
         return;
     }
@@ -261,7 +354,10 @@ fn spawn_link(
     // Dashed link kinds (tunnel/strait): several short segments along the
     // same line, so they read as visually distinct from a solid rail/road
     // link at a glance (docs/phase7-spec.md "リンク: ... 種別で見分けられる
-    // こと").
+    // こと"). Every segment shares one `Handle<ColorMaterial>` (`material.
+    // clone()` clones the handle, not the asset), so `overlay::sync_supply_
+    // overlay` recoloring any one segment's material recolors all of them
+    // in one write.
     const DASH_COUNT: usize = 7;
     let mesh = meshes.add(Rectangle::new((length / DASH_COUNT as f32) * 0.55, thickness));
     for i in 0..DASH_COUNT {
@@ -272,6 +368,7 @@ fn spawn_link(
             Mesh2d(mesh.clone()),
             MeshMaterial2d(material.clone()),
             Transform::from_xyz(x, y, Z_LINK).with_rotation(Quat::from_rotation_z(angle)),
+            super::LinkVisualMarker { a: from, b: to, kind },
         ));
     }
 }
@@ -357,4 +454,69 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
         TextColor(Color::srgb(1.0, 0.82, 0.45)),
         PlayerPanelText,
     ));
+
+    // Center panel: Stage 7C's newspaper (`N` to toggle) -
+    // `ui::update_newspaper_panel`. Empty text whenever the panel is closed
+    // or no issue has been published yet - never a placeholder.
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(90.0),
+            left: Val::Px(340.0),
+            width: Val::Px(600.0),
+            ..default()
+        },
+        Text::new(String::new()),
+        text_font(14.0, font),
+        TextColor(Color::srgb(0.95, 0.93, 0.85)),
+        super::NewspaperPanelText,
+    ));
+
+    spawn_legend(commands, font);
+}
+
+/// A small, always-present key to every mark Stage 7C's overlays can put on
+/// the map (`overlay`'s own module doc has the full visual-hierarchy
+/// rationale) - so a viewer never has to read this crate's source to know
+/// what a color means. Two groups: two rows that read on their own
+/// (blockade/construction, both always-on features), and the supply-
+/// overlay-specific rows, shown only while `SupplyOverlay` (`L`) is on -
+/// `overlay::sync_legend_visibility` toggles those together with the
+/// overlay itself. Sits in the one gap the rest of this crate's UI layout
+/// leaves free at the bottom of the window, between the event log
+/// (`left: 10, width: 760`, ending at `770`) and the player panel
+/// (`right: 10, width: 320`, starting at `950`).
+fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
+    let label_color = Color::srgba(0.85, 0.87, 0.90, 0.95);
+    let header_color = Color::srgba(0.6, 0.63, 0.67, 0.9);
+
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(6.0),
+            left: Val::Px(775.0),
+            width: Val::Px(170.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(1.0),
+            ..default()
+        })
+        .with_children(|parent| {
+            let mut row = |label: &str, color: Color, supply_only: bool| {
+                let mut e = parent.spawn((Text::new(label.to_string()), text_font(10.0, font), TextColor(color)));
+                if supply_only {
+                    e.insert((Visibility::Hidden, SupplyOnlyLegendRow));
+                }
+            };
+
+            row("legend", label_color, false);
+            row("■ port blockaded", overlay::BLOCKADE_MARKER_COLOR, false);
+            row("■ under construction", overlay::CONSTRUCTION_TINT, false);
+            row("supply overlay (L):", header_color, true);
+            row("■ chokepoint (saturated)", overlay::COLOR_CHOKEPOINT, true);
+            row("■ active supply route", overlay::COLOR_ACTIVE_ROUTE, true);
+            row("■ relay route (spare capacity)", overlay::COLOR_RELAY_FULL, true);
+            row("● ring: region starved", overlay::RING_STARVED, true);
+            row("● ring: region full", overlay::RING_FULL, true);
+            row("● ring: contested", overlay::RING_CONTESTED, true);
+        });
 }

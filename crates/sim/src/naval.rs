@@ -306,6 +306,37 @@ pub fn apply_fleet_supply(
 /// same "a unit that moved since the last `distribute_supply` pass can't be
 /// trusted to reinforce off a stale cached ratio" fix, for a fleet that has
 /// moved to a different zone since the tick's supply pass ran.
+/// A blockaded port and the sea zone(s) actually responsible for it - Stage
+/// 7C (docs/phase7-spec.md "2. 制海権と封鎖": "どの海域の制海権が原因かを
+/// 結ぶ"). `causes` reuses the exact same per-zone threshold check
+/// `is_port_blockaded` itself folds together with `.any()`, so this can
+/// never disagree with it about *whether* a port is blockaded - only add
+/// the "which zone(s)" detail on top.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PortBlockade {
+    pub region: RegionId,
+    pub causes: Vec<SeaZoneId>,
+}
+
+/// Every currently-blockaded port, in ascending `RegionId` order (fixed
+/// iteration order for determinism, though this is read-only display data
+/// that never touches `World`).
+pub fn blockaded_ports(world: &World) -> Vec<PortBlockade> {
+    world
+        .regions
+        .iter()
+        .filter(|r| is_port_blockaded(world, r.id))
+        .map(|r| {
+            let causes = world
+                .zones_touching(r.id)
+                .into_iter()
+                .filter(|&z| world.hostile_control_max(z, r.owner) >= BLOCKADE_CONTROL_THRESHOLD)
+                .collect();
+            PortBlockade { region: r.id, causes }
+        })
+        .collect()
+}
+
 pub fn instantaneous_fleet_arms_delivery(world: &World, unit_id: UnitId) -> (f32, f32) {
     let unit = world.unit(unit_id);
     let need_equipment = (UNIT_EQUIPMENT - unit.equipment).max(0.0);

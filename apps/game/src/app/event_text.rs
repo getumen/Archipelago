@@ -14,8 +14,9 @@
 //! own `EventLog` doesn't need the console-only helpers (`print_faction_
 //! table`, `print_final_board`, ...) that make up the rest of that file.
 
-use archipelago_sim::diplomacy::Treaty;
+use archipelago_sim::diplomacy::{Treaty, TreatyTerm};
 use archipelago_sim::event::Event;
+use archipelago_sim::good::Good;
 use archipelago_sim::world::{Station, World};
 
 fn treaty_label(treaty: Treaty) -> &'static str {
@@ -27,6 +28,39 @@ fn treaty_label(treaty: Treaty) -> &'static str {
         Treaty::PortAccess => "港湾利用権",
         Treaty::TradeAgreement => "通商協定",
     }
+}
+
+fn good_label(good: Good) -> &'static str {
+    match good {
+        Good::Food => "食料",
+        Good::Energy => "燃料",
+        Good::Steel => "鋼材",
+        Good::Machinery => "機械",
+        Good::Munitions => "弾薬",
+        Good::Arms => "兵器",
+    }
+}
+
+/// One `TreatyTerm`, in Japanese - the natural-language diplomacy panel's
+/// (`ui::update_player_panel`) and the event log's shared rendering of
+/// "解釈された TreatyTerm" (docs/phase7-spec.md "4. 外交画面"). Never invents
+/// a term the recipient's agent didn't actually decide on - callers only
+/// ever pass through what `Event::NaturalLanguage{Accepted,Rejected,
+/// TermsInvalid}::terms` actually carries.
+pub(super) fn treaty_term_ja(world: &World, term: TreatyTerm) -> String {
+    match term {
+        TreatyTerm::Sign(treaty) => format!("{}を締結", treaty_label(treaty)),
+        TreatyTerm::Withdraw { from } => format!("{} から撤退", world.region(from).name),
+        TreatyTerm::Cede { region } => format!("{} を割譲", world.region(region).name),
+        TreatyTerm::Deliver { good, amount } => format!("{} を{:.0}引き渡し", good_label(good), amount),
+    }
+}
+
+fn terms_ja(world: &World, terms: &[TreatyTerm]) -> String {
+    if terms.is_empty() {
+        return "(条件なし)".to_string();
+    }
+    terms.iter().map(|&t| treaty_term_ja(world, t)).collect::<Vec<_>>().join(" / ")
 }
 
 pub(super) fn format_event(world: &World, event: &Event) -> String {
@@ -80,16 +114,23 @@ pub(super) fn format_event(world: &World, event: &Event) -> String {
         Event::NaturalLanguageProposed { from, to, text } => {
             format!("自然言語外交: {} が {} に提案 「{}」", world.faction(*from).name, world.faction(*to).name, text)
         }
-        Event::NaturalLanguageAccepted { from, to } => {
-            format!("自然言語外交・成立: {} が {} の提案を受諾", world.faction(*to).name, world.faction(*from).name)
-        }
-        Event::NaturalLanguageRejected { from, to } => {
-            format!("自然言語外交・拒否: {} が {} の提案を拒否", world.faction(*to).name, world.faction(*from).name)
-        }
-        Event::NaturalLanguageTermsInvalid { from, to } => format!(
-            "自然言語外交・不成立: {} が {} の提案を受諾しようとしたが条件が満たせず不成立",
+        Event::NaturalLanguageAccepted { from, to, terms } => format!(
+            "自然言語外交・成立: {} が {} の提案を受諾 [{}]",
             world.faction(*to).name,
-            world.faction(*from).name
+            world.faction(*from).name,
+            terms_ja(world, terms)
+        ),
+        Event::NaturalLanguageRejected { from, to, terms } => format!(
+            "自然言語外交・拒否: {} が {} の提案を拒否 [{}]",
+            world.faction(*to).name,
+            world.faction(*from).name,
+            terms_ja(world, terms)
+        ),
+        Event::NaturalLanguageTermsInvalid { from, to, terms } => format!(
+            "自然言語外交・不成立: {} が {} の提案を受諾しようとしたが条件が満たせず不成立 [{}]",
+            world.faction(*to).name,
+            world.faction(*from).name,
+            terms_ja(world, terms)
         ),
     }
 }

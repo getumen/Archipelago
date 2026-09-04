@@ -13,8 +13,9 @@ use archipelago_sim::world::Station;
 
 use super::input::MENU_ITEMS;
 use super::{
-    ActiveGood, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, PlayerFaction, PlayerPanelText,
-    ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, TopBarText,
+    ActiveGood, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperPanelText,
+    NewspaperState, NlCompose, PlayerFaction, PlayerPanelText, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
+    TopBarText,
 };
 
 pub(super) fn update_top_bar(sim: Res<SimRes>, speed: Res<SpeedRes>, meta: Res<ScenarioMeta>, mut query: Query<&mut Text, With<TopBarText>>) {
@@ -152,6 +153,8 @@ pub(super) fn update_player_panel(
     diplomacy: Res<DiplomacyPanel>,
     active_good: Res<ActiveGood>,
     rejection: Res<LastRejection>,
+    nl_compose: Res<NlCompose>,
+    event_log: Res<EventLog>,
     mut query: Query<&mut Text, With<PlayerPanelText>>,
 ) {
     let Ok(mut text) = query.single_mut() else { return };
@@ -206,13 +209,41 @@ pub(super) fn update_player_panel(
             for (i, &treaty) in ALL_TREATIES.iter().enumerate() {
                 out.push_str(&format!("{}:{} ", i + 1, treaty_label_ja(treaty)));
             }
-            out.push_str("\nA:受諾 R:拒否 W:宣戦 B:破棄\n");
+            out.push_str("\nA:受諾 R:拒否 W:宣戦 B:破棄 T:自然言語で提案\n");
             let incoming: Vec<_> = world.diplomacy.pending.iter().filter(|p| p.from == target && p.to == player_faction).collect();
             if incoming.is_empty() {
                 out.push_str("相手からの提案: なし\n");
             } else {
                 for p in incoming {
                     out.push_str(&format!("相手からの提案: {}\n", treaty_label_ja(p.treaty)));
+                }
+            }
+
+            // Stage 7C (docs/phase7-spec.md "4."): this faction's own
+            // outstanding natural-language proposal to `target`, if any -
+            // the compose box below is disabled while one is still pending
+            // (`action::apply_propose_nl` would reject a second one anyway;
+            // showing it here is the honest reason why, not a silent no-op).
+            if let Some(pending) = world.diplomacy.pending_nl.iter().find(|p| p.from == player_faction && p.to == target) {
+                out.push_str(&format!("自国からの自然言語提案（返答待ち）: 「{}」\n", pending.text));
+            }
+
+            if nl_compose.active {
+                out.push_str(&format!("自然言語提案を入力中> {}_\n(Enter で送信, Esc でキャンセル)\n", nl_compose.buffer));
+            }
+
+            // The interpreted `TreatyTerm`s and accept/reject verdict for
+            // any natural-language proposal that has resolved recently -
+            // `event_text::format_event` already spells both out
+            // (`Event::NaturalLanguage{Accepted,Rejected,TermsInvalid}::terms`),
+            // so this reads straight off the same event log the bottom
+            // panel shows rather than keeping a second copy of the same
+            // data.
+            let nl_history: Vec<&String> = event_log.0.iter().filter(|line| line.contains("自然言語外交")).take(3).collect();
+            if !nl_history.is_empty() {
+                out.push_str("-- 自然言語外交の履歴 --\n");
+                for line in nl_history {
+                    out.push_str(&format!("{line}\n"));
                 }
             }
         } else {
@@ -241,5 +272,45 @@ pub(super) fn update_player_panel(
         }
     }
 
+    text.0 = out;
+}
+
+/// Stage 7C's newspaper panel (`N` to toggle, docs/phase7-spec.md "5. 新聞"):
+/// shows the currently-viewed issue's article for whichever faction the
+/// left-hand faction panel is currently showing (`SelectedFaction`, `Tab`
+/// to cycle) - one panel, one faction, exactly like the faction summary it
+/// sits next to. Empty text whenever the panel is closed; an explicit "no
+/// issue yet" line (never a placeholder article) before
+/// `NEWSPAPER_INTERVAL_DAYS` has elapsed once.
+pub(super) fn update_newspaper_panel(
+    news: Res<NewspaperState>,
+    selected: Res<SelectedFaction>,
+    mut query: Query<&mut Text, With<NewspaperPanelText>>,
+) {
+    let Ok(mut text) = query.single_mut() else { return };
+    if !news.open {
+        text.0 = String::new();
+        return;
+    }
+    let Some(issue_index) = news.viewing.or_else(|| news.history.len().checked_sub(1)) else {
+        text.0 = "-- 新聞 (N で閉じる) --\nまだ号外は発行されていない\n".to_string();
+        return;
+    };
+    let issue = &news.history[issue_index];
+
+    let mut out = format!(
+        "-- 新聞 (N で閉じる, \u{2190}/\u{2192} で号を送る) -- 第{}号 (day {}\u{301c}{}) --\n",
+        issue_index + 1,
+        issue.period_start,
+        issue.period_end,
+    );
+    match issue.articles.iter().find(|a| a.faction == selected.0) {
+        Some(article) => out.push_str(&format!("{}\n", article.text)),
+        // The faction the left panel is currently showing was eliminated
+        // and dropped out of this issue's per-faction articles
+        // (`newspaper::generate_issue` only covers `f.alive` factions) -
+        // say so, never show a stale or blank article.
+        None => out.push_str("この勢力の記事はない（脱落済み）\n"),
+    }
     text.0 = out;
 }

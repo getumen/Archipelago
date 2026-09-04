@@ -6,7 +6,7 @@ use archipelago_sim::balance::{
     FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_COST_MACHINERY_PER_GOOD, UNIT_EQUIPMENT,
     UNIT_MANPOWER, UNIT_ORG,
 };
-use archipelago_sim::diplomacy::{Stance, Treaty, TreatyTerm};
+use archipelago_sim::diplomacy::{Stance, Treaty};
 use archipelago_sim::focus::{self, NationalFocus};
 use archipelago_sim::good::{Good, GOOD_COUNT};
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
@@ -16,7 +16,7 @@ use archipelago_sim::scenario;
 use archipelago_sim::trade;
 use archipelago_sim::world::Station;
 
-use crate::{keyword_interpret, HeuristicAgent};
+use crate::{cannot_interpret_nl, default_heuristic_agent, HeuristicAgent, DEFAULT_CAUTION};
 
 /// A unit already under way toward a destination must not be re-issued a
 /// `MoveUnit` toward that same destination - doing so resets
@@ -305,36 +305,43 @@ fn agent_port_capacity_matches_simulation() {
     );
 }
 
-/// Stage 4B (docs/phase4-spec.md "Stage 4B の受け入れ基準":
-/// "natural_language_maps_to_terms"): the design.md §12 worked example -
-/// "新潟方面から撤兵する代わりに、港湾利用権を認めてほしい" ("withdraw from
-/// the Niigata front in exchange for recognizing our port access") - must
-/// map to the expected `TreatyTerm`s. The scenario map has no region
-/// literally named "新潟"; region 4 ("信越・北陸") is the scenario region
-/// that covers the Niigata area, so the proposal text below names that
-/// region instead while keeping the rest of the example's wording.
+/// External code review fix B2 (docs/phase4-spec.md "Stage 4B — 自然言語外
+/// 交": "受け手が HeuristicAgent なら..."): replaces the old
+/// `natural_language_maps_to_terms`, which asserted that the old
+/// `keyword_interpret` mapped design.md §12's worked example - "新潟方面か
+/// ら撤兵する代わりに、港湾利用権を認めてほしい" ("withdraw from the Niigata
+/// front in exchange for recognizing our port access") - to specific
+/// `TreatyTerm`s. `keyword_interpret` is gone (docs/conventions.md §3: a
+/// `HeuristicAgent` cannot actually read Japanese/English prose, so
+/// approximating that via keyword matching was itself the fallback the
+/// project owner rejected); `natural_language_maps_to_terms` described
+/// exactly that removed behaviour and no longer describes anything real.
+/// This test asserts the new, honest contract instead: `cannot_interpret_nl`
+/// answers every proposal with no terms and a flat reject, *even* text that
+/// would have hit every one of the old parser's keywords (the region name,
+/// "撤兵", and "港湾利用" all appear below) - proving the replacement
+/// doesn't quietly still do partial keyword matching under a new name.
 #[test]
-fn natural_language_maps_to_terms() {
+fn natural_language_proposal_is_never_interpreted_by_a_heuristic_agent() {
     let world = scenario::build_world();
     let proposer = FactionId(0);
     let recipient = FactionId(1);
     let obs = Observation { faction: recipient, world: &world };
 
     let text = "信越・北陸方面から撤兵する代わりに、港湾利用権を認めてほしい";
-    let (terms, _accept) = keyword_interpret(&obs, proposer, text);
+    let (terms, accept) = cannot_interpret_nl(&obs, proposer, text);
 
-    assert_eq!(
-        terms,
-        vec![TreatyTerm::Withdraw { from: RegionId(4) }, TreatyTerm::Sign(Treaty::PortAccess)],
-        "design.md §12's worked example must interpret to a withdrawal from the named region plus \
-         a PortAccess grant"
-    );
+    assert!(terms.is_empty(), "a HeuristicAgent must extract no terms from any text, however keyword-rich");
+    assert!(!accept, "a HeuristicAgent must decline every natural-language proposal outright");
 }
 
 /// `unparseable_proposal_is_rejected` (docs/phase4-spec.md "Stage 4B の受け
-/// 入れ基準"): text with none of `keyword_interpret`'s recognized keywords
-/// or region names yields no terms and a reject verdict, and running that
-/// verdict through the real action pipeline leaves diplomacy untouched.
+/// 入れ基準"): gibberish text yields no terms and a reject verdict under the
+/// new `cannot_interpret_nl` contract exactly as it did under the old
+/// keyword fallback (this was already the keyword parser's own behaviour
+/// for unrecognized text - now it's *every* text's behaviour, not just
+/// unrecognized text's), and running that verdict through the real action
+/// pipeline leaves diplomacy untouched.
 #[test]
 fn unparseable_proposal_is_rejected() {
     let mut world = scenario::build_world();
@@ -349,7 +356,7 @@ fn unparseable_proposal_is_rejected() {
 
     let (terms, accept) = {
         let obs = Observation { faction: recipient, world: &world };
-        keyword_interpret(&obs, proposer, "the weather today is quite pleasant, wouldn't you say")
+        cannot_interpret_nl(&obs, proposer, "the weather today is quite pleasant, wouldn't you say")
     };
     assert!(terms.is_empty(), "gibberish text should yield no recognizable terms");
     assert!(!accept, "an unparseable proposal must be rejected outright, not accepted with zero terms");
@@ -367,25 +374,31 @@ fn unparseable_proposal_is_rejected() {
     assert_eq!(world.diplomacy.has_port_access(proposer, recipient), port_access_before);
 }
 
-/// Stage 4B (docs/phase4-spec.md "Stage 4B — 自然言語外交"): the full
-/// pipeline behind design.md §12's worked example, end to end - a natural-
-/// language proposal is sent, the recipient's own `HeuristicAgent` (keyword
-/// extraction, since it has no LLM) interprets it and answers, and the
-/// answer is applied through the ordinary action pipeline. Region 4
-/// ("信越・北陸") stands in for the example's "新潟" the way
-/// `natural_language_maps_to_terms` already explains.
+/// External code review fix B2: replaces the old
+/// `natural_language_worked_example_end_to_end`, which drove design.md §12's
+/// worked example through the *old* `keyword_interpret`-backed pipeline and
+/// asserted the deal was understood and accepted. Under the new contract a
+/// `HeuristicAgent` recipient cannot interpret the proposal at all - not
+/// even this friendly, textbook-clean one - so the honest end-to-end
+/// outcome is a flat rejection with the world left exactly as it was, not a
+/// negotiated `Withdraw`+`PortAccess` deal. `natural_language_maps_to_terms`
+/// covers the interpreter's own return value in isolation; this test proves
+/// that same "no" carries all the way through `HeuristicAgent::decide` and
+/// `Simulation::apply` without anything downstream quietly still granting
+/// the deal.
 #[test]
-fn natural_language_worked_example_end_to_end() {
+fn natural_language_proposal_is_rejected_end_to_end() {
     let mut world = scenario::build_world();
     let proposer = FactionId(0); // 東方連合
     let recipient = FactionId(1); // 中央同盟 - region 4's core owner
     let region = RegionId(4); // 信越・北陸
 
     // Faction 0 captured region 4 from faction 1 earlier in the war, and the
-    // two have since settled into a ceasefire - `is_at_war` must be false
-    // for Withdraw to validate against any leftover garrison, and the
-    // ceasefire's own opinion bonus is what makes the keyword-fallback
-    // recipient receptive to the deal at all.
+    // two have since settled into a ceasefire - the same friendly, feasible
+    // setup the old keyword-fallback test used, so this test isolates "a
+    // HeuristicAgent can't interpret language" as the *only* reason the
+    // deal doesn't go through, not some unrelated reason it would have
+    // failed anyway (a live war, an infeasible withdrawal, ...).
     world.region_mut(region).owner = proposer;
     assert_eq!(world.region(region).core, recipient, "region 4 must still read as faction 1's own soil");
 
@@ -401,8 +414,11 @@ fn natural_language_worked_example_end_to_end() {
     })
     .unwrap();
 
-    // Faction 1's own HeuristicAgent interprets the proposal (design.md §12:
-    // "AI勢力が条件を評価して返答する") and answers.
+    // Faction 1's own HeuristicAgent has no LLM to reach for, so it answers
+    // with `cannot_interpret_nl`'s honest "no" (`HeuristicAgent::decide`'s
+    // own doc) rather than design.md §12's "AI勢力が条件を評価して返答す
+    // る" - which describes an *LLM*-backed recipient's behaviour, not a
+    // bare heuristic one's.
     let mut agent = HeuristicAgent::new(recipient, 1.15);
     let respond_action = {
         let obs = Observation { faction: recipient, world: &world };
@@ -416,21 +432,41 @@ fn natural_language_worked_example_end_to_end() {
     let Action::RespondToNaturalLanguageProposal { terms, accept, .. } = respond_action.clone() else {
         unreachable!()
     };
-    assert_eq!(
-        terms,
-        vec![TreatyTerm::Withdraw { from: region }, TreatyTerm::Sign(Treaty::PortAccess)],
-        "the interpreted deal must match design.md §12's worked example"
-    );
-    assert!(accept, "a friendly, feasible deal should be accepted");
+    assert!(terms.is_empty(), "a HeuristicAgent must extract no terms, even from this friendly, feasible deal");
+    assert!(!accept, "a HeuristicAgent must decline the proposal outright, not accept it with zero terms");
 
+    let stance_before = world.diplomacy.stance(proposer, recipient);
+    let port_access_before = world.diplomacy.has_port_access(proposer, recipient);
     action::apply_action(&mut world, recipient, respond_action).unwrap();
 
     assert_eq!(
-        world.region(region).owner, recipient,
-        "the withdrawal term should hand region 4 back to its core owner"
+        world.region(region).owner, proposer,
+        "with nothing accepted, region 4 must stay exactly where it was - no silent withdrawal"
     );
-    assert!(
-        world.diplomacy.has_port_access(proposer, recipient),
-        "the Sign(PortAccess) term should have taken effect"
+    assert_eq!(world.diplomacy.stance(proposer, recipient), stance_before, "no treaty should have formed");
+    assert_eq!(
+        world.diplomacy.has_port_access(proposer, recipient), port_access_before,
+        "the never-extracted Sign(PortAccess) term must never take effect"
     );
+}
+
+/// External code review fix B5: `default_heuristic_agent` used to hand any
+/// faction index past `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION`'s 8
+/// entries a made-up `(1.25, 1.0)` personality instead of a real one. A
+/// scenario with more factions than the table covers must fail loudly
+/// instead - checked here at exactly the boundary (index 7 still works,
+/// index 8 - one past the table - panics with a message naming the mismatch,
+/// not an out-of-bounds index panic from plain indexing).
+#[test]
+fn default_heuristic_agent_covers_every_table_entry() {
+    for i in 0..DEFAULT_CAUTION.len() {
+        let agent = default_heuristic_agent(i);
+        assert_eq!(agent.faction(), FactionId(i as u32));
+    }
+}
+
+#[test]
+#[should_panic(expected = "no default AI personality")]
+fn default_heuristic_agent_beyond_the_table_fails_loudly() {
+    let _ = default_heuristic_agent(DEFAULT_CAUTION.len());
 }

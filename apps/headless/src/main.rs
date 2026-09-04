@@ -41,11 +41,11 @@ fn load_world(args: &Args) -> World {
 /// `--seed` (`mock_backend_run_is_deterministic`).
 fn mock_doctrine_backend() -> MockBackend {
     MockBackend::new(vec![
-        Ok(r#"{"posture":"consolidate","rationale":"stabilize the home front before any new venture"}"#
+        Ok(r#"{"posture":"consolidate","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"stabilize the home front before any new venture"}"#
             .to_string()),
-        Ok(r#"{"posture":"offensive","caution_bias":-0.2,"rationale":"press the advantage while it lasts"}"#
+        Ok(r#"{"posture":"offensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":-0.2,"rationale":"press the advantage while it lasts"}"#
             .to_string()),
-        Ok(r#"{"posture":"defensive","caution_bias":0.4,"rationale":"hold what we have and rebuild"}"#
+        Ok(r#"{"posture":"defensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.4,"rationale":"hold what we have and rebuild"}"#
             .to_string()),
     ])
 }

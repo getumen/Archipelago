@@ -16,13 +16,63 @@ use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 
+use archipelago_sim::ids::RegionId;
+
+use super::{MainCamera, RegionLayout};
+
 /// Present as a resource only when `--screenshot <path>` was given -
 /// `app::run` inserts this conditionally, so `maybe_capture_screenshot`
 /// simply no-ops on every frame when it isn't there.
-#[derive(Resource, Clone)]
+///
+/// `open_*`/`supply_overlay`/`camera_focus_region`/`camera_zoom` are
+/// verification-only conveniences (`--debug-*` flags, `main.rs`'s own doc) -
+/// there is no interactive way to press `L`/`D`/`N` or scroll-zoom before a
+/// screenshot fires when nothing is at the keyboard, so `app::run` reads
+/// these once at startup to pre-set the corresponding resource/camera
+/// framing instead. They never affect anything but initial UI-panel
+/// visibility/toggle state or the camera's own `Transform` - not scenario,
+/// seed, or any simulated day's outcome.
+#[derive(Resource, Clone, Default)]
 pub struct ScreenshotConfig {
     pub path: String,
     pub after_frames: u32,
+    pub open_diplomacy: bool,
+    pub open_newspaper: bool,
+    pub supply_overlay: bool,
+    /// `--debug-camera-region <index>`: center the camera on this region
+    /// instead of the whole-map fit `camera_fit::fit_camera_to_map` computes
+    /// by default - a dense map (japan47's 47 prefectures) can render a
+    /// short link's overlay color at only a few pixels wide at whole-map
+    /// zoom, exactly what a real player would scroll in on with the mouse
+    /// wheel (`input::mouse_pan_zoom`) but a screenshot run has no mouse at
+    /// all.
+    pub camera_focus_region: Option<RegionId>,
+    /// `--debug-camera-zoom <scale>`: the orthographic projection's `scale`
+    /// to use with `camera_focus_region` - smaller is closer in. Ignored
+    /// without `camera_focus_region`.
+    pub camera_zoom: f32,
+}
+
+/// Overrides the camera's framing every frame once `ScreenshotConfig::
+/// camera_focus_region` names a region, running after `camera_fit::
+/// fit_camera_to_map`'s own one-time whole-map fit so it always wins - see
+/// `ScreenshotConfig`'s own doc for why this exists at all. A no-op
+/// whenever there's no `ScreenshotConfig`, or it named no region (the
+/// overwhelmingly common case - every `--screenshot` run before Stage 7C
+/// used the default whole-map fit unchanged).
+pub(super) fn apply_debug_camera(
+    config: Option<Res<ScreenshotConfig>>,
+    layout: Res<RegionLayout>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
+) {
+    let Some(config) = config else { return };
+    let Some(region) = config.camera_focus_region else { return };
+    let Some(&[x, y]) = layout.0.get(region.index()) else { return };
+    let Ok((mut transform, mut projection)) = camera.single_mut() else { return };
+    let Projection::Orthographic(ortho) = &mut *projection else { return };
+    transform.translation.x = x;
+    transform.translation.y = y;
+    ortho.scale = config.camera_zoom;
 }
 
 /// Counts frames since startup and, once `ScreenshotConfig::after_frames`

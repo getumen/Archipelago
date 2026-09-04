@@ -26,3 +26,23 @@ pub fn faction_color(i: usize) -> Color {
 /// Neutral color for unowned/no-control map elements (a sea zone nobody
 /// controls).
 pub const NEUTRAL: Color = Color::srgb(0.55, 0.58, 0.62);
+
+/// A value clamped into `0.0..=1.0` at construction - docs/conventions.md
+/// §1's "express business logic in types": every place Stage 7C's overlay
+/// rendering carries a ratio/opacity/mix-fraction (supply throughput
+/// against a region's own ceiling, a link's saturation, a devastation tint,
+/// a construction-progress fill) uses this instead of a bare `f32` that has
+/// to be re-clamped at every call site that reads it. Once built, `.get()`
+/// can never hand back a value outside `0.0..=1.0`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Unit01(f32);
+
+impl Unit01 {
+    pub fn new(v: f32) -> Self {
+        Unit01(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}

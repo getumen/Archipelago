@@ -13,7 +13,9 @@ fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!(
         "usage: archipelago-game [--scenario <path>] [--seed <n>] [--days <n>] \
          [--play <faction index or name>] [--record <path>] [--replay <path>] \
-         [--screenshot <path>] [--screenshot-after <frames>]"
+         [--screenshot <path>] [--screenshot-after <frames>] \
+         [--debug-supply-overlay] [--debug-open-diplomacy] [--debug-open-newspaper] \
+         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]"
     );
     std::process::exit(1);
 }
@@ -27,7 +29,22 @@ struct Args {
     replay: Option<String>,
     screenshot: Option<String>,
     screenshot_after: u32,
+    // Verification-only conveniences (`ScreenshotConfig`'s own doc): start
+    // the supply overlay / diplomacy panel / newspaper panel already open,
+    // for `--screenshot` runs where nothing is at the keyboard to press
+    // `L`/`D`/`N` first. No effect without `--screenshot`.
+    debug_supply_overlay: bool,
+    debug_open_diplomacy: bool,
+    debug_open_newspaper: bool,
+    debug_camera_region: Option<String>,
+    debug_camera_zoom: f32,
 }
+
+/// Default `--debug-camera-zoom` (orthographic `scale`) when `--debug-camera-region`
+/// is given without one - close enough to read a single region's own
+/// overlay ring/links clearly, wide enough to still show its immediate
+/// neighbors for context.
+const DEFAULT_DEBUG_CAMERA_ZOOM: f32 = 0.35;
 
 /// Default frame at which `--screenshot` fires when `--screenshot-after` is
 /// not given: small enough to exit quickly, but large enough that
@@ -45,6 +62,11 @@ fn parse_args() -> Args {
     let mut replay = None;
     let mut screenshot = None;
     let mut screenshot_after = DEFAULT_SCREENSHOT_AFTER_FRAMES;
+    let mut debug_supply_overlay = false;
+    let mut debug_open_diplomacy = false;
+    let mut debug_open_newspaper = false;
+    let mut debug_camera_region = None;
+    let mut debug_camera_zoom = DEFAULT_DEBUG_CAMERA_ZOOM;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -75,6 +97,16 @@ fn parse_args() -> Args {
                 let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--screenshot-after expects a value"));
                 screenshot_after = v.parse().unwrap_or_else(|_| print_usage_and_exit("--screenshot-after expects an integer"));
             }
+            "--debug-supply-overlay" => debug_supply_overlay = true,
+            "--debug-open-diplomacy" => debug_open_diplomacy = true,
+            "--debug-open-newspaper" => debug_open_newspaper = true,
+            "--debug-camera-region" => {
+                debug_camera_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-region expects a region index or name")));
+            }
+            "--debug-camera-zoom" => {
+                let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-zoom expects a value"));
+                debug_camera_zoom = v.parse().unwrap_or_else(|_| print_usage_and_exit("--debug-camera-zoom expects a number"));
+            }
             other => {
                 if let Some(v) = other.strip_prefix("--scenario=") {
                     scenario = Some(v.to_string());
@@ -98,7 +130,21 @@ fn parse_args() -> Args {
             }
         }
     }
-    Args { scenario, seed, days, play, record, replay, screenshot, screenshot_after }
+    Args {
+        scenario,
+        seed,
+        days,
+        play,
+        record,
+        replay,
+        screenshot,
+        screenshot_after,
+        debug_supply_overlay,
+        debug_open_diplomacy,
+        debug_open_newspaper,
+        debug_camera_region,
+        debug_camera_zoom,
+    }
 }
 
 /// Resolves `--play <value>` against the loaded `world`'s factions: either a
@@ -119,6 +165,25 @@ fn resolve_faction(world: &World, value: &str) -> FactionId {
         "error: --play {value}: no faction with that index or name. Available: {}",
         world.factions.iter().map(|f| format!("{} (\"{}\")", f.id.0, f.name)).collect::<Vec<_>>().join(", ")
     );
+    std::process::exit(1);
+}
+
+/// Resolves `--debug-camera-region <value>` the same way `resolve_faction`
+/// resolves `--play`: a plain integer index, or an exact `Region::name`
+/// match (the Japanese display name shown on the map, since that's what's
+/// actually visible to whoever is choosing where to point the camera).
+fn resolve_region(world: &World, value: &str) -> archipelago_sim::ids::RegionId {
+    if let Ok(i) = value.parse::<u32>() {
+        if (i as usize) < world.regions.len() {
+            return archipelago_sim::ids::RegionId(i);
+        }
+        eprintln!("error: --debug-camera-region {i}: only {} regions exist (0..{})", world.regions.len(), world.regions.len());
+        std::process::exit(1);
+    }
+    if let Some(r) = world.regions.iter().find(|r| r.name == value) {
+        return r.id;
+    }
+    eprintln!("error: --debug-camera-region {value}: no region with that index or name");
     std::process::exit(1);
 }
 
@@ -157,7 +222,16 @@ fn main() {
 
     let play_config = play.map(|player| PlayConfig { player, record: args.record.clone(), replay: replay_days });
 
-    let screenshot = args.screenshot.map(|path| ScreenshotConfig { path, after_frames: args.screenshot_after });
+    let debug_camera_region = args.debug_camera_region.as_deref().map(|v| resolve_region(&world, v));
+    let screenshot = args.screenshot.map(|path| ScreenshotConfig {
+        path,
+        after_frames: args.screenshot_after,
+        open_diplomacy: args.debug_open_diplomacy,
+        open_newspaper: args.debug_open_newspaper,
+        supply_overlay: args.debug_supply_overlay,
+        camera_focus_region: debug_camera_region,
+        camera_zoom: args.debug_camera_zoom,
+    });
 
     archipelago_game::app::run(world, args.seed, scenario_name, args.days, screenshot, play_config);
 }

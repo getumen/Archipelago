@@ -10,9 +10,10 @@
 
 use bevy::prelude::*;
 
+use archipelago_agents::newspaper::NEWSPAPER_INTERVAL_DAYS;
 use archipelago_sim::sim::Outcome;
 
-use super::{event_text, EventLog, LastRejection, RecordConfig, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
+use super::{event_text, EventLog, LastRejection, NewspaperState, RecordConfig, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
 
 /// Also where Stage 7B's `--record`/rejection-surfacing hooks in
 /// (docs/phase7-spec.md "決定論" / "命令の可否を隠さない"): after every
@@ -28,6 +29,7 @@ pub(super) fn advance_simulation(
     mut log: ResMut<EventLog>,
     mut record: Option<ResMut<RecordConfig>>,
     mut rejection: ResMut<LastRejection>,
+    mut news: ResMut<NewspaperState>,
 ) {
     if speed.paused {
         return;
@@ -41,6 +43,16 @@ pub(super) fn advance_simulation(
         for event in &events {
             let line = event_text::format_event(sim.0.world(), event);
             log.0.push_front(format!("day {}: {line}", sim.0.world().day));
+        }
+
+        // Stage 7C's newspaper panel (docs/phase7-spec.md "5. 新聞"):
+        // accumulates this tick's events into the current reporting period,
+        // exactly mirroring `apps/headless`'s own `--newspaper` loop body -
+        // this is the one place in the client that already has both the
+        // tick's raw `events` and the post-tick `World` in hand.
+        news.period_events.extend(events.iter().cloned());
+        if sim.0.world().day % NEWSPAPER_INTERVAL_DAYS == 0 {
+            super::newspaper::publish_issue(&mut news, sim.0.world());
         }
 
         if sim.0.human_faction().is_some() {

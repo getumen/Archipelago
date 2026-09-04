@@ -553,19 +553,43 @@ fn object_get<'a>(fields: &'a [(String, JsonValue)], key: &str) -> Option<&'a Js
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
+/// Fetches a required top-level field, or `LlmError::Malformed` naming it -
+/// `parse_doctrine`'s single choke point for "the model didn't supply this
+/// at all" (External code review fix B1), reused for every `Doctrine` field
+/// below so that failure mode can't be forgotten for one of them.
+fn require_field<'a>(fields: &'a [(String, JsonValue)], key: &str) -> Result<&'a JsonValue, LlmError> {
+    object_get(fields, key).ok_or_else(|| LlmError::Malformed(format!("missing required field \"{key}\"")))
+}
+
 /// Parses a backend's raw response text into a `Doctrine`
 /// (docs/phase4-spec.md "応答は JSON として解釈する"). Tolerant of prose
-/// wrapped around the JSON object (`extract_json_object`) and of missing
-/// optional fields (each has a safe default), but requires a valid
-/// `posture` - the one field with no sane default - and rejects anything
-/// that isn't syntactically valid JSON or isn't a JSON object at all.
+/// wrapped around the JSON object (`extract_json_object`), but every field
+/// `SYSTEM_PROMPT` names is required (External code review fix B1: this used
+/// to default `avoid`/`focus`/`seek_treaties`/`caution_bias`/`rationale` to
+/// an empty/neutral value whenever the key was missing or the wrong shape,
+/// so a response that only partially matched the schema silently installed
+/// a `Doctrine` the model never actually expressed for the fields it left
+/// out - indistinguishable from one that deliberately chose the neutral
+/// value. A response missing any field, or shaping one wrong, is now
+/// `LlmError::Malformed` outright, same as an unrecognized `posture` always
+/// was - which lands on the approved `LlmAgent` retention fallback
+/// (docs/conventions.md §3's table), not a partially-guessed `Doctrine`.
+/// `primary_target`/`focus` still accept an explicit JSON `null` - the
+/// schema (`SYSTEM_PROMPT`) documents `null` as their genuine "none" value,
+/// not a stand-in for "the model didn't answer".
 ///
-/// Every `FactionId` extracted here is checked against `world.factions.len()`
-/// before being kept - an out-of-range index is silently dropped (for
-/// `avoid`/`seek_treaties`) or treated as absent (`primary_target`) rather
-/// than kept and later panicking on a `World` index. This is defence in
-/// depth alongside the use-site guards in `HeuristicAgent::decide_for_llm`/
-/// `seek_doctrine_treaties` - see this module's doc.
+/// Every `FactionId` extracted here is additionally checked against
+/// `world.factions.len()` before being kept - an out-of-range or fractional
+/// one is silently dropped (for `avoid`/`seek_treaties` entries) or treated
+/// as absent (`primary_target`) rather than kept and later panicking on a
+/// `World` index (`fractional_faction_id_is_rejected`). This one leniency is
+/// deliberately kept even though the field itself is required: the model
+/// *did* answer, just with a number this `World` can't resolve, which is a
+/// different failure than not answering at all, and defence in depth
+/// alongside the use-site guards in `HeuristicAgent::decide_for_llm`/
+/// `seek_doctrine_treaties` - see this module's doc - already assumes any
+/// `FactionId` a `Doctrine` carries may be stale or invalid regardless of
+/// where the `Doctrine` came from.
 pub fn parse_doctrine(text: &str, world: &World) -> Result<Doctrine, LlmError> {
     let object_text = extract_json_object(text)
         .ok_or_else(|| LlmError::Malformed("no JSON object found in response".to_string()))?;
@@ -575,14 +599,14 @@ pub fn parse_doctrine(text: &str, world: &World) -> Result<Doctrine, LlmError> {
         return Err(LlmError::Malformed("top-level JSON value is not an object".to_string()));
     };
 
-    let posture = match object_get(&fields, "posture") {
-        Some(JsonValue::String(s)) => match s.to_ascii_lowercase().as_str() {
+    let posture = match require_field(&fields, "posture")? {
+        JsonValue::String(s) => match s.to_ascii_lowercase().as_str() {
             "offensive" => Posture::Offensive,
             "defensive" => Posture::Defensive,
             "consolidate" => Posture::Consolidate,
             other => return Err(LlmError::Malformed(format!("unknown posture: {other}"))),
         },
-        _ => return Err(LlmError::Malformed("missing or non-string \"posture\"".to_string())),
+        _ => return Err(LlmError::Malformed("\"posture\" must be a string".to_string())),
     };
 
     let n = world.factions.len();
@@ -607,20 +631,28 @@ pub fn parse_doctrine(text: &str, world: &World) -> Result<Doctrine, LlmError> {
         }
     };
 
-    let primary_target = object_get(&fields, "primary_target").and_then(to_faction);
-
-    let avoid: Vec<FactionId> = match object_get(&fields, "avoid") {
-        Some(JsonValue::Array(items)) => items.iter().filter_map(to_faction).collect(),
-        _ => Vec::new(),
+    let primary_target = match require_field(&fields, "primary_target")? {
+        JsonValue::Null => None,
+        v @ JsonValue::Number(_) => to_faction(v),
+        _ => return Err(LlmError::Malformed("\"primary_target\" must be a faction id number or null".to_string())),
     };
 
-    let focus = match object_get(&fields, "focus") {
-        Some(JsonValue::String(s)) => focus_from_key(s),
-        _ => None,
+    let avoid: Vec<FactionId> = match require_field(&fields, "avoid")? {
+        JsonValue::Array(items) => items.iter().filter_map(to_faction).collect(),
+        _ => return Err(LlmError::Malformed("\"avoid\" must be an array".to_string())),
     };
 
-    let seek_treaties: Vec<(FactionId, Treaty)> = match object_get(&fields, "seek_treaties") {
-        Some(JsonValue::Array(items)) => items
+    let focus = match require_field(&fields, "focus")? {
+        JsonValue::Null => None,
+        JsonValue::String(s) => match focus_from_key(s) {
+            Some(f) => Some(f),
+            None => return Err(LlmError::Malformed(format!("unknown focus: {s}"))),
+        },
+        _ => return Err(LlmError::Malformed("\"focus\" must be a string or null".to_string())),
+    };
+
+    let seek_treaties: Vec<(FactionId, Treaty)> = match require_field(&fields, "seek_treaties")? {
+        JsonValue::Array(items) => items
             .iter()
             .filter_map(|item| {
                 let JsonValue::Object(obj) = item else { return None };
@@ -630,17 +662,17 @@ pub fn parse_doctrine(text: &str, world: &World) -> Result<Doctrine, LlmError> {
                 Some((faction, treaty))
             })
             .collect(),
-        _ => Vec::new(),
+        _ => return Err(LlmError::Malformed("\"seek_treaties\" must be an array".to_string())),
     };
 
-    let caution_bias = match object_get(&fields, "caution_bias") {
-        Some(JsonValue::Number(v)) if v.is_finite() => (*v as f32).clamp(-1.0, 1.0),
-        _ => 0.0,
+    let caution_bias = match require_field(&fields, "caution_bias")? {
+        JsonValue::Number(v) if v.is_finite() => (*v as f32).clamp(-1.0, 1.0),
+        _ => return Err(LlmError::Malformed("\"caution_bias\" must be a finite number".to_string())),
     };
 
-    let rationale = match object_get(&fields, "rationale") {
-        Some(JsonValue::String(s)) => truncate_chars(s, MAX_RATIONALE_CHARS),
-        _ => String::new(),
+    let rationale = match require_field(&fields, "rationale")? {
+        JsonValue::String(s) => truncate_chars(s, MAX_RATIONALE_CHARS),
+        _ => return Err(LlmError::Malformed("\"rationale\" must be a string".to_string())),
     };
 
     Ok(Doctrine { posture, primary_target, avoid, focus, seek_treaties, caution_bias, rationale })
@@ -835,9 +867,9 @@ fn parse_nl_response(text: &str) -> Result<(Vec<TreatyTerm>, bool), LlmError> {
 /// Every pending natural-language proposal addressed to `obs.faction` gets
 /// interpreted by `interpret` and answered with exactly one
 /// `Action::RespondToNaturalLanguageProposal` - shared by
-/// `HeuristicAgent::decide` (keyword-only interpretation, `crate::
-/// keyword_interpret`) and `LlmAgent::decide` (LLM interpretation, falling
-/// back to the same keyword extraction on failure - see `LlmAgent::
+/// `HeuristicAgent::decide` (always answers `crate::cannot_interpret_nl`'s
+/// honest "no" - it has no LLM) and `LlmAgent::decide` (LLM interpretation,
+/// falling back to that same honest "no" on failure - see `LlmAgent::
 /// interpret_nl`). `obs.world.diplomacy.pending_nl` is read once up front so
 /// the borrow ends before `interpret` (which may itself borrow `obs`) runs.
 pub fn respond_to_pending_nl_proposals<F>(obs: &Observation, mut interpret: F, actions: &mut Vec<Action>)
@@ -937,13 +969,19 @@ impl<B: LlmBackend> LlmAgent<B> {
     }
 
     /// Stage 4B (docs/phase4-spec.md "Stage 4B"): interprets one pending
-    /// proposal's `text` via this agent's own backend. Failure semantics
-    /// mirror `consult`'s (docs/phase4-spec.md "失敗時の扱い" applies just as
-    /// much here - a backend outage must not stop diplomacy from
-    /// functioning): a backend `Err`, or an `Ok` response that doesn't parse,
-    /// falls back to the same keyword extraction a plain `HeuristicAgent`
-    /// recipient would use (`crate::keyword_interpret`), never to "always
-    /// reject" or a panic.
+    /// proposal's `text` via this agent's own backend. A backend `Err`, or
+    /// an `Ok` response that doesn't parse, answers with `crate::
+    /// cannot_interpret_nl`'s honest "no" - the same answer a plain
+    /// `HeuristicAgent` recipient gives every proposal, since neither one
+    /// actually has a working interpretation to fall back on at that point
+    /// (External code review fix B2: this used to fall back to
+    /// `crate::keyword_interpret`'s keyword guesswork, which isn't an
+    /// approved fallback - docs/conventions.md §3 lists exactly two, and
+    /// this isn't either of them). Unlike `consult`'s `Doctrine` retention
+    /// (the approved LLM-failure exception, docs/conventions.md §3's table),
+    /// there is no previous interpretation of *this* proposal to keep - a
+    /// pending proposal is interpreted at most once - so there is nothing to
+    /// fall back to except declining it outright.
     fn interpret_nl(&self, obs: &Observation, from: FactionId, text: &str) -> (Vec<TreatyTerm>, bool) {
         let request = LlmRequest {
             system: NL_SYSTEM_PROMPT.to_string(),
@@ -959,9 +997,9 @@ impl<B: LlmBackend> LlmAgent<B> {
         match self.backend.complete(&request) {
             Ok(resp) => match parse_nl_response(&resp) {
                 Ok(result) => result,
-                Err(_) => crate::keyword_interpret(obs, from, text),
+                Err(_) => crate::cannot_interpret_nl(obs, from, text),
             },
-            Err(_) => crate::keyword_interpret(obs, from, text),
+            Err(_) => crate::cannot_interpret_nl(obs, from, text),
         }
     }
 }
@@ -1029,21 +1067,27 @@ mod json_tests {
     /// 1.9` must not install `FactionId(1)` (the old truncating `as u32`
     /// behaviour) - that's a different, materially wrong doctrine, not the
     /// one the response actually asked for. The field must be treated as
-    /// absent/invalid instead, same as an out-of-range id.
+    /// absent/invalid instead, same as an out-of-range id. Every other
+    /// required field (External code review fix B1) is filled in with a
+    /// valid, neutral value so this test still isolates the one behaviour
+    /// it's about.
     #[test]
     fn fractional_faction_id_is_rejected() {
         let world = archipelago_sim::scenario::build_world();
         assert!(world.factions.len() > 1, "test needs at least 2 factions for 1.9 to be in-bounds if truncated");
 
-        let doctrine =
-            parse_doctrine(r#"{"posture":"offensive","primary_target":1.9}"#, &world).unwrap();
+        let doctrine = parse_doctrine(
+            r#"{"posture":"offensive","primary_target":1.9,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"x"}"#,
+            &world,
+        )
+        .unwrap();
         assert_eq!(
             doctrine.primary_target, None,
             "a fractional primary_target must be discarded, not truncated to a real FactionId"
         );
 
         let avoid_doctrine = parse_doctrine(
-            r#"{"posture":"offensive","avoid":[0.5,2.0]}"#,
+            r#"{"posture":"offensive","primary_target":null,"avoid":[0.5,2.0],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"x"}"#,
             &world,
         )
         .unwrap();
@@ -1052,5 +1096,68 @@ mod json_tests {
             vec![FactionId(2)],
             "a fractional entry in avoid must be dropped, while a valid integral one is kept"
         );
+    }
+
+    /// A full, valid `Doctrine` response naming every field
+    /// `SYSTEM_PROMPT` documents - shared by `doctrine_requires_every_field`
+    /// below, which knocks out one key at a time.
+    fn doctrine_json(omit: Option<&str>) -> String {
+        let pairs: [(&str, &str); 7] = [
+            ("posture", "\"offensive\""),
+            ("primary_target", "null"),
+            ("avoid", "[]"),
+            ("focus", "null"),
+            ("seek_treaties", "[]"),
+            ("caution_bias", "0.0"),
+            ("rationale", "\"x\""),
+        ];
+        let body: Vec<String> =
+            pairs.iter().filter(|(k, _)| Some(*k) != omit).map(|(k, v)| format!("\"{k}\":{v}")).collect();
+        format!("{{{}}}", body.join(","))
+    }
+
+    /// External code review fix B1: every field `SYSTEM_PROMPT` names is
+    /// required now - a response missing any single one of them is
+    /// `LlmError::Malformed`, not a `Doctrine` with that one field silently
+    /// defaulted (the previous behaviour this fix replaces: only `posture`
+    /// was ever load-bearing, so a response answering half the schema still
+    /// installed a `Doctrine` the model never fully expressed).
+    #[test]
+    fn doctrine_requires_every_field() {
+        let world = archipelago_sim::scenario::build_world();
+        assert!(parse_doctrine(&doctrine_json(None), &world).is_ok(), "sanity: the fully-populated response must itself parse");
+
+        for key in ["posture", "primary_target", "avoid", "focus", "seek_treaties", "caution_bias", "rationale"] {
+            match parse_doctrine(&doctrine_json(Some(key)), &world) {
+                Err(LlmError::Malformed(msg)) => {
+                    assert!(msg.contains(key), "expected the error to name {key:?}, got {msg:?}")
+                }
+                other => panic!("expected a distinct Malformed error for a response missing {key:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// External code review fix B1: a field that *is* present but the wrong
+    /// shape for its schema (a string where a number was expected, an
+    /// unrecognized enum key, ...) is `LlmError::Malformed` exactly like a
+    /// missing one - never silently defaulted to a neutral value.
+    #[test]
+    fn doctrine_rejects_wrong_shaped_fields() {
+        let world = archipelago_sim::scenario::build_world();
+        let cases = [
+            (r#"{"posture":"sideways","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"x"}"#, "unknown posture"),
+            (r#"{"posture":"offensive","primary_target":"one","avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"x"}"#, "primary_target as a string"),
+            (r#"{"posture":"offensive","primary_target":null,"avoid":"none","focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"x"}"#, "avoid as a string"),
+            (r#"{"posture":"offensive","primary_target":null,"avoid":[],"focus":"not_a_real_focus","seek_treaties":[],"caution_bias":0.0,"rationale":"x"}"#, "unrecognized focus"),
+            (r#"{"posture":"offensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":"none","caution_bias":0.0,"rationale":"x"}"#, "seek_treaties as a string"),
+            (r#"{"posture":"offensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":"low","rationale":"x"}"#, "caution_bias as a string"),
+            (r#"{"posture":"offensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":7}"#, "rationale as a number"),
+        ];
+        for (text, label) in cases {
+            match parse_doctrine(text, &world) {
+                Err(LlmError::Malformed(_)) => {}
+                other => panic!("expected a distinct Malformed error for {label}, got {other:?}"),
+            }
+        }
     }
 }

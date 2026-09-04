@@ -202,19 +202,6 @@ const TRADE_ACCEPT_MIN_OPINION: f32 = -30.0;
 /// out a `TradeAgreement` partner rather than merely accepting one if offered.
 const TRADE_SEEK_SHORTAGE_THRESHOLD: f32 = 0.1;
 
-/// Stage 4B (docs/phase4-spec.md "Stage 4B — 自然言語外交"): `opinion` floor
-/// (of the proposer, from the responder's point of view) below which
-/// `keyword_interpret` rejects a natural-language deal outright, regardless
-/// of what its terms are - the same "an actively hostile relationship isn't
-/// trusted just because the numbers say yes" reasoning
-/// `PEACE_ACCEPT_MIN_OPINION` already applies to structured `Ceasefire`/
-/// `NonAggression` proposals, but at a somewhat higher bar: a free-text deal
-/// carries less certainty about what's actually being asked than a
-/// structured `Treaty`, so it takes a merely-neutral relationship rather
-/// than one that's merely "not clearly hostile" before this simple keyword
-/// fallback will act on it at all.
-const NL_ACCEPT_MIN_OPINION: f32 = -30.0;
-
 /// External code review fix C1 (docs/phase3-spec.md "AI" under "Stage 3B":
 /// treaty variety - `Alliance`/`MilitaryAccess`/`PortAccess` were
 /// implemented and unit-tested but the heuristic AI never had a reason to
@@ -377,106 +364,25 @@ fn evaluate_proposal(
     }
 }
 
-/// Stage 4B (docs/phase4-spec.md "Stage 4B — 自然言語外交": "受け手が
-/// HeuristicAgent なら、キーワード抽出による簡易解釈にフォールバックする"):
-/// the keyword-extraction fallback interpretation, used directly by a plain
-/// `HeuristicAgent` recipient and as `LlmAgent::interpret_nl`'s own
-/// fallback-on-failure. Deliberately simple - a handful of English/Japanese
-/// keyword lists, no real language understanding - since a bare
-/// `HeuristicAgent` has no LLM to reach for at all. Returns `(Vec::new(),
-/// false)` (unparseable, reject) if it can't find anything it recognizes in
-/// `text` at all.
+/// External code review fix B2 (docs/phase4-spec.md "Stage 4B — 自然言語外
+/// 交"): the answer a `HeuristicAgent` recipient gives *every* natural-
+/// language proposal, regardless of its text - reject outright, with no
+/// terms extracted. Replaces the old `keyword_interpret`, a hand-rolled
+/// English/Japanese keyword matcher that approximated understanding a
+/// proposal it never actually parsed; docs/conventions.md §3 (フォールバッ
+/// ク原則禁止) rules that out, since a `HeuristicAgent` genuinely cannot
+/// interpret free text and a keyword hit is not evidence that it did. The
+/// honest answer is "no", not a guess dressed up as one - and it's the same
+/// answer `keyword_interpret` itself already gave to any text with no
+/// recognized keyword (`unparseable_proposal_is_rejected`), just applied
+/// uniformly instead of only when the guesswork happened to miss.
 ///
-/// Term order is fixed (withdraw-or-cede, then sign, then deliver) so a
-/// fixed input text always produces the same `Vec<TreatyTerm>` - see
-/// `natural_language_maps_to_terms`.
-pub(crate) fn keyword_interpret(obs: &Observation, from: FactionId, text: &str) -> (Vec<TreatyTerm>, bool) {
-    let world = obs.world;
-    let lower = text.to_lowercase();
-    let mut terms = Vec::new();
-
-    // A region reference for Withdraw/Cede: the first region (in id order)
-    // whose own name literally appears in the text.
-    let region_ref = world.regions.iter().find(|r| text.contains(r.name.as_str())).map(|r| r.id);
-    if let Some(region) = region_ref {
-        if contains_any(&lower, &["withdraw", "撤兵", "撤退", "退く"]) {
-            terms.push(TreatyTerm::Withdraw { from: region });
-        } else if contains_any(&lower, &["cede", "割譲", "譲渡"]) {
-            terms.push(TreatyTerm::Cede { region });
-        }
-    }
-
-    if let Some(treaty) = extract_treaty_keyword(&lower) {
-        terms.push(TreatyTerm::Sign(treaty));
-    }
-
-    if let Some((good, amount)) = extract_delivery(&lower) {
-        terms.push(TreatyTerm::Deliver { good, amount });
-    }
-
-    if terms.is_empty() {
-        return (Vec::new(), false);
-    }
-
-    // Accept only if the sender isn't actively distrusted, and every Sign
-    // term would independently clear the ordinary acceptance bar
-    // `evaluate_proposal` already applies to a structured `ProposeTreaty` -
-    // a neutral `peace_disposition` of 1.0, since this fallback has no
-    // particular faction's own diplomatic knob to read.
-    let opinion_ok = world.diplomacy.opinion(obs.faction, from) >= NL_ACCEPT_MIN_OPINION;
-    let treaties_ok = terms
-        .iter()
-        .all(|t| !matches!(t, TreatyTerm::Sign(treaty) if !evaluate_proposal(obs.faction, 1.0, world, from, *treaty)));
-    (terms, opinion_ok && treaties_ok)
+/// `LlmAgent::interpret_nl` (`llm.rs`) reaches for this exact function too,
+/// for the same reason, when its own backend fails or answers with
+/// something that doesn't parse - see that function's own doc.
+pub(crate) fn cannot_interpret_nl(_obs: &Observation, _from: FactionId, _text: &str) -> (Vec<TreatyTerm>, bool) {
+    (Vec::new(), false)
 }
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
-}
-
-/// First `Treaty` whose keyword(s) appear in `lower` (already-lowercased
-/// text), checked in a fixed order so an ambiguous text always resolves the
-/// same way.
-fn extract_treaty_keyword(lower: &str) -> Option<Treaty> {
-    const KEYWORDS: &[(Treaty, &[&str])] = &[
-        (Treaty::PortAccess, &["port access", "港湾利用", "港湾"]),
-        (Treaty::MilitaryAccess, &["military access", "通行権", "通行"]),
-        (Treaty::Alliance, &["alliance", "同盟"]),
-        (Treaty::NonAggression, &["non-aggression", "non aggression", "不可侵"]),
-        (Treaty::Ceasefire, &["ceasefire", "cease-fire", "停戦"]),
-        (Treaty::TradeAgreement, &["trade agreement", "通商協定", "貿易"]),
-    ];
-    KEYWORDS
-        .iter()
-        .find(|(_, keys)| contains_any(lower, keys))
-        .map(|(treaty, _)| *treaty)
-}
-
-/// A crude "amount good" extraction: the first token in `lower` that parses
-/// as a non-negative number, paired with the first `Good` whose key or label
-/// appears anywhere in the text. Both must be present for a `Deliver` term -
-/// a bare number with no recognizable good, or a good with no number, is
-/// left unparsed rather than guessed at.
-fn extract_delivery(lower: &str) -> Option<(Good, f32)> {
-    let amount = lower.split_whitespace().find_map(|tok| {
-        let cleaned: String = tok.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
-        if cleaned.is_empty() {
-            return None;
-        }
-        cleaned.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0)
-    })?;
-    let good = ALL_GOODS_KEYWORDS.iter().find(|(_, keys)| contains_any(lower, keys)).map(|(g, _)| *g)?;
-    Some((good, amount))
-}
-
-const ALL_GOODS_KEYWORDS: &[(Good, &[&str])] = &[
-    (Good::Food, &["food", "食料"]),
-    (Good::Energy, &["energy", "エネルギー"]),
-    (Good::Steel, &["steel", "鉄鋼"]),
-    (Good::Machinery, &["machinery", "機械"]),
-    (Good::Munitions, &["munitions", "軍需品"]),
-    (Good::Arms, &["arms", "兵器"]),
-];
 
 /// Stage 3B AI (docs/phase3-spec.md "AI" under "Stage 3B"): responds to
 /// every pending proposal addressed to this faction, then proactively
@@ -1058,11 +964,35 @@ pub const DEFAULT_CAUTION: [f32; 8] = [1.15, 1.30, 1.45, 0.80, 1.90, 0.95, 1.70,
 pub const DEFAULT_PEACE_DISPOSITION: [f32; 8] = [1.05, 0.80, 1.15, 0.70, 1.25, 0.90, 1.10, 1.35];
 
 /// Builds the default `HeuristicAgent` for faction index `i`, using
-/// `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION` for the first eight
-/// factions and `(1.25, 1.0)` - the middle of both spreads - beyond that.
+/// `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION`.
+///
+/// External code review fix B5: this used to fall back to `(1.25, 1.0)` -
+/// the middle of both spreads - for any faction index past the table, a
+/// made-up personality no scenario actually asked for and indistinguishable
+/// from every other faction past the table (exactly the "every faction past
+/// index 2 behaves identically" bug this file's own Stage 6C doc above
+/// describes fixing for indices 3-7 - the untouched fallback just moved the
+/// same problem to index 8+). A scenario with more factions than either
+/// table defines is a scenario this default tuning genuinely doesn't cover;
+/// per docs/conventions.md §3 (フォールバック原則禁止) that's a hard failure
+/// here, not a silent guess.
 pub fn default_heuristic_agent(i: usize) -> HeuristicAgent {
-    let caution = DEFAULT_CAUTION.get(i).copied().unwrap_or(1.25);
-    let peace_disposition = DEFAULT_PEACE_DISPOSITION.get(i).copied().unwrap_or(1.0);
+    let caution = *DEFAULT_CAUTION.get(i).unwrap_or_else(|| {
+        panic!(
+            "faction {i} has no default AI personality: DEFAULT_CAUTION only covers {} factions - \
+             this scenario has more factions than the default AI tuning table supports; extend \
+             DEFAULT_CAUTION/DEFAULT_PEACE_DISPOSITION or give this scenario its own AI setup",
+            DEFAULT_CAUTION.len(),
+        )
+    });
+    let peace_disposition = *DEFAULT_PEACE_DISPOSITION.get(i).unwrap_or_else(|| {
+        panic!(
+            "faction {i} has no default AI personality: DEFAULT_PEACE_DISPOSITION only covers {} \
+             factions - this scenario has more factions than the default AI tuning table supports; \
+             extend DEFAULT_CAUTION/DEFAULT_PEACE_DISPOSITION or give this scenario its own AI setup",
+            DEFAULT_PEACE_DISPOSITION.len(),
+        )
+    });
     HeuristicAgent::with_peace_disposition(FactionId(i as u32), caution, peace_disposition)
 }
 
@@ -1230,14 +1160,16 @@ impl Agent for HeuristicAgent {
 
     fn decide(&mut self, obs: &Observation) -> Vec<Action> {
         let mut actions = self.decide_for_llm(obs, None);
-        // Stage 4B (docs/phase4-spec.md "Stage 4B"): a plain HeuristicAgent
-        // recipient always falls back to keyword extraction - it has no LLM
-        // backend to reach for. Deliberately outside `decide_for_llm`, which
-        // `LlmAgent` also calls directly for its wrapped fallback (see that
-        // struct's `decide`) with its *own* LLM-based interpretation instead
-        // - putting this here keeps the two from double-answering the same
-        // pending proposal.
-        llm::respond_to_pending_nl_proposals(obs, |from, text| keyword_interpret(obs, from, text), &mut actions);
+        // External code review fix B2 (docs/phase4-spec.md "Stage 4B"): a
+        // plain HeuristicAgent recipient has no LLM to reach for, so it
+        // answers every pending proposal with `cannot_interpret_nl`'s honest
+        // "no" rather than approximating an understanding via keywords.
+        // Deliberately outside `decide_for_llm`, which `LlmAgent` also calls
+        // directly for its wrapped fallback (see that struct's `decide`)
+        // with its *own* LLM-based interpretation instead - putting this
+        // here keeps the two from double-answering the same pending
+        // proposal.
+        llm::respond_to_pending_nl_proposals(obs, |from, text| cannot_interpret_nl(obs, from, text), &mut actions);
         actions
     }
 }

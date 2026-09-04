@@ -7,6 +7,8 @@ mod camera_fit;
 mod event_text;
 mod fonts;
 mod input;
+mod newspaper;
+mod overlay;
 mod palette;
 mod screenshot;
 mod setup;
@@ -20,10 +22,11 @@ use bevy::prelude::*;
 
 pub use screenshot::ScreenshotConfig;
 
+use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::action::Action;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
-use archipelago_sim::world::World as SimWorld;
+use archipelago_sim::world::{LinkKind, World as SimWorld};
 
 use crate::sim_driver::{SimDriver, Speed};
 
@@ -60,6 +63,16 @@ pub(crate) struct SpeedRes {
 #[derive(Resource, Default)]
 pub(crate) struct SelectedRegion(pub Option<RegionId>);
 
+/// The sea zone a plain click selected for inspection, when no unit was
+/// selected first (`input::map_click_select`) - exists purely so
+/// `overlay::sync_blockade_visuals` can reveal a blockaded port's causal
+/// link to a sea zone on demand (Stage 7C follow-up: "quiet the blockade
+/// mark; reveal the connector only when the player has selected that
+/// region or that sea zone" - see `overlay`'s own module doc). Mutually
+/// exclusive with `SelectedRegion`: selecting either clears the other.
+#[derive(Resource, Default)]
+pub(crate) struct SelectedSeaZone(pub Option<SeaZoneId>);
+
 #[derive(Resource)]
 pub(crate) struct SelectedFaction(pub FactionId);
 
@@ -91,6 +104,70 @@ pub(crate) struct MenuRegion(pub Option<RegionId>);
 pub(crate) struct DiplomacyPanel {
     pub open: bool,
     pub target: Option<FactionId>,
+}
+
+/// Stage 7C (docs/phase7-spec.md "1. 補給網の可視化"): `L` toggles the
+/// supply-network overlay - "常時表示だと地図が読みにくい" (always-on would
+/// make the map unreadable), so this starts `false` and every overlay-only
+/// visual (`overlay::sync_supply_overlay`) gates on it. Sea control,
+/// blockade, devastation, and construction markers are *not* gated by
+/// this - only the supply-route/chokepoint layer is (docs/phase7-spec.md
+/// "Stage 7C" items 1 vs. 2/3, which name no toggle for the others).
+#[derive(Resource, Default)]
+pub(crate) struct SupplyOverlay(pub bool);
+
+/// Stage 7C's natural-language proposal compose box (docs/phase7-spec.md
+/// "4. 外交画面": "テキスト入力欄から送り"). Only ever active while the
+/// diplomacy panel is open and a target is selected - see
+/// `input::handle_diplomacy_keys`. `buffer` holds exactly what's been typed
+/// so far; nothing is sent until `Enter`.
+#[derive(Resource, Default)]
+pub(crate) struct NlCompose {
+    pub active: bool,
+    pub buffer: String,
+    /// External code review fix A1: set alongside `active = true` by
+    /// `input::handle_diplomacy_keys`'s `T` binding, and consumed (cleared,
+    /// with no text collected) by `input::nl_compose_text_input` the very
+    /// next time that system runs. Both the activation and the text-
+    /// collection system read this same frame's `KeyboardInput` events, but
+    /// `keyboard_input` (which reads `T` via `ButtonInput<KeyCode>`, not the
+    /// raw event stream) runs first in the `Update` chain - so without this
+    /// flag, `nl_compose_text_input` would see `active` already `true` and
+    /// collect that very same `T` keypress as the compose buffer's first
+    /// character, prefixing every proposal with a stray "t"
+    /// (`nl_compose_activation_key_is_not_collected_as_text`).
+    pub just_activated: bool,
+}
+
+/// One newspaper issue: every living faction's article for the same
+/// reporting period (`archipelago_agents::newspaper::generate_issue`'s own
+/// shape) plus the period it covers, kept so the player can page back
+/// through history (docs/phase7-spec.md "5. 新聞": "履歴を遡れること").
+pub(crate) struct NewspaperIssue {
+    pub period_start: u32,
+    pub period_end: u32,
+    pub articles: Vec<NewspaperArticle>,
+}
+
+/// Stage 7C's newspaper panel (`N` to toggle) - see `newspaper::tick_newspaper`
+/// for how `history` is grown and `ui::update_newspaper_panel` for how it's
+/// shown. This client wires no LLM backend of its own (`apps/game` never
+/// gained an `archipelago-llm` dependency for this stage - out of the hard
+/// constraints' scope), so every issue is `archipelago_agents::newspaper`'s
+/// already-approved mechanical template fallback
+/// (docs/conventions.md §3's approved-exceptions table), exactly like
+/// `apps/headless`'s own default (`--agent heuristic`, no `--backend`).
+#[derive(Resource, Default)]
+pub(crate) struct NewspaperState {
+    pub history: Vec<NewspaperIssue>,
+    pub period_start: u32,
+    pub period_events: Vec<archipelago_sim::event::Event>,
+    pub open: bool,
+    /// Index into `history` currently shown - `None` means "the latest
+    /// issue", so a freshly generated issue is always what's on screen
+    /// until the player pages back (`input`'s `ArrowLeft`/`ArrowRight`
+    /// while the newspaper panel is open).
+    pub viewing: Option<usize>,
 }
 
 /// Which commodity the industry-priority/logistics-priority/import-plan
@@ -161,6 +238,57 @@ pub(crate) struct SeaZoneMarker(pub SeaZoneId);
 #[derive(Component)]
 pub(crate) struct UnitMarker(pub UnitId);
 
+/// One segment of a region-to-region link's rendered geometry (a dashed
+/// link is several rectangle entities, `setup::spawn_link`'s own doc) -
+/// tagged with both endpoints and its `kind` so `overlay::sync_supply_overlay`
+/// can find every segment of a given link and recolor them together for
+/// the supply-overlay's chokepoint/active-route signal, without needing a
+/// second, parallel copy of the link geometry.
+#[derive(Component)]
+pub(crate) struct LinkVisualMarker {
+    pub a: RegionId,
+    pub b: RegionId,
+    pub kind: LinkKind,
+}
+
+/// The supply-overlay ring around one region (Stage 7C, docs/phase7-spec.md
+/// "1."), pre-spawned once at startup and only ever recolored/shown-or-hidden
+/// per frame - never spawned/despawned, since the region set is fixed for
+/// the life of a run.
+#[derive(Component)]
+pub(crate) struct SupplyRingMarker(pub RegionId);
+
+/// A region's in-progress-construction marker (Stage 7C, docs/phase7-spec.md
+/// "3. 戦災と復興": "進行中の工事...を...表示"), pre-spawned once per region
+/// and shown only while `Region::construction.is_some()`.
+#[derive(Component)]
+pub(crate) struct ConstructionMarker(pub RegionId);
+
+/// A saturated-chokepoint marker at one same-owner link's midpoint (Stage
+/// 7C follow-up), pre-spawned once per link pair alongside its
+/// `LinkVisualMarker` geometry (`setup::setup`) and shown/hidden plus
+/// rescaled every frame by `overlay::sync_supply_overlay` - never
+/// spawned/despawned at runtime, since the region/link graph itself is
+/// fixed for the life of a run (only which links are *currently* saturated
+/// changes). `a`/`b` match whatever `(region.id, link.to)` orientation
+/// `setup::setup`'s own link-spawning loop used, exactly like
+/// `LinkVisualMarker::{a,b}`.
+#[derive(Component)]
+pub(crate) struct ChokepointMarker {
+    pub a: RegionId,
+    pub b: RegionId,
+}
+
+/// A blockaded-port marker or its line to the sea zone responsible
+/// (docs/phase7-spec.md "2.": "封鎖されている港を地図上に明示する。どの
+/// 海域の制海権が原因かを結ぶ") - which ports are blockaded, and by which
+/// zone, changes at runtime (unlike the link/region graph itself), so
+/// these are despawned and respawned fresh every frame
+/// (`overlay::sync_blockade_visuals`) rather than pre-spawned and merely
+/// hidden.
+#[derive(Component)]
+pub(crate) struct BlockadeVisual;
+
 #[derive(Component)]
 pub(crate) struct MainCamera;
 
@@ -182,6 +310,18 @@ pub(crate) struct InspectText;
 #[derive(Component)]
 pub(crate) struct PlayerPanelText;
 
+/// Stage 7C's newspaper panel (`N` to toggle) - see `ui::update_newspaper_panel`.
+#[derive(Component)]
+pub(crate) struct NewspaperPanelText;
+
+/// Stage 7C visual-hierarchy follow-up: marks a legend row (`setup::spawn_legend`)
+/// that only means something while the supply overlay itself is on - shown/
+/// hidden together with `SupplyOverlay` by `overlay::sync_legend_visibility`.
+/// The legend's other rows (blockade/construction - both always-on features)
+/// never carry this and stay permanently visible.
+#[derive(Component)]
+pub(crate) struct SupplyOnlyLegendRow;
+
 /// Builds and runs the Bevy `App`. `world` must already be validated
 /// (`archipelago_sim::scenario::build_world`/`load_str`/`load_file`) -
 /// `main.rs` never constructs one any other way.
@@ -198,6 +338,7 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
     let sea_centers = sea_zone_centers(&world, &positions);
     let region_count = world.regions.len();
     let unit_count = world.units.len();
+    let start_day = world.day;
 
     let player_faction = play.as_ref().map(|p| p.player);
     let record_path = play.as_ref().and_then(|p| p.record.clone());
@@ -228,10 +369,29 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
     // the player to decide) both keep Stage 7A's running-at-1x default.
     let start_paused = player_faction.is_some() && !is_replay;
 
+    // Verification-only conveniences (`--debug-*`, `screenshot::ScreenshotConfig`'s
+    // own doc): with no keyboard at the wheel before an automated screenshot
+    // fires, these let a panel/overlay start already open instead of
+    // needing a live `L`/`D`/`N` press. `false` (every default) whenever
+    // `--screenshot` wasn't given at all - identical to Stage 7A/7B's
+    // startup state.
+    let debug_open_diplomacy = screenshot.as_ref().is_some_and(|c| c.open_diplomacy);
+    let debug_open_newspaper = screenshot.as_ref().is_some_and(|c| c.open_newspaper);
+    let debug_supply_overlay = screenshot.as_ref().is_some_and(|c| c.supply_overlay);
+    // Computed from `world` here, before it moves into `SimDriver::new_with_player`
+    // below - same "lowest-id other living faction" default `input::
+    // keyboard_input`'s own `D` binding picks.
+    let debug_diplomacy_target = if debug_open_diplomacy {
+        player_faction.and_then(|p| world.factions.iter().find(|f| f.id != p && f.alive).map(|f| f.id))
+    } else {
+        None
+    };
+
     app.insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.10)))
         .insert_resource(SimRes(SimDriver::new_with_player(world, seed, player_faction, replay_days)))
         .insert_resource(SpeedRes { last_active: Speed::X1, paused: start_paused })
         .insert_resource(SelectedRegion::default())
+        .insert_resource(SelectedSeaZone::default())
         .insert_resource(SelectedFaction(FactionId(0)))
         .insert_resource(EventLog::default())
         .insert_resource(ScenarioMeta { name: scenario_name, max_days })
@@ -240,15 +400,20 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
         .insert_resource(PlayerFaction(player_faction))
         .insert_resource(SelectedUnits::default())
         .insert_resource(MenuRegion::default())
-        .insert_resource(DiplomacyPanel { open: false, target: None })
+        .insert_resource(DiplomacyPanel { open: debug_open_diplomacy, target: debug_diplomacy_target })
         .insert_resource(ActiveGood::default())
         .insert_resource(LastRejection::default())
+        .insert_resource(SupplyOverlay(debug_supply_overlay))
+        .insert_resource(NlCompose::default())
+        .insert_resource(NewspaperState { period_start: start_day, open: debug_open_newspaper, ..Default::default() })
         .add_systems(Startup, setup::setup)
         .add_systems(
             Update,
             (
                 camera_fit::fit_camera_to_map,
+                screenshot::apply_debug_camera,
                 input::keyboard_input,
+                input::nl_compose_text_input,
                 input::mouse_pan_zoom,
                 input::map_click_select,
                 input::map_right_click_menu,
@@ -262,11 +427,16 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
                 visuals::sync_region_visuals,
                 visuals::sync_sea_zone_visuals,
                 visuals::sync_unit_visuals,
+                overlay::sync_supply_overlay,
+                overlay::sync_construction_markers,
+                overlay::sync_blockade_visuals,
+                overlay::sync_legend_visibility,
                 ui::update_top_bar,
                 ui::update_faction_panel,
                 ui::update_event_log,
                 ui::update_inspect_panel,
                 ui::update_player_panel,
+                ui::update_newspaper_panel,
             )
                 .chain()
                 .after(sim_control::advance_simulation),

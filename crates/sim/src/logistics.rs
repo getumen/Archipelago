@@ -9,8 +9,9 @@ use crate::balance::{
     UNIT_EQUIPMENT,
 };
 use crate::good::Good;
+use crate::ids::RegionId;
 use crate::naval;
-use crate::world::World;
+use crate::world::{LinkKind, World};
 
 /// Recomputes `world.supply`: the maximum throughput each region can draw
 /// on, propagated from every region's own industry/port base through
@@ -437,4 +438,216 @@ pub fn instantaneous_arms_delivery(world: &World, unit_id: crate::ids::UnitId) -
     let demand_arms = need_equipment * ARMS_SUPPLY_NEED_PER_GAP;
     let ratio = (share_arms / demand_arms).min(1.0);
     (ratio, need_equipment * ratio)
+}
+
+// ---------------------------------------------------------------------
+// Stage 7C (docs/phase7-spec.md "1. 補給網の可視化"): read-only display
+// support. Nothing below this line is ever called from `Simulation::step`
+// or any tick system, and nothing here writes to `World` - it only ever
+// reads `world.supply` (already computed by `recompute_supply` this tick)
+// and re-derives, per region/link, the same numbers that produced it.
+// ---------------------------------------------------------------------
+
+/// A same-owner link's actual relayed throughput this tick against its own
+/// ceiling (`LinkKind::max_throughput() * strait_factor`). `flow` is
+/// clamped into `0.0..=capacity` at construction, so this type can never
+/// represent "flowing more than its own cap allows" - `ratio`/
+/// `is_saturated` are derived from the two stored numbers, never cached
+/// separately, so they can't drift out of sync with them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LinkThroughput {
+    flow: f32,
+    capacity: f32,
+}
+
+/// How close to its own ceiling counts as "stuck there" (docs/phase7-spec.md
+/// "1.": "上限に張り付いているリンクを明示する") - guards against float
+/// noise in the `min()` chain `recompute_supply`'s own per-link formula
+/// runs, not a design threshold of its own.
+const SATURATION_EPSILON: f32 = 1e-3;
+
+impl LinkThroughput {
+    fn new(flow: f32, capacity: f32) -> Self {
+        let capacity = capacity.max(0.0);
+        LinkThroughput { flow: flow.clamp(0.0, capacity), capacity }
+    }
+
+    pub fn flow(self) -> f32 {
+        self.flow
+    }
+
+    pub fn capacity(self) -> f32 {
+        self.capacity
+    }
+
+    /// `flow / capacity`, `0.0` for a link with no capacity at all (should
+    /// not occur - every `LinkKind::max_throughput()` is positive - but a
+    /// division by exactly `0.0` is still not something to hand back as a
+    /// ratio).
+    pub fn ratio(self) -> f32 {
+        if self.capacity > 0.0 {
+            self.flow / self.capacity
+        } else {
+            0.0
+        }
+    }
+
+    /// A chokepoint: this link's flow has reached its own ceiling, so
+    /// widening whatever's upstream of it would do nothing - the ceiling
+    /// itself is what's holding supply back.
+    pub fn is_saturated(self) -> bool {
+        self.capacity > 0.0 && self.flow >= self.capacity - SATURATION_EPSILON
+    }
+}
+
+/// Which same-owner neighbor (if any) is relaying enough to explain a
+/// region's `world.supply` entry - the "供給がどの経路で来ているか"
+/// docs/phase7-spec.md asks the overlay to reconstruct. Never a guess: see
+/// `region_route`'s doc for the exact identity this is read off of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SupplySource {
+    /// This region's own industry/port base (`Region::supply_source_blockaded`)
+    /// is at least as large as anything any same-owner, non-contested
+    /// neighbor currently relays in - there is no route to draw.
+    Own,
+    /// This same-owner neighbor's relay is what the region's throughput is
+    /// actually attributable to.
+    Relay(RegionId),
+}
+
+/// One region's reconstructed place in the supply network, alongside the
+/// raw `contested`/`blockaded` reads `recompute_supply` itself judged it
+/// by - a region that can't currently relay onward (`contested`) still
+/// shows here with whatever it receives; `region_route` never invents a
+/// value for it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SupplyRegionRoute {
+    pub region: RegionId,
+    /// `world.supply[region]` - repeated here so a caller can read
+    /// everything about one region off a single value.
+    pub cap: f32,
+    pub contested: bool,
+    pub blockaded: bool,
+    pub own_source: f32,
+    pub source: SupplySource,
+}
+
+/// Reconstructs every region's `SupplyRegionRoute` and every currently-
+/// relay-capable same-owner link's `LinkThroughput`, purely by re-reading
+/// `world.supply` (already populated by `recompute_supply` this tick) - see
+/// `supply_route_reconstruction_matches_logistics` for why this is
+/// guaranteed to agree with it, not merely tested to.
+///
+/// `recompute_supply`'s relaxation is a monotone fixed point: each region's
+/// `cap` only ever grows, each link's contribution to its target is a
+/// non-decreasing function of its source's own `cap`, and the loop keeps
+/// re-visiting a region's outgoing links every time that region's `cap`
+/// grows until nothing changes anywhere. A monotone relaxation like that
+/// always converges to exactly `cap[j] == max(own_source[j], max over every
+/// same-owner, non-contested-source neighbor i of that link's own formula
+/// applied to i's *final* cap[i])` - regardless of what order the queue
+/// happened to visit regions in. So this function does not need to replay
+/// that queue (and risk drifting from it if the two implementations were
+/// ever edited out of step): it recomputes the same per-link formula
+/// directly from the already-converged `world.supply`, and the result is
+/// the same maximum by construction.
+pub fn supply_routes(world: &World) -> Vec<SupplyRegionRoute> {
+    let n = world.regions.len();
+    let contested: Vec<bool> = (0..n)
+        .map(|i| {
+            let region = &world.regions[i];
+            world.has_enemy_units(region.id, region.owner)
+        })
+        .collect();
+    let blockaded: Vec<bool> = (0..n).map(|i| naval::is_port_blockaded(world, world.regions[i].id)).collect();
+    let node_throughput: Vec<f32> = world.regions.iter().map(|r| r.node_throughput()).collect();
+
+    (0..n)
+        .map(|j| {
+            let region_j = &world.regions[j];
+            let own_source = region_j.supply_source_blockaded(blockaded[j]);
+            let infra_j = region_j.effective_infrastructure();
+
+            let mut best_source = SupplySource::Own;
+            let mut best_value = own_source;
+            for link in &region_j.links {
+                let i = link.to.index();
+                if world.regions[i].owner != region_j.owner || contested[i] {
+                    continue; // exactly `recompute_supply`'s own relay eligibility check
+                }
+                let strait = match link.strait_zone {
+                    Some(zone) => naval::strait_factor(world, zone, region_j.owner),
+                    None => 1.0,
+                };
+                let v = (world.supply[i] * link.kind.retention() * (0.55 + 0.45 * infra_j))
+                    .min(link.kind.max_throughput() * strait)
+                    .min(node_throughput[j]);
+                if v > best_value {
+                    best_value = v;
+                    best_source = SupplySource::Relay(link.to);
+                }
+            }
+
+            SupplyRegionRoute {
+                region: region_j.id,
+                cap: world.supply[j],
+                contested: contested[j],
+                blockaded: blockaded[j],
+                own_source,
+                source: best_source,
+            }
+        })
+        .collect()
+}
+
+/// One directed, currently-relay-capable same-owner link's throughput this
+/// tick - `from` is the relaying source, `to` the region it feeds.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SupplyLinkFlow {
+    pub from: RegionId,
+    pub to: RegionId,
+    pub kind: LinkKind,
+    pub throughput: LinkThroughput,
+}
+
+/// Every same-owner, currently-relay-capable directed link's
+/// `LinkThroughput` this tick - one entry per direction a source region
+/// could actually relay in (contested sources are skipped entirely, same
+/// as `supply_routes`/`recompute_supply` - there is nothing to compute a
+/// flow for on a link out of a region that cannot relay at all). A
+/// bidirectional link pair with both endpoints eligible appears as two
+/// entries, since the two directions can genuinely disagree (different
+/// target infrastructure, different node throughput, different upstream
+/// `cap`).
+pub fn supply_link_flows(world: &World) -> Vec<SupplyLinkFlow> {
+    let n = world.regions.len();
+    let contested: Vec<bool> = (0..n)
+        .map(|i| {
+            let region = &world.regions[i];
+            world.has_enemy_units(region.id, region.owner)
+        })
+        .collect();
+    let node_throughput: Vec<f32> = world.regions.iter().map(|r| r.node_throughput()).collect();
+
+    let mut out = Vec::new();
+    for j in 0..n {
+        let region_j = &world.regions[j];
+        let infra_j = region_j.effective_infrastructure();
+        for link in &region_j.links {
+            let i = link.to.index();
+            if world.regions[i].owner != region_j.owner || contested[i] {
+                continue;
+            }
+            let strait = match link.strait_zone {
+                Some(zone) => naval::strait_factor(world, zone, region_j.owner),
+                None => 1.0,
+            };
+            let capacity = link.kind.max_throughput() * strait;
+            let flow = (world.supply[i] * link.kind.retention() * (0.55 + 0.45 * infra_j))
+                .min(capacity)
+                .min(node_throughput[j]);
+            out.push(SupplyLinkFlow { from: link.to, to: region_j.id, kind: link.kind, throughput: LinkThroughput::new(flow, capacity) });
+        }
+    }
+    out
 }

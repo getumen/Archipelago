@@ -1,35 +1,28 @@
-//! Deterministic fallback map layout for a scenario that ships no
-//! `position` on some or all of its regions (docs/phase7-spec.md "地域の座
-//! 標": "座標がない場合は、隣接グラフからの決定論的なレイアウトにフォール
-//! バックする（ユーザが書いた任意のシナリオも描画できること）"). Pure graph
-//! math over `archipelago_sim::world::World` - no `bevy` import anywhere in
-//! this file, no `HashMap`/`HashSet` (this crate's own copy of `crates/sim`'s
-//! "反復順に依存しない" discipline), so `layout_fallback_is_deterministic`
-//! needs no window and no random-seeded hasher to worry about.
+//! Map layout for `apps/game` (docs/phase7-spec.md "地域の座標"): every
+//! region's on-screen position comes straight from the scenario file's own
+//! `Region::position`.
+//!
+//! External code review fix B4: this module used to also compute a
+//! deterministic breadth-first graph layout for any region a scenario left
+//! unplaced, so a coordinate-free scenario could still be rendered. The
+//! project owner rejected that fallback (docs/conventions.md §3, フォールバ
+//! ック原則禁止): `Region::position` is required now
+//! (`archipelago_sim::scenario::parse_position`), so a scenario missing one
+//! anywhere is rejected with a specific `ScenarioError::Schema` at load time
+//! (`scenario::load_file`/`load_str`, before `apps/game::app::run` - and
+//! therefore this module - ever sees the `World`), and `region_positions`
+//! below can simply read every region's own coordinate straight through.
 
-use std::collections::VecDeque;
-
-use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::World;
 
-/// Vertical distance between BFS layers.
-const LAYER_SPACING: f32 = 140.0;
-/// Horizontal distance between regions sharing a layer.
-const NODE_SPACING: f32 = 120.0;
-
 /// One `[x, y]` per region, indexed by `RegionId::index()` (so `positions[i]`
-/// is `world.regions[i]`'s position): the scenario's own `Region::position`
-/// wherever it set one, and a deterministic breadth-first layering off the
-/// region graph (`World::neighbors`) everywhere else. A scenario that named
-/// coordinates for every region never touches the fallback at all; one that
-/// named none gets a full graph layout; a mix of the two (some regions
-/// placed, some not) is honoured region by region.
+/// is `world.regions[i]`'s position): exactly the scenario's own
+/// `Region::position` for every region. Infallible - `world` is only ever
+/// built by `archipelago_sim::scenario::build_world`/`load_str`/`load_file`
+/// (`app::run`'s own doc), every one of which already rejects a scenario
+/// missing a `position` anywhere before a `World` is ever produced at all.
 pub fn region_positions(world: &World) -> Vec<[f32; 2]> {
-    if world.regions.iter().all(|r| r.position.is_some()) {
-        return world.regions.iter().map(|r| r.position.expect("checked above")).collect();
-    }
-    let fallback = bfs_layer_layout(world);
-    world.regions.iter().enumerate().map(|(i, r)| r.position.unwrap_or(fallback[i])).collect()
+    world.regions.iter().map(|r| r.position).collect()
 }
 
 /// One outward-pointing unit vector `[dx, dy]` per region, indexed the same
@@ -85,93 +78,38 @@ pub fn label_push_directions(positions: &[[f32; 2]]) -> Vec<[f32; 2]> {
     out
 }
 
-/// Breadth-first layering: `RegionId(0)` (and, if the graph has more than
-/// one connected component, the lowest-id region of each remaining
-/// component - a validated scenario is always fully connected, but this
-/// stays defined for an arbitrary `World` regardless) seeds layer 0; every
-/// region's layer is one more than the layer it was first reached from.
-/// Within a layer, regions are laid out left-to-right in ascending
-/// `RegionId` order, centered on x = 0.
-///
-/// Deterministic by construction: `World::neighbors` iterates `Region::
-/// links`, a `Vec` in scenario-file order, but is explicitly re-sorted by id
-/// below before being queued anyway - so this depends only on `RegionId`
-/// values and file-authored adjacency, never on any hash-based iteration
-/// order, and gives the same output every time for the same `World`.
-fn bfs_layer_layout(world: &World) -> Vec<[f32; 2]> {
-    let n = world.regions.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut layer = vec![u32::MAX; n];
-    let mut queue: VecDeque<RegionId> = VecDeque::new();
-
-    for start in 0..n {
-        if layer[start] != u32::MAX {
-            continue;
-        }
-        layer[start] = 0;
-        queue.push_back(RegionId(start as u32));
-        while let Some(current) = queue.pop_front() {
-            let mut neighbors: Vec<RegionId> = world.neighbors(current).collect();
-            neighbors.sort_by_key(|r| r.0);
-            let next_layer = layer[current.index()] + 1;
-            for next in neighbors {
-                if layer[next.index()] == u32::MAX {
-                    layer[next.index()] = next_layer;
-                    queue.push_back(next);
-                }
-            }
-        }
-    }
-
-    let max_layer = layer.iter().copied().max().unwrap_or(0);
-    let mut positions = vec![[0.0f32; 2]; n];
-    for l in 0..=max_layer {
-        let mut members: Vec<usize> = (0..n).filter(|&i| layer[i] == l).collect();
-        members.sort_unstable();
-        let count = members.len();
-        for (slot, &i) in members.iter().enumerate() {
-            let x = (slot as f32 - (count as f32 - 1.0) / 2.0) * NODE_SPACING;
-            let y = l as f32 * LAYER_SPACING;
-            positions[i] = [x, y];
-        }
-    }
-    positions
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use archipelago_sim::scenario;
 
-    /// A 5-region scenario naming no `position` field on any region at all -
-    /// the shape every pre-Stage-7A scenario has. `a` is the hub (b, c, d
-    /// all one hop away), `e` hangs two hops off `b` - enough branching to
-    /// exercise both "multiple regions share a layer" and "a layer with
-    /// just one region".
-    const NO_POSITION_SCENARIO: &str = r#"
+    /// A 5-region scenario naming a `position` for every region - `a` is the
+    /// hub (b, c, d all one hop away), `e` hangs two hops off `b`, though the
+    /// graph shape itself is no longer load-bearing for this module (only
+    /// `Region::position` is read); kept branching anyway so this fixture
+    /// still exercises `scenario::load_str`'s ordinary connectivity checks.
+    const ALL_POSITIONS_SCENARIO: &str = r#"
     {
       "regions": [
         { "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
           "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-          "infrastructure": 0.5, "port": 0.0,
+          "infrastructure": 0.5, "port": 0.0, "position": [7.0, 9.0],
           "links": [ { "to": "b", "kind": "rail" }, { "to": "c", "kind": "rail" }, { "to": "d", "kind": "rail" } ] },
         { "id": "b", "name": "B", "terrain": "plain", "population": 10.0,
           "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-          "infrastructure": 0.5, "port": 0.0,
+          "infrastructure": 0.5, "port": 0.0, "position": [-120.0, 140.0],
           "links": [ { "to": "a", "kind": "rail" }, { "to": "e", "kind": "rail" } ] },
         { "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
           "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-          "infrastructure": 0.5, "port": 0.0,
+          "infrastructure": 0.5, "port": 0.0, "position": [0.0, 140.0],
           "links": [ { "to": "a", "kind": "rail" } ] },
         { "id": "d", "name": "D", "terrain": "plain", "population": 10.0,
           "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-          "infrastructure": 0.5, "port": 0.0,
+          "infrastructure": 0.5, "port": 0.0, "position": [120.0, 140.0],
           "links": [ { "to": "a", "kind": "rail" } ] },
         { "id": "e", "name": "E", "terrain": "plain", "population": 10.0,
           "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-          "infrastructure": 0.5, "port": 0.0,
+          "infrastructure": 0.5, "port": 0.0, "position": [0.0, 280.0],
           "links": [ { "to": "b", "kind": "rail" } ] }
       ],
       "sea_zones": [],
@@ -181,67 +119,37 @@ mod tests {
     }
     "#;
 
-    /// `layout_fallback_is_deterministic` (docs/phase7-spec.md "Stage 7A の
-    /// 受け入れ基準"): the fallback layout for a scenario with no authored
-    /// coordinates is the same every time it's computed, pinned against a
-    /// hardcoded expected layout rather than merely "call twice and compare
-    /// to itself" (which a `HashMap`-based implementation could still pass
-    /// within a single process even while being unsound across processes).
-    ///
-    /// Confirmed this can actually fail: temporarily swapped the `Vec<usize>`
-    /// layer-membership scan for an unsorted `HashSet<RegionId>` (removing
-    /// the `sort_unstable()` call) and re-ran this test with `-- --test-
-    /// threads=1` across several fresh `cargo test` invocations - the
-    /// asserted-exact positions for the width-3 layer (`b`, `c`, `d`) came
-    /// back in a different left-to-right order on different runs, failing
-    /// the exact-position assertions below. Reverted before committing.
+    /// External code review fix B4: `region_positions` reads every region's
+    /// own `Region::position` verbatim - no fallback layout exists to fall
+    /// back to any more (this module's own doc explains why the previous
+    /// `layout_fallback_is_deterministic`/BFS-layout test was removed rather
+    /// than kept: it described a fallback that no longer exists).
     #[test]
-    fn layout_fallback_is_deterministic() {
-        let world = scenario::load_str(NO_POSITION_SCENARIO).expect("NO_POSITION_SCENARIO must be a valid scenario");
-        assert!(world.regions.iter().all(|r| r.position.is_none()), "fixture must name no positions");
-
-        let first = region_positions(&world);
-        let second = region_positions(&world);
-        assert_eq!(first, second, "computing the fallback layout twice must give the exact same positions");
-
-        // Pinned expected layout: layer 0 = {a}, layer 1 = {b, c, d} (b < c
-        // < d by id), layer 2 = {e}.
-        let a = first[0];
-        let b = first[1];
-        let c = first[2];
-        let d = first[3];
-        let e = first[4];
-        assert_eq!(a, [0.0, 0.0], "the BFS root must sit at the origin");
-        assert_eq!(b[1], 140.0, "b is one hop from a");
-        assert_eq!(c[1], 140.0, "c is one hop from a");
-        assert_eq!(d[1], 140.0, "d is one hop from a");
-        assert!(b[0] < c[0], "layer members must be ordered left-to-right by ascending RegionId (b before c)");
-        assert!(c[0] < d[0], "layer members must be ordered left-to-right by ascending RegionId (c before d)");
-        assert_eq!(b[0], -120.0);
-        assert_eq!(c[0], 0.0);
-        assert_eq!(d[0], 120.0);
-        assert_eq!(e, [0.0, 280.0], "e is two hops from a, straight through its only neighbor b");
+    fn region_positions_reads_every_region_verbatim() {
+        let world = scenario::load_str(ALL_POSITIONS_SCENARIO).expect("ALL_POSITIONS_SCENARIO must be a valid scenario");
+        let positions = region_positions(&world);
+        assert_eq!(
+            positions,
+            vec![[7.0, 9.0], [-120.0, 140.0], [0.0, 140.0], [120.0, 140.0], [0.0, 280.0]],
+            "region_positions must return each region's own scenario-authored position, unchanged"
+        );
     }
 
-    /// A scenario naming a `position` for every region must use exactly
-    /// those coordinates - the fallback is never consulted at all.
+    /// External code review fix B4: a scenario that leaves even one region's
+    /// `position` unset is now rejected outright at scenario-load time
+    /// (`archipelago_sim::scenario::parse_position`'s own tests cover the
+    /// error in detail) - `apps/game::layout` never gets a `World` to fall
+    /// back for in the first place. This is the "reject a scenario that
+    /// lacks them" half of B4's fix, exercised from this crate's own call
+    /// site rather than only from `crates/sim`.
     #[test]
-    fn explicit_positions_are_used_verbatim_when_complete() {
-        let with_positions = NO_POSITION_SCENARIO.replacen(
-            r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,"#,
-            r#"{ "id": "a", "name": "A", "position": [7.0, 9.0], "terrain": "plain", "population": 10.0,"#,
-            1,
-        );
-        // Only `a` has a position; the other four still fall back - proves
-        // `region_positions` honours an explicit position exactly (not
-        // "close to" the fallback) while still filling in every gap.
-        let world = scenario::load_str(&with_positions).expect("must still be a valid scenario");
-        let positions = region_positions(&world);
-        assert_eq!(positions[0], [7.0, 9.0], "an explicit position must be used verbatim, not overridden by the fallback");
-        // The other four regions still get *some* position (the fallback
-        // never leaves a region unplaced).
-        for &p in &positions[1..] {
-            assert!(p[0].is_finite() && p[1].is_finite());
+    fn scenario_missing_a_position_is_rejected_before_layout_ever_runs() {
+        let missing_one = ALL_POSITIONS_SCENARIO.replacen(r#", "position": [7.0, 9.0],"#, ",", 1);
+        match scenario::load_str(&missing_one) {
+            Err(archipelago_sim::scenario::ScenarioError::Schema(msg)) => {
+                assert!(msg.contains("position"), "expected the error to name `position`, got {msg:?}");
+            }
+            other => panic!("expected a distinct Schema error for a scenario missing one region's position, got {other:?}"),
         }
     }
 

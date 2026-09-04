@@ -155,20 +155,23 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
             world.faction(*to).name,
             text,
         ),
-        Event::NaturalLanguageAccepted { from, to } => format!(
-            "自然言語外交・成立: {} が {} の提案を受諾",
+        Event::NaturalLanguageAccepted { from, to, terms } => format!(
+            "自然言語外交・成立: {} が {} の提案を受諾 ({}件)",
             world.faction(*to).name,
             world.faction(*from).name,
+            terms.len(),
         ),
-        Event::NaturalLanguageRejected { from, to } => format!(
-            "自然言語外交・拒否: {} が {} の提案を拒否",
+        Event::NaturalLanguageRejected { from, to, terms } => format!(
+            "自然言語外交・拒否: {} が {} の提案を拒否 ({}件)",
             world.faction(*to).name,
             world.faction(*from).name,
+            terms.len(),
         ),
-        Event::NaturalLanguageTermsInvalid { from, to } => format!(
-            "自然言語外交・不成立: {} が {} の提案を受諾しようとしたが条件が満たせず不成立",
+        Event::NaturalLanguageTermsInvalid { from, to, terms } => format!(
+            "自然言語外交・不成立: {} が {} の提案を受諾しようとしたが条件が満たせず不成立 ({}件)",
             world.faction(*to).name,
             world.faction(*from).name,
+            terms.len(),
         ),
     };
     println!("[day {day:4}] {line}");

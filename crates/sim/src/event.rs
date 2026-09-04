@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::diplomacy::Treaty;
+use crate::diplomacy::{Treaty, TreatyTerm};
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::world::Station;
 
@@ -129,23 +129,34 @@ pub enum Event {
     },
     /// `Action::RespondToNaturalLanguageProposal` accepted the deal *and*
     /// every one of its interpreted `TreatyTerm`s validated - the deal
-    /// actually took effect.
+    /// actually took effect. `terms` is the recipient's own interpretation
+    /// exactly as it was applied - carried here (Stage 7C,
+    /// docs/phase7-spec.md "4. 外交画面": "解釈された TreatyTerm と可否を
+    /// 表示する") purely so a display layer can show what was actually
+    /// decided; nothing in this crate re-derives or guesses at it from
+    /// anywhere else.
     NaturalLanguageAccepted {
         from: FactionId,
         to: FactionId,
+        terms: Vec<TreatyTerm>,
     },
     /// `Action::RespondToNaturalLanguageProposal` turned the proposal down.
+    /// `terms` is still the recipient's interpretation of the offer it
+    /// rejected - see `NaturalLanguageAccepted`'s doc.
     NaturalLanguageRejected {
         from: FactionId,
         to: FactionId,
+        terms: Vec<TreatyTerm>,
     },
     /// `Action::RespondToNaturalLanguageProposal` said "accept", but at
     /// least one interpreted `TreatyTerm` failed validation against the
     /// current board - the whole deal was discarded, nothing changed
-    /// (docs/phase4-spec.md: "LLM が「受諾」と返しても...成立しない").
+    /// (docs/phase4-spec.md: "LLM が「受諾」と返しても...成立しない"). `terms`
+    /// is what was attempted - see `NaturalLanguageAccepted`'s doc.
     NaturalLanguageTermsInvalid {
         from: FactionId,
         to: FactionId,
+        terms: Vec<TreatyTerm>,
     },
 }
 
@@ -265,20 +276,20 @@ impl fmt::Display for Event {
                 "faction {} sends a natural-language proposal to faction {}: \"{}\"",
                 from.0, to.0, text
             ),
-            Event::NaturalLanguageAccepted { from, to } => write!(
+            Event::NaturalLanguageAccepted { from, to, terms } => write!(
                 f,
-                "faction {} accepts faction {}'s natural-language proposal",
-                to.0, from.0
+                "faction {} accepts faction {}'s natural-language proposal ({} term{})",
+                to.0, from.0, terms.len(), if terms.len() == 1 { "" } else { "s" }
             ),
-            Event::NaturalLanguageRejected { from, to } => write!(
+            Event::NaturalLanguageRejected { from, to, terms } => write!(
                 f,
-                "faction {} rejects faction {}'s natural-language proposal",
-                to.0, from.0
+                "faction {} rejects faction {}'s natural-language proposal ({} term{})",
+                to.0, from.0, terms.len(), if terms.len() == 1 { "" } else { "s" }
             ),
-            Event::NaturalLanguageTermsInvalid { from, to } => write!(
+            Event::NaturalLanguageTermsInvalid { from, to, terms } => write!(
                 f,
-                "faction {} tried to accept faction {}'s natural-language proposal, but its terms no longer held",
-                to.0, from.0
+                "faction {} tried to accept faction {}'s natural-language proposal, but its terms no longer held ({} term{})",
+                to.0, from.0, terms.len(), if terms.len() == 1 { "" } else { "s" }
             ),
         }
     }

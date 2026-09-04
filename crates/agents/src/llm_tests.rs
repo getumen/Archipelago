@@ -25,7 +25,7 @@ fn malformed_response_is_discarded() {
     let faction = FactionId(0);
     let fallback = HeuristicAgent::new(faction, 1.15);
     let backend = MockBackend::new(vec![
-        Ok(r#"{"posture":"defensive","rationale":"dig in"}"#.to_string()),
+        Ok(r#"{"posture":"defensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"dig in"}"#.to_string()),
         Ok("this is not json at all {".to_string()),
     ]);
     let mut agent = LlmAgent::new(backend, fallback);

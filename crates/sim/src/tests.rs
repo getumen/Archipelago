@@ -3979,15 +3979,15 @@ const MINI_VALID_SCENARIO: &str = r#"
   "regions": [
     { "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
       "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-      "infrastructure": 0.5, "port": 0.0,
+      "infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] },
     { "id": "b", "name": "B", "terrain": "plain", "population": 10.0,
       "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-      "infrastructure": 0.5, "port": 0.0,
+      "infrastructure": 0.5, "port": 0.0, "position": [1.0, 0.0],
       "links": [ { "to": "a", "kind": "rail" }, { "to": "c", "kind": "rail" } ] },
     { "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
       "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-      "infrastructure": 0.5, "port": 0.0,
+      "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] }
   ],
   "sea_zones": [],
@@ -4038,7 +4038,7 @@ fn invalid_scenario_is_rejected() {
             r#"{ "id": "c", "name": "C""#,
             r#"{ "id": "d", "name": "D", "terrain": "plain", "population": 10.0,
       "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
-      "infrastructure": 0.5, "port": 0.0, "links": [] },
+      "infrastructure": 0.5, "port": 0.0, "position": [3.0, 0.0], "links": [] },
     { "id": "c", "name": "C""#,
             1,
         )
@@ -4179,41 +4179,39 @@ fn default_scenario_dimensions_match_embedded_json() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 7A (docs/phase7-spec.md "Stage 7A — 観る", "地域の座標"): the optional
+// Stage 7A (docs/phase7-spec.md "Stage 7A — 観る", "地域の座標"): the required
 // per-region `position` field `apps/game` uses to place regions on the map.
+// External code review fix B4: this field used to be optional, with
+// `apps/game::layout` computing a deterministic graph-derived fallback
+// layout for any region a scenario left unplaced - the project owner
+// rejected that fallback (docs/conventions.md §3), so `position` is now
+// required for every region and a scenario missing one is rejected at load
+// time (`malformed_scenario_position_is_rejected` below covers the
+// malformed case; the "missing entirely" case is exercised by every other
+// test in this module, since `MINI_VALID_SCENARIO` itself now names one for
+// every region and would fail to load otherwise).
 // ---------------------------------------------------------------------------
 
-/// `scenario_position_is_optional`: `MINI_VALID_SCENARIO` (used throughout
-/// this file's Stage 6A tests) names no `position` field on any region at
-/// all - exactly the shape of every scenario written before Stage 7A - and
-/// must keep parsing, validating and building a `World` exactly as before,
-/// with every region's `Region::position` coming back `None`. This is the
-/// regression guard against Stage 7A's own field ever silently becoming
-/// required: before `parse_position` was written to treat a missing
-/// `position` key as `Ok(None)` (`require_object_field`'s ordinary "missing
-/// field" behaviour used everywhere else in this module), this test fails
-/// with `ScenarioError::Schema` naming `position` - confirmed by temporarily
-/// routing `position` through `require_object_field` while writing this test.
+/// External code review fix B4: a region naming no `position` field at all
+/// must be rejected exactly like any other missing required field
+/// (`require_object_field`'s ordinary behaviour), not defaulted to `None` -
+/// the fallback layout that behaviour used to feed is gone
+/// (`apps/game::layout::region_positions` no longer computes one).
 #[test]
-fn scenario_position_is_optional() {
-    let world = scenario::load_str(MINI_VALID_SCENARIO).expect("a scenario with no `position` field anywhere must still load");
-    assert_eq!(world.regions.len(), 3);
-    for region in &world.regions {
-        assert_eq!(region.position, None, "region `{}` must default to no position when the field is absent", region.name);
-    }
-
-    // A scenario naming `position` on some regions but not others: each
-    // region's own `position` is independent - not an all-or-nothing switch
-    // for the whole file.
-    let mixed = MINI_VALID_SCENARIO.replacen(
-        r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,"#,
-        r#"{ "id": "a", "name": "A", "position": [12.5, -3.0], "terrain": "plain", "population": 10.0,"#,
+fn missing_scenario_position_is_rejected() {
+    let no_position = MINI_VALID_SCENARIO.replacen(
+        r#""infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],
+      "links": [ { "to": "b", "kind": "rail" } ] },"#,
+        r#""infrastructure": 0.5, "port": 0.0,
+      "links": [ { "to": "b", "kind": "rail" } ] },"#,
         1,
     );
-    let world = scenario::load_str(&mixed).expect("a scenario naming `position` on only one region must still load");
-    assert_eq!(world.region(RegionId(0)).position, Some([12.5, -3.0]));
-    assert_eq!(world.region(RegionId(1)).position, None, "an untouched region's position must stay None");
-    assert_eq!(world.region(RegionId(2)).position, None);
+    match scenario::load_str(&no_position) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("position"), "expected the error to name `position`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a missing position, got {other:?}"),
+    }
 }
 
 /// A `position` field that *is* present but malformed - the wrong number of
@@ -4251,17 +4249,24 @@ fn malformed_scenario_position_is_rejected() {
 /// Both shipped scenarios were given real coordinates by Stage 7A
 /// (docs/phase7-spec.md "`scenarios/mvp.json` と `scenarios/japan47.json` の
 /// 両方に座標を入れる") - every region in each file must actually carry a
-/// `position`, not merely be allowed to.
+/// finite `position` (`Region::position` is required since External code
+/// review fix B4, so both files loading at all already proves every region
+/// names one; this additionally guards against a placeholder like `NaN`
+/// slipping through, which `parse_position`'s own `as_f32` already rejects
+/// at load time but is still worth pinning here against a future change to
+/// either file).
 #[test]
 fn shipped_scenarios_have_positions_everywhere() {
     let mvp = scenario::build_world();
     for region in &mvp.regions {
-        assert!(region.position.is_some(), "scenarios/mvp.json region `{}` is missing `position`", region.name);
+        let [x, y] = region.position;
+        assert!(x.is_finite() && y.is_finite(), "scenarios/mvp.json region `{}` has a non-finite `position`", region.name);
     }
 
     let japan47 = scenario::load_str(&load_japan47_str()).expect("scenarios/japan47.json must load");
     for region in &japan47.regions {
-        assert!(region.position.is_some(), "scenarios/japan47.json region `{}` is missing `position`", region.name);
+        let [x, y] = region.position;
+        assert!(x.is_finite() && y.is_finite(), "scenarios/japan47.json region `{}` has a non-finite `position`", region.name);
     }
 }
 
@@ -4581,4 +4586,170 @@ fn japan47_chokepoints_still_bind() {
              with no alternate route quietly carrying it: open={open}, severed={severed}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Stage 7C (docs/phase7-spec.md "Stage 7C の受け入れ基準"): the client's
+// supply-overlay/blockade display reads `logistics::supply_routes`/
+// `logistics::supply_link_flows`/`naval::blockaded_ports` - all read-only,
+// all re-derived from `world.supply`/`SeaZone::control` as already computed
+// by the real tick systems, never a second source of truth. These three
+// tests guard that reconstruction against silently drifting from what
+// actually happened.
+// ---------------------------------------------------------------------
+
+/// `supply_route_reconstruction_matches_logistics`: on a board with a real,
+/// single-corridor dependency (kita_tohoku's only route to the sole source,
+/// kanto, runs through minami_tohoku - `supply_corridor_cut`'s own setup),
+/// `logistics::supply_routes` names minami_tohoku as kita_tohoku's source,
+/// and `logistics::supply_link_flows`'s independently-computed flow for
+/// that exact link matches `world.supply[kita_tohoku]` exactly - two
+/// separately-written functions over the same board, cross-checked against
+/// each other and against the real `recompute_supply` output they both
+/// re-derive from.
+///
+/// Confirmed this can fail: temporarily dropped the `.min(node_throughput[j])`
+/// term from `supply_link_flows`'s formula (leaving `supply_routes`'s copy
+/// of the same formula unchanged) and re-ran - the final flow-vs-cap
+/// assertion failed (`supply_link_flows` reported a larger number than
+/// `world.supply` actually held). Reverted before committing.
+#[test]
+fn supply_route_reconstruction_matches_logistics() {
+    fn isolate_single_source(world: &mut World, source: RegionId) {
+        let faction = world.region(source).owner;
+        for i in 0..world.regions.len() {
+            let r = RegionId(i as u32);
+            if r != source && world.region(r).owner == faction {
+                world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+                world.region_mut(r).port = 0.0;
+            }
+        }
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(source).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(source).infrastructure = 1.0;
+    }
+
+    let kanto = RegionId(3);
+    let minami_tohoku = RegionId(2);
+    let kita_tohoku = RegionId(1);
+
+    let mut world = scenario::build_world();
+    isolate_single_source(&mut world, kanto);
+    logistics::recompute_supply(&mut world);
+
+    let routes = logistics::supply_routes(&world);
+    let kita_route = routes.iter().find(|r| r.region == kita_tohoku).expect("kita_tohoku must have a route entry");
+
+    assert!(world.supply[kita_tohoku.index()] > 0.0, "sanity: kita_tohoku must actually receive some supply");
+    assert_eq!(
+        kita_route.source,
+        logistics::SupplySource::Relay(minami_tohoku),
+        "kita_tohoku's only route to the sole source (kanto) runs through minami_tohoku, not its own base"
+    );
+
+    let flows = logistics::supply_link_flows(&world);
+    let corridor_flow = flows
+        .iter()
+        .find(|f| f.from == minami_tohoku && f.to == kita_tohoku)
+        .expect("the minami_tohoku -> kita_tohoku link must appear in supply_link_flows");
+    assert!(
+        (corridor_flow.throughput.flow() - kita_route.cap).abs() < 0.01,
+        "the reconstructed corridor's own flow ({}) must match kita_tohoku's actual world.supply entry ({})",
+        corridor_flow.throughput.flow(),
+        kita_route.cap
+    );
+}
+
+/// `chokepoint_is_flagged_when_saturated`: the 中国—九州 Kanmon Tunnel
+/// (`max_throughput` 8.0, the lowest of any `LinkKind`), once 中国 is
+/// boosted into a saturated source exactly as `kanmon_tunnel_survives_
+/// blockade` sets up, is flagged `is_saturated`; the same link on an
+/// ordinary, unmodified board is not.
+///
+/// Confirmed this can fail: temporarily hardcoded
+/// `LinkThroughput::is_saturated` to always return `false` and re-ran - the
+/// positive assertion below failed immediately. Reverted before committing.
+#[test]
+fn chokepoint_is_flagged_when_saturated() {
+    let chugoku = RegionId(7);
+    let kyushu = RegionId(9);
+
+    let mut world = scenario::build_world();
+    for good in crate::good::ALL_GOODS {
+        world.region_mut(chugoku).capacity[good.index()] = 1000.0;
+    }
+    world.region_mut(chugoku).infrastructure = 1.0;
+    world.region_mut(kyushu).port = 0.0;
+    world.region_mut(kyushu).capacity = [0.0; GOOD_COUNT];
+
+    logistics::recompute_supply(&mut world);
+
+    let flows = logistics::supply_link_flows(&world);
+    let kanmon = flows
+        .iter()
+        .find(|f| f.from == chugoku && f.to == kyushu)
+        .expect("the Kanmon tunnel link must appear in supply_link_flows");
+
+    assert!(kanmon.throughput.flow() > 0.0, "sanity: the tunnel must actually be relaying something");
+    assert!(
+        kanmon.throughput.is_saturated(),
+        "a link whose flow ({}) has reached its own max_throughput ({}) must be flagged as a chokepoint",
+        kanmon.throughput.flow(),
+        kanmon.throughput.capacity()
+    );
+
+    let mut idle_world = scenario::build_world();
+    logistics::recompute_supply(&mut idle_world);
+    let idle_flows = logistics::supply_link_flows(&idle_world);
+    let idle_kanmon = idle_flows
+        .iter()
+        .find(|f| f.from == chugoku && f.to == kyushu)
+        .expect("the Kanmon tunnel link must appear in supply_link_flows on the unmodified board too");
+    assert!(
+        !idle_kanmon.throughput.is_saturated(),
+        "the tunnel must not be flagged as a chokepoint on an ordinary, unsaturated board: flow={}, capacity={}",
+        idle_kanmon.throughput.flow(),
+        idle_kanmon.throughput.capacity()
+    );
+}
+
+/// `blockaded_port_is_flagged`: a port under full enemy sea control (exactly
+/// `blockade_stops_import`'s own setup) shows up in `naval::blockaded_ports`
+/// together with the sea zone(s) actually responsible for it; an
+/// unblockaded port does not appear at all.
+///
+/// Confirmed this can fail: temporarily changed `blockaded_ports`'s filter
+/// from `is_port_blockaded(world, r.id)` to a constant `false` and re-ran -
+/// the positive assertion below failed immediately (the blockaded region no
+/// longer appeared in the returned list at all). Reverted before
+/// committing.
+#[test]
+fn blockaded_port_is_flagged() {
+    let mut world = scenario::build_world();
+    let tokai = RegionId(5); // faction 1's port region, per `blockade_stops_import`
+
+    for zone in world.zones_touching(tokai) {
+        world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+    }
+    assert!(naval::is_port_blockaded(&world, tokai), "sanity: this setup must actually blockade the port");
+
+    let blockades = naval::blockaded_ports(&world);
+    let entry = blockades.iter().find(|b| b.region == tokai).expect("the blockaded port must appear in naval::blockaded_ports");
+
+    assert!(!entry.causes.is_empty(), "a blockaded port must name at least one responsible sea zone");
+    for &zone in &entry.causes {
+        assert!(
+            world.zones_touching(tokai).contains(&zone),
+            "every named cause must actually be a sea zone touching the blockaded port"
+        );
+    }
+
+    // Negative control: an unblockaded port (信越・北陸, a disjoint sea zone
+    // per `blockade_is_per_port`) must not appear at all.
+    let hokuriku = RegionId(4);
+    assert!(
+        blockades.iter().all(|b| b.region != hokuriku),
+        "an unblockaded port must not appear in naval::blockaded_ports"
+    );
 }

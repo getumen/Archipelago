@@ -24,11 +24,14 @@
 //! conscription is always `0.0..=1.0`) - not hidden game state, so clamping
 //! it client-side isn't hiding anything a rejection would have revealed.
 
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use archipelago_sim::action::Action;
+use archipelago_sim::balance::NL_PROPOSAL_TEXT_MAX_CHARS;
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::ALL_FOCI;
@@ -38,8 +41,9 @@ use archipelago_sim::world::{Domain, Station};
 
 use super::setup::{region_radius, sea_zone_radius};
 use super::{
-    ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, PlayerFaction, RegionLayout, SeaZoneCenters,
-    SelectedFaction, SelectedRegion, SelectedUnits, SimRes, Speed, SpeedRes, UnitMarker,
+    ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose, PlayerFaction,
+    RegionLayout, SeaZoneCenters, SelectedFaction, SelectedRegion, SelectedSeaZone, SelectedUnits,
+    SimRes, Speed, SpeedRes, SupplyOverlay, UnitMarker,
 };
 
 const MIN_ZOOM: f32 = 0.25;
@@ -58,10 +62,12 @@ const CIVILIAN_RATION_STEP: f32 = 0.05;
 const PRIORITY_STEP: f32 = 0.1;
 const IMPORT_PLAN_STEP: f32 = 5.0;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn keyboard_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut speed: ResMut<SpeedRes>,
     mut selected_region: ResMut<SelectedRegion>,
+    mut selected_sea_zone: ResMut<SelectedSeaZone>,
     mut selected_units: ResMut<SelectedUnits>,
     mut selected_faction: ResMut<SelectedFaction>,
     mut menu: ResMut<MenuRegion>,
@@ -69,7 +75,50 @@ pub(super) fn keyboard_input(
     mut active_good: ResMut<ActiveGood>,
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
+    mut nl_compose: ResMut<NlCompose>,
+    mut supply_overlay: ResMut<SupplyOverlay>,
+    mut newspaper: ResMut<NewspaperState>,
 ) {
+    // While composing a natural-language proposal, every key here is
+    // suppressed - `input::nl_compose_text_input` owns the keyboard
+    // entirely until `Enter`/`Esc` ends compose mode (docs/phase7-spec.md
+    // "4. 外交画面": "テキスト入力欄から送り"). Otherwise typing "w" to
+    // compose a sentence would also fire `handle_diplomacy_keys`'s
+    // declare-war binding.
+    if nl_compose.active {
+        return;
+    }
+
+    // `L` (supply overlay) and `N` (newspaper) work everywhere, observing-only
+    // included, and are never captured by the menu/diplomacy panels below -
+    // docs/phase7-spec.md "補給網の表示は L キーでトグルする".
+    if keys.just_pressed(KeyCode::KeyL) {
+        supply_overlay.0 = !supply_overlay.0;
+    }
+    if keys.just_pressed(KeyCode::KeyN) {
+        newspaper.open = !newspaper.open;
+    }
+    if newspaper.open {
+        if keys.just_pressed(KeyCode::ArrowLeft) {
+            let earliest = 0;
+            let current = newspaper.viewing.unwrap_or(newspaper.history.len().saturating_sub(1));
+            newspaper.viewing = Some(current.saturating_sub(1).max(earliest));
+        }
+        if keys.just_pressed(KeyCode::ArrowRight) {
+            let last = newspaper.history.len().saturating_sub(1);
+            let current = newspaper.viewing.unwrap_or(last);
+            // External code review fix A3: paging onto the newest issue
+            // (`current + 1 == last`) must land on `None` ("the latest
+            // issue" - `NewspaperState::viewing`'s own doc), not
+            // `Some(last)` - otherwise a fresh issue published afterward
+            // never appears until the player pages away and back, since
+            // `Some(last)` pins the reader to whatever `last` was at the
+            // moment they paged there instead of tracking "whatever is
+            // newest right now".
+            newspaper.viewing = if current + 1 >= last { None } else { Some(current + 1) };
+        }
+    }
+
     // The recruit/build menu, when open, takes over the number row -
     // "自国地域を右クリック: その地域で可能な命令のメニュー" - and closes on
     // any of its own keys or `Esc`.
@@ -81,7 +130,7 @@ pub(super) fn keyboard_input(
     // The diplomacy panel similarly takes over its own keys while open -
     // "条約の提案・受諾・拒否は外交パネルから".
     if diplomacy.open {
-        handle_diplomacy_keys(&keys, &mut diplomacy, &player, &mut sim);
+        handle_diplomacy_keys(&keys, &mut diplomacy, &player, &mut sim, &mut nl_compose);
         return;
     }
 
@@ -102,6 +151,7 @@ pub(super) fn keyboard_input(
     }
     if keys.just_pressed(KeyCode::Escape) {
         selected_region.0 = None;
+        selected_sea_zone.0 = None;
         selected_units.0.clear();
     }
     // `Tab` cycles the faction summary panel through every living faction -
@@ -226,7 +276,13 @@ fn handle_menu_keys(keys: &ButtonInput<KeyCode>, region: RegionId, active_good: 
     }
 }
 
-fn handle_diplomacy_keys(keys: &ButtonInput<KeyCode>, diplomacy: &mut DiplomacyPanel, player: &PlayerFaction, sim: &mut SimRes) {
+fn handle_diplomacy_keys(
+    keys: &ButtonInput<KeyCode>,
+    diplomacy: &mut DiplomacyPanel,
+    player: &PlayerFaction,
+    sim: &mut SimRes,
+    nl_compose: &mut NlCompose,
+) {
     let Some(player_faction) = player.0 else {
         diplomacy.open = false;
         return;
@@ -246,6 +302,22 @@ fn handle_diplomacy_keys(keys: &ButtonInput<KeyCode>, diplomacy: &mut DiplomacyP
         return;
     }
     let Some(target) = diplomacy.target else { return };
+
+    // `T`: open the natural-language proposal compose box, targeting
+    // whoever `V` currently has selected (docs/phase7-spec.md "4. 外交画面":
+    // "テキスト入力欄から送り"). `input::nl_compose_text_input` (a separate
+    // system) owns every keystroke from here until `Enter`/`Esc`.
+    if keys.just_pressed(KeyCode::KeyT) {
+        nl_compose.active = true;
+        nl_compose.buffer.clear();
+        // External code review fix A1: this same `T` press is still sitting
+        // unread in this frame's `KeyboardInput` event queue -
+        // `nl_compose_text_input` runs later in the same `Update` chain and
+        // would otherwise read it as the first character typed. See
+        // `NlCompose::just_activated`'s own doc.
+        nl_compose.just_activated = true;
+        return;
+    }
 
     for (i, &treaty) in ALL_TREATIES.iter().enumerate() {
         let digit = match i {
@@ -389,8 +461,14 @@ fn click_world_pos(
 /// whichever region/sea-zone was clicked ("選択中に隣接地域をクリック" -
 /// extended here to any clicked station, not just an adjacent one, since
 /// adjacency is `Simulation::apply`'s call to make, not this system's - see
-/// this module's own doc), or otherwise just selects the region for
-/// inspection (Stage 7A behaviour, unchanged).
+/// this module's own doc), or otherwise just selects the region (Stage 7A
+/// behaviour, unchanged) or sea zone for inspection. Sea-zone selection is
+/// new (Stage 7C follow-up) and drives exactly one thing right now:
+/// `overlay::sync_blockade_visuals` reveals a blockaded port's line to its
+/// causing sea zone only while that region or that sea zone is selected -
+/// there is no sea-zone inspect panel. Region and sea-zone selection are
+/// mutually exclusive; selecting one clears the other.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn map_click_select(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -401,6 +479,7 @@ pub(super) fn map_click_select(
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
     mut selected_region: ResMut<SelectedRegion>,
+    mut selected_sea_zone: ResMut<SelectedSeaZone>,
     mut selected_units: ResMut<SelectedUnits>,
     mut drag_start: Local<Option<Vec2>>,
 ) {
@@ -444,33 +523,39 @@ pub(super) fn map_click_select(
             selected_units.0.clear();
         }
         selected_region.0 = Some(region_id);
+        selected_sea_zone.0 = None;
         return;
     }
 
-    // 3. Sea-zone hit test - only meaningful as a fleet move target;
-    // Stage 7A never supported clicking a sea zone for inspection either.
-    if !selected_units.0.is_empty() {
-        let world = sim.0.world();
-        let mut zone_hit: Option<(archipelago_sim::ids::SeaZoneId, f32)> = None;
-        for zone in &world.sea_zones {
-            let [x, y] = sea_centers.0[zone.id.index()];
-            let radius = sea_zone_radius(zone.coast.len());
-            let d = Vec2::new(x, y).distance(world_pos);
-            if d <= radius && zone_hit.is_none_or(|(_, best)| d < best) {
-                zone_hit = Some((zone.id, d));
-            }
-        }
-        if let Some((zone_id, _)) = zone_hit {
-            issue_move_orders(&mut sim, &selected_units, Station::Sea(zone_id));
-            selected_units.0.clear();
-            return;
+    // 3. Sea-zone hit test - a fleet move target when units are selected
+    // (unchanged), otherwise selects the zone for inspection (new - see
+    // this function's own doc).
+    let mut zone_hit: Option<(archipelago_sim::ids::SeaZoneId, f32)> = None;
+    for zone in &sim.0.world().sea_zones {
+        let [x, y] = sea_centers.0[zone.id.index()];
+        let radius = sea_zone_radius(zone.coast.len());
+        let d = Vec2::new(x, y).distance(world_pos);
+        if d <= radius && zone_hit.is_none_or(|(_, best)| d < best) {
+            zone_hit = Some((zone.id, d));
         }
     }
+    if let Some((zone_id, _)) = zone_hit {
+        if !selected_units.0.is_empty() {
+            issue_move_orders(&mut sim, &selected_units, Station::Sea(zone_id));
+            selected_units.0.clear();
+        } else {
+            selected_sea_zone.0 = Some(zone_id);
+            selected_region.0 = None;
+        }
+        return;
+    }
 
-    // Empty space: deselect the inspected region (Stage 7A behaviour).
-    // Unit selection is left alone - only Esc or a completed order clears
-    // it, so a stray miss-click can't silently discard a multi-select.
+    // Empty space: deselect the inspected region/sea-zone (Stage 7A
+    // behaviour, extended to the new sea-zone selection). Unit selection is
+    // left alone - only Esc or a completed order clears it, so a stray
+    // miss-click can't silently discard a multi-select.
     selected_region.0 = None;
+    selected_sea_zone.0 = None;
 }
 
 fn issue_move_orders(sim: &mut SimRes, selected_units: &SelectedUnits, to: Station) {
@@ -513,5 +598,155 @@ pub(super) fn map_right_click_menu(
         && sim.0.world().region(region_id).owner == player_faction
     {
         menu.0 = Some(region_id);
+    }
+}
+
+/// Owns every keystroke while `NlCompose::active` (docs/phase7-spec.md "4.
+/// 外交画面": "テキスト入力欄から送り") - `keyboard_input` returns
+/// immediately without touching anything while this is true, so no other
+/// binding (menu digits, diplomacy treaty keys, `L`/`N`, ...) can fire
+/// mid-sentence.
+///
+/// `Enter` submits (`Action::ProposeInNaturalLanguage` to whichever faction
+/// `DiplomacyPanel::target` currently names) and exits compose mode;
+/// `Escape` cancels without sending anything; `Backspace` deletes the last
+/// character; anything else that produces text (`KeyboardInput::logical_key`
+/// being `Key::Character`) is appended, capped at
+/// `NL_PROPOSAL_TEXT_MAX_CHARS` - the same public, known limit
+/// `action::apply_propose_nl` itself enforces, so clamping it here isn't
+/// hiding a rejection the player couldn't already know about
+/// (`input`'s own module doc, "命令の可否を隠さない").
+pub(super) fn nl_compose_text_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut key_events: MessageReader<KeyboardInput>,
+    mut nl_compose: ResMut<NlCompose>,
+    diplomacy: Res<DiplomacyPanel>,
+    player: Res<PlayerFaction>,
+    mut sim: ResMut<SimRes>,
+) {
+    if !nl_compose.active {
+        key_events.clear();
+        return;
+    }
+
+    // External code review fix A1: this frame's own `T` keypress (the one
+    // `handle_diplomacy_keys` just read via `ButtonInput<KeyCode>` to set
+    // `active = true`) is still sitting in `key_events` - drain it unread,
+    // without treating it as the compose buffer's first character, and
+    // start actually collecting text from the *next* frame on.
+    // `NlCompose::just_activated`'s own doc has the full ordering reasoning.
+    if nl_compose.just_activated {
+        nl_compose.just_activated = false;
+        key_events.clear();
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Escape) {
+        nl_compose.active = false;
+        nl_compose.buffer.clear();
+        key_events.clear();
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+        // The sending faction is implicit in `push_human_action` (it only
+        // ever queues for the human/replay controller) - just need to know
+        // a player exists at all and that a target is selected.
+        if player.0.is_some()
+            && let Some(target) = diplomacy.target
+        {
+            sim.0.push_human_action(Action::ProposeInNaturalLanguage { to: target, text: nl_compose.buffer.clone() });
+        }
+        nl_compose.active = false;
+        nl_compose.buffer.clear();
+        key_events.clear();
+        return;
+    }
+    if keys.just_pressed(KeyCode::Backspace) {
+        nl_compose.buffer.pop();
+    }
+
+    for ev in key_events.read() {
+        if ev.state != ButtonState::Pressed {
+            continue;
+        }
+        if let Key::Character(s) = &ev.logical_key {
+            for ch in s.chars() {
+                if nl_compose.buffer.chars().count() < NL_PROPOSAL_TEXT_MAX_CHARS {
+                    nl_compose.buffer.push(ch);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use archipelago_sim::ids::FactionId;
+
+    use crate::sim_driver::SimDriver;
+
+    /// External code review fix A1 (P1): pressing `T` to enter natural-
+    /// language compose mode used to run `nl_compose_text_input` later in
+    /// the *same* frame it activated, reading the very `KeyboardInput`
+    /// event that fired the `T` binding - every composed proposal began
+    /// with a stray "t" (see `NlCompose::just_activated`'s own doc).
+    ///
+    /// This drives `nl_compose_text_input` directly against a `World`,
+    /// reusing one `System` instance across two calls so its own `Local`
+    /// event-cursor state persists between them exactly the way the real
+    /// `Update` schedule persists it frame to frame (a fresh `System` per
+    /// call, e.g. via `run_system_once`, would reset that cursor and read
+    /// every still-buffered message from scratch each time - not what
+    /// happens in the real game loop this bug lived in).
+    ///
+    /// Checked this actually exercises the bug: temporarily reverted the
+    /// `just_activated`-drain branch in `nl_compose_text_input` and reran -
+    /// the first assertion below then fails with `buffer == "t"` instead of
+    /// `""`, and the second fails with `"th"` instead of `"h"`, matching
+    /// exactly the review's "every proposal begins with a stray t" report.
+    #[test]
+    fn nl_compose_activation_key_is_not_collected_as_text() {
+        let mut world = World::new();
+        world.init_resource::<Messages<KeyboardInput>>();
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(NlCompose { active: true, buffer: String::new(), just_activated: true });
+        world.insert_resource(DiplomacyPanel { open: true, target: Some(FactionId(1)) });
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SimRes(SimDriver::new(archipelago_sim::scenario::build_world(), 1)));
+
+        let mut system = IntoSystem::into_system(nl_compose_text_input);
+        system.initialize(&mut world);
+
+        // Frame 1: exactly the state `handle_diplomacy_keys`'s `T` binding
+        // leaves behind - `just_activated` set, and the `T` keypress itself
+        // still unread in this frame's own `KeyboardInput` queue.
+        world.resource_mut::<Messages<KeyboardInput>>().write(KeyboardInput {
+            key_code: KeyCode::KeyT,
+            logical_key: Key::Character("t".into()),
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+        system.run((), &mut world).unwrap();
+
+        assert_eq!(world.resource::<NlCompose>().buffer, "", "the activation keypress must not be collected as text");
+        assert!(!world.resource::<NlCompose>().just_activated, "the activation flag must be consumed after one run");
+
+        // Frame 2: an ordinary keystroke, now that compose mode is actually
+        // collecting text - proves the fix doesn't just eat every keypress.
+        world.resource_mut::<Messages<KeyboardInput>>().write(KeyboardInput {
+            key_code: KeyCode::KeyH,
+            logical_key: Key::Character("h".into()),
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+        system.run((), &mut world).unwrap();
+
+        assert_eq!(world.resource::<NlCompose>().buffer, "h", "a real keystroke after activation must still be collected");
     }
 }

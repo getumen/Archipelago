@@ -16,11 +16,14 @@
 //!   comments on the X11-only, audio-less feature set this box has).
 //! - The tradeoff is real and worth naming rather than hiding: this exact
 //!   path is Ubuntu/Debian-specific (`fonts-noto-cjk`'s install location)
-//!   and will not exist on another distro, macOS, or Windows. On any
-//!   machine where it's absent, `load` below does not panic - it logs a
-//!   clear warning and leaves every `TextFont` on Bevy's own default font,
-//!   so the client still starts and runs (Japanese text goes back to tofu
-//!   boxes, exactly today's failure mode, rather than a crash).
+//!   and will not exist on another distro, macOS, or Windows. External code
+//!   review fix B3: `load` used to tolerate that by logging a warning and
+//!   leaving every `TextFont` on Bevy's own Latin-only default font instead,
+//!   which renders this entirely-Japanese game as tofu boxes end to end,
+//!   not a minor cosmetic degradation. docs/conventions.md §3 (フォールバ
+//!   ック原則禁止) rules that out: `load` now panics at startup with a clear
+//!   message naming the exact path it looked for, rather than starting a
+//!   client nothing on screen can actually be read on.
 //! - If this client ever ships to a machine that isn't this one,
 //!   vendoring (or bundling a font via a build step) is the fix - this
 //!   module's `CJK_FONT_PATH` is the single place that would need to
@@ -43,9 +46,11 @@ use bevy::prelude::*;
 /// for the portability tradeoff of hardcoding it.
 const CJK_FONT_PATH: &str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
 
-/// The font handle every `TextFont` this crate spawns should reference -
-/// either the loaded CJK font, or `Handle::default()` (Bevy's own
-/// Latin-only default) when `CJK_FONT_PATH` couldn't be read.
+/// The font handle every `TextFont` this crate spawns should reference - the
+/// loaded CJK font. `load` never inserts this resource with anything else:
+/// a client that couldn't load `CJK_FONT_PATH` never reaches the point of
+/// having an `AppFont` at all (it panics first), so nothing downstream needs
+/// to consider "what if this is Bevy's Latin-only default".
 #[derive(Resource, Clone)]
 pub(crate) struct AppFont(pub Handle<Font>);
 
@@ -54,24 +59,20 @@ pub(crate) struct AppFont(pub Handle<Font>);
 /// system) so the returned handle exists before `setup::setup` runs, with no
 /// need to reason about command-flush ordering between two `Startup`
 /// systems.
+///
+/// Panics if `CJK_FONT_PATH` can't be read - see this module's own doc
+/// (External code review fix B3) for why silently falling back to Bevy's
+/// Latin-only default font is not an option here.
 pub(super) fn load(app: &mut App) {
-    let handle = match std::fs::read(CJK_FONT_PATH) {
-        Ok(bytes) => {
-            let handle = app
-                .world_mut()
-                .resource_mut::<Assets<Font>>()
-                .add(Font::from_bytes(bytes));
-            eprintln!("archipelago-game: loaded CJK font from {CJK_FONT_PATH}");
-            handle
-        }
-        Err(err) => {
-            eprintln!(
-                "archipelago-game: warning: could not load CJK font at {CJK_FONT_PATH} ({err}); \
-                 falling back to Bevy's built-in Latin-only font - every Japanese name/label will \
-                 render as an empty box until a CJK font is available at that path."
-            );
-            Handle::default()
-        }
-    };
+    let bytes = std::fs::read(CJK_FONT_PATH).unwrap_or_else(|err| {
+        panic!(
+            "archipelago-game: could not load the required CJK font at {CJK_FONT_PATH} ({err}). \
+             Every name and label in this game is Japanese and needs it to render as anything but \
+             empty boxes - install fonts-noto-cjk (Ubuntu/Debian), or point apps/game/src/app/fonts.rs's \
+             CJK_FONT_PATH at a CJK-capable font available on this machine."
+        )
+    });
+    let handle = app.world_mut().resource_mut::<Assets<Font>>().add(Font::from_bytes(bytes));
+    eprintln!("archipelago-game: loaded CJK font from {CJK_FONT_PATH}");
     app.insert_resource(AppFont(handle));
 }

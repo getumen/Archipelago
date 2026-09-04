@@ -1,9 +1,12 @@
 //! Per-frame visual sync: region fill color (owner, mixed toward the
 //! occupier's color as `occupation` progresses - docs/phase7-spec.md "占領
-//! 進行中は所有者色と占領者色の混色にする"), sea zone tint (whichever
-//! faction currently holds the most `SeaZone::control`), and unit markers
-//! (position, visibility, color, plus spawning a marker for any unit
-//! created since the last frame - e.g. a fresh recruit).
+//! 進行中は所有者色と占領者色の混色にする" - then further toward a scorched-
+//! earth "grime" tone by `Region::devastation`, Stage 7C's docs/phase7-spec.md
+//! "3. 戦災と復興": "地域の devastation を視覚化する（マーカーの荒れ具合、
+//! 色の濁り）"), sea zone tint (whichever faction currently holds the most
+//! `SeaZone::control`), and unit markers (position, visibility, color, plus
+//! spawning a marker for any unit created since the last frame - e.g. a
+//! fresh recruit).
 //!
 //! Every system here only *reads* `SimRes` - never writes it. This is what
 //! keeps rendering incapable of feeding anything back into the simulation
@@ -13,9 +16,18 @@ use bevy::prelude::*;
 
 use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER};
 
-use super::palette::{faction_color, NEUTRAL};
+use super::palette::{faction_color, Unit01, NEUTRAL};
 use super::setup::station_position;
 use super::{RegionLayout, RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, UnitMarker};
+
+/// Scorched-earth tone `sync_region_visuals` mixes a devastated region's
+/// fill toward - dull, dark, faintly brown, never pure black (a fully-
+/// devastated region should still read as *whose* wreckage it is, so its
+/// owner color must stay at least partly visible).
+const DEVASTATION_TINT: Color = Color::srgb(0.16, 0.13, 0.10);
+/// Cap on how far `devastation == 1.0` pushes the mix - see `DEVASTATION_TINT`'s
+/// own doc for why this deliberately stops short of `1.0`.
+const MAX_DEVASTATION_MIX: f32 = 0.8;
 
 pub(super) fn sync_region_visuals(
     sim: Res<SimRes>,
@@ -26,13 +38,15 @@ pub(super) fn sync_region_visuals(
     for (marker, material_handle) in &query {
         let region = world.region(marker.0);
         let owner_color = faction_color(region.owner.index());
-        let color = match region.occupier {
+        let occupation_color = match region.occupier {
             Some(occupier) if region.occupation > 0.0 => {
                 let occupier_color = faction_color(occupier.index());
                 owner_color.mix(&occupier_color, region.occupation.clamp(0.0, 1.0))
             }
             _ => owner_color,
         };
+        let devastation_mix = Unit01::new(region.devastation * MAX_DEVASTATION_MIX);
+        let color = occupation_color.mix(&DEVASTATION_TINT, devastation_mix.get());
         if let Some(mut mat) = materials.get_mut(&material_handle.0)
             && mat.color != color
         {

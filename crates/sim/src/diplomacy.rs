@@ -508,13 +508,13 @@ pub(crate) fn respond_nl(
 ) {
     world.diplomacy.set_nl_cooldown(from, to, NL_PROPOSAL_COOLDOWN_DAYS);
     if !accept_deal {
-        world.diplomacy.log.push(Event::NaturalLanguageRejected { from, to });
+        world.diplomacy.log.push(Event::NaturalLanguageRejected { from, to, terms: terms.to_vec() });
         return;
     }
     if apply_treaty_terms(world, from, to, terms) {
-        world.diplomacy.log.push(Event::NaturalLanguageAccepted { from, to });
+        world.diplomacy.log.push(Event::NaturalLanguageAccepted { from, to, terms: terms.to_vec() });
     } else {
-        world.diplomacy.log.push(Event::NaturalLanguageTermsInvalid { from, to });
+        world.diplomacy.log.push(Event::NaturalLanguageTermsInvalid { from, to, terms: terms.to_vec() });
     }
 }
 

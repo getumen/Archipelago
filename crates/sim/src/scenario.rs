@@ -224,14 +224,12 @@ pub struct RegionDef {
     pub links: Vec<LinkDef>,
     /// Stage 7A (docs/phase7-spec.md "地域の座標"): where `apps/game` draws
     /// this region on the map, `[x, y]` in an arbitrary client-side unit -
-    /// nothing in `crate::world`/`crate::sim` ever reads it. **Optional**,
-    /// deliberately: every scenario written before Stage 7A (and any hand-
-    /// written one a user supplies later) has no `position` field at all,
-    /// and must keep parsing exactly as before (`scenario_position_is_
-    /// optional`) - a scenario with no coordinates falls back to a
-    /// deterministic graph layout computed client-side (`apps/game::layout`),
-    /// never to a silently-guessed default here.
-    pub position: Option<[f32; 2]>,
+    /// nothing in `crate::world`/`crate::sim` ever reads it. **Required**:
+    /// every scenario file must name a `position` for every region
+    /// (`parse_position`), rejected at load time with `ScenarioError::Schema`
+    /// if it doesn't - `apps/game::layout` no longer computes a fallback
+    /// layout for a region left unplaced (docs/conventions.md §3).
+    pub position: [f32; 2],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -317,27 +315,23 @@ fn parse_capacity(v: &Value, path: &str) -> Result<[f32; GOOD_COUNT], ScenarioEr
     Ok(out)
 }
 
-/// Parses the optional `position` field (docs/phase7-spec.md "地域の座標":
-/// `{ "position": [x, y] }`). `None` if the field is absent entirely - the
-/// common case for every scenario predating Stage 7A. `Some(Err(_))` if it
-/// is present but malformed (not a 2-element array of finite numbers) -
-/// callers propagate that as a hard `ScenarioError::Schema`, never silently
-/// dropping a garbled coordinate to `None` (the same "never fall back to an
-/// implicit default on broken data" discipline this module's own doc names).
-fn parse_position(v: &Value, path: &str) -> Result<Option<[f32; 2]>, ScenarioError> {
-    let Some(value) = v.get("position") else {
-        return Ok(None);
-    };
-    if matches!(value, Value::Null) {
-        return Ok(None);
-    }
+/// Parses the required `position` field (docs/phase7-spec.md "地域の座標":
+/// `{ "position": [x, y] }`). Every region must carry one: `apps/game`
+/// no longer computes a fallback layout for a region a scenario left
+/// unplaced (docs/conventions.md §3, フォールバック原則禁止 - the project
+/// owner rejected the graph-derived layout that used to stand in), so a
+/// missing `position` is a hard `ScenarioError::Schema` here, exactly like
+/// every other required region field `parse_region` reads - never a silent
+/// `None` a renderer downstream would have to guess a placement for.
+fn parse_position(v: &Value, path: &str) -> Result<[f32; 2], ScenarioError> {
+    let value = require_object_field(v, path, "position")?;
     let arr = value.as_array().ok_or_else(|| schema_err(format!("`{path}.position` must be an array of 2 numbers")))?;
     if arr.len() != 2 {
         return Err(schema_err(format!("`{path}.position` must have exactly 2 elements, got {}", arr.len())));
     }
     let x = arr[0].as_f32().ok_or_else(|| schema_err(format!("`{path}.position[0]` must be a finite number")))?;
     let y = arr[1].as_f32().ok_or_else(|| schema_err(format!("`{path}.position[1]` must be a finite number")))?;
-    Ok(Some([x, y]))
+    Ok([x, y])
 }
 
 fn parse_link(v: &Value, path: &str) -> Result<LinkDef, ScenarioError> {
@@ -772,9 +766,7 @@ impl Scenario {
                         ("port", Value::f32num(r.port)),
                         ("links", links),
                     ];
-                    if let Some([x, y]) = r.position {
-                        pairs.push(("position", Value::arr(vec![Value::f32num(x), Value::f32num(y)])));
-                    }
+                    pairs.push(("position", Value::arr(vec![Value::f32num(r.position[0]), Value::f32num(r.position[1])])));
                     Value::obj(pairs)
                 })
                 .collect(),
