@@ -13,10 +13,12 @@ fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!(
         "usage: archipelago-game [--scenario <path>] [--seed <n>] [--days <n>] \
          [--play <faction index or name>] [--record <path>] [--replay <path>] \
+         [--cjk-font <path>]\n\
+         \n\
+         debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames>] \
          [--debug-supply-overlay] [--debug-open-diplomacy] [--debug-open-newspaper] \
-         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>] \
-         [--cjk-font <path>]"
+         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]"
     );
     std::process::exit(1);
 }

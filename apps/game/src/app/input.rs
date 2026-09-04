@@ -24,8 +24,9 @@
 //! conscription is always `0.0..=1.0`) - not hidden game state, so clamping
 //! it client-side isn't hiding anything a rejection would have revealed.
 
+use bevy::input::gestures::PinchGesture;
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -49,6 +50,24 @@ use super::{
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 const ZOOM_STEP: f32 = 0.1;
+/// World units of camera pan per second of an arrow key held, at zoom scale
+/// 1.0 (scaled by the current zoom the same way every other pan input here
+/// is - `keyboard_pan`'s own doc).
+const KEY_PAN_SPEED: f32 = 900.0;
+/// World units of camera pan per "line" of scroll (`scroll_delta_in_lines`) -
+/// `mouse_pan_zoom`'s own doc. Roughly matches the feel of the old
+/// right-drag pan: one physical wheel notch (one line) moves the map about
+/// as far as a short, deliberate drag did.
+const SCROLL_PAN_SPEED: f32 = 60.0;
+/// How much one full unit of `PinchGesture` delta (`mouse_pan_zoom`'s own
+/// doc) changes the camera's relative zoom - macOS/iOS only, applied
+/// directly to `zoom_by` with no extra sensitivity multiplier, since
+/// Winit/Bevy already reports it as a small per-frame magnification delta
+/// of the same rough order as `ZOOM_STEP`-scaled scroll. Needs on-device
+/// confirmation (this crate cannot generate a real pinch gesture on this
+/// Linux/X11 machine - see this module's tests for what *can* be checked
+/// here instead).
+const PINCH_ZOOM_SENSITIVITY: f32 = 1.0;
 /// Drag distance (screen pixels) below which a button press+release is
 /// still treated as a click rather than a pan/drag - keeps a barely-jittered
 /// click from being swallowed as an accidental drag.
@@ -385,20 +404,56 @@ fn current_breakable_treaty(world: &archipelago_sim::world::World, a: archipelag
     Treaty::Alliance
 }
 
-/// Right-button drag pans the camera; the scroll wheel zooms it (clamped to
-/// `MIN_ZOOM..=MAX_ZOOM`) - "ドラッグでパン、ホイールでズーム". Left button
-/// is deliberately left untouched here - `map_click_select` owns it, so a
-/// plain left-click always means "select/order", never "start panning".
+/// Pans and zooms the camera without ever touching plain left-click
+/// (`map_click_select` owns it - a plain left-click always means
+/// "select/order", never "start panning") or the right button
+/// (`map_right_click_menu` owns it in `--play` mode for the region menu -
+/// this module's own doc, "Right-click is also already taken by the region
+/// menu").
+///
+/// This system used to bind panning to a right-button drag - "ドラッグでパン、
+/// ホイールでズーム" - but that binding is unreachable on a macOS trackpad
+/// with no external mouse: a two-finger tap registers as a right click, but
+/// there is no way to *hold it down and drag*. Scroll has no such problem -
+/// Bevy delivers a trackpad's two-finger scroll as ordinary `MouseWheel`
+/// messages (`MouseScrollUnit::Pixel`) exactly like a physical wheel's
+/// notches (`MouseScrollUnit::Line`), so it reaches every device this
+/// module cares about through one event type. The bindings, all optional
+/// and overlapping - a trackpad-only macOS machine can reach every one of
+/// these except the middle-drag:
+///
+/// - **Scroll, no modifier: pans.** The primary scheme, and the whole
+///   reason the right-drag was replaced - a two-finger trackpad scroll
+///   needs no button held at all.
+/// - **Ctrl+scroll: zooms.** Mirrors the near-universal "hold Ctrl, scroll
+///   to zoom" convention (browsers, IDEs, image viewers) - lets a plain
+///   wheel mouse zoom without a second control, and works identically from
+///   a trackpad (hold Ctrl, two-finger-scroll).
+/// - **Trackpad pinch (`PinchGesture`, macOS/iOS only): zooms.** The native
+///   gesture, delivered on its own channel independent of `MouseWheel`, so
+///   pinch-to-zoom and two-finger-scroll-to-pan are simultaneously
+///   available exactly the way every other macOS app with a canvas behaves
+///   - no modifier needed for either.
+/// - **Middle-button drag: pans.** An extra convenience for a three-button
+///   desktop mouse, reusing the same drag math the old right-drag used;
+///   changes nothing for a trackpad-only player, who has no middle button
+///   to press.
+///
+/// `keyboard_pan` (below) is the one panning input that is never optional -
+/// see its own doc for why it, alone, isn't listed here as "just another
+/// option".
 pub(super) fn mouse_pan_zoom(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
+    mut pinch: MessageReader<PinchGesture>,
     mut camera: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
 ) {
     let Ok((mut transform, mut projection)) = camera.single_mut() else { return };
+    let current_scale = orthographic_scale(&projection);
 
-    if mouse_buttons.pressed(MouseButton::Right) {
-        let current_scale = orthographic_scale(&projection);
+    if mouse_buttons.pressed(MouseButton::Middle) {
         for ev in motion.read() {
             // Screen-space Y grows downward; world-space Y grows upward, so
             // panning "with the drag" flips the Y delta. Scaled by the
@@ -410,14 +465,48 @@ pub(super) fn mouse_pan_zoom(
         motion.clear();
     }
 
-    let mut scroll = 0.0f32;
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let mut scroll = Vec2::ZERO;
     for ev in wheel.read() {
-        scroll += ev.y;
+        scroll += scroll_delta_in_lines(ev);
     }
-    if scroll != 0.0
-        && let Projection::Orthographic(ortho) = &mut *projection
-    {
-        ortho.scale = (ortho.scale * (1.0 - scroll * ZOOM_STEP)).clamp(MIN_ZOOM, MAX_ZOOM);
+    if ctrl_held {
+        if scroll.y != 0.0 {
+            zoom_by(&mut projection, scroll.y * ZOOM_STEP);
+        }
+    } else if scroll != Vec2::ZERO {
+        transform.translation.x += scroll.x * SCROLL_PAN_SPEED * current_scale;
+        transform.translation.y -= scroll.y * SCROLL_PAN_SPEED * current_scale;
+    }
+
+    for ev in pinch.read() {
+        zoom_by(&mut projection, ev.0 * PINCH_ZOOM_SENSITIVITY);
+    }
+}
+
+/// Normalizes a `MouseWheel` event's delta to "lines", the unit a physical
+/// wheel notch already reports one of - a trackpad's `MouseScrollUnit::
+/// Pixel` delta is divided by Bevy's own published pixels-per-line
+/// (`MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR`) so `mouse_pan_zoom`
+/// can apply exactly one pan/zoom formula to either source instead of
+/// calibrating each separately.
+fn scroll_delta_in_lines(ev: &MouseWheel) -> Vec2 {
+    match ev.unit {
+        MouseScrollUnit::Line => Vec2::new(ev.x, ev.y),
+        MouseScrollUnit::Pixel => Vec2::new(ev.x, ev.y) / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+    }
+}
+
+/// Applies a relative zoom change to an orthographic projection, clamped to
+/// `MIN_ZOOM..=MAX_ZOOM` - shared by `mouse_pan_zoom`'s Ctrl+scroll and
+/// pinch-gesture branches so the two stay numerically consistent (a
+/// positive `relative` always zooms in, matching both "scroll up to zoom
+/// in" and `PinchGesture`'s own "positive delta = magnify" convention). A
+/// no-op on a non-orthographic projection (this client never uses one, but
+/// `Projection` is the type `MainCamera`'s query returns).
+fn zoom_by(projection: &mut Projection, relative: f32) {
+    if let Projection::Orthographic(ortho) = projection {
+        ortho.scale = (ortho.scale * (1.0 - relative)).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 }
 
@@ -426,6 +515,52 @@ fn orthographic_scale(projection: &Projection) -> f32 {
         Projection::Orthographic(ortho) => ortho.scale,
         _ => 1.0,
     }
+}
+
+/// Arrow-key camera pan - the one panning input that is never optional
+/// ("the map is always movable"). Every binding in `mouse_pan_zoom` targets
+/// a specific pointing device or gesture (a trackpad's two-finger scroll, a
+/// wheel mouse, a three-button mouse's middle button, a macOS pinch); this
+/// one only needs a keyboard, which every platform this client runs on has,
+/// so it is the single guarantee the map can always be moved.
+///
+/// Deliberately arrow keys, not WASD: `W`/`A`/`D` are already bound while
+/// the diplomacy panel is open (`W` declares war, `A` accepts a treaty, `D`
+/// closes the panel - `handle_diplomacy_keys`), and reusing them here on
+/// `pressed()` would fire both effects from one keypress - holding `W` to
+/// pan the camera during a negotiation would also declare war. Arrow keys
+/// collide with nothing there. Their only other user is `keyboard_input`'s
+/// newspaper pager (`ArrowLeft`/`ArrowRight`, gated on `newspaper.open`),
+/// which is a harmless double-fire - turning a page while also panning the
+/// camera underneath it is not a mistake worth guarding against, unlike
+/// accidentally declaring war.
+///
+/// Not gated behind `nl_compose.active`/`menu.0`/`diplomacy.open` at all,
+/// on purpose (unlike `keyboard_input`, which returns early for all three) -
+/// this is the fallback of last resort, so it must not share their
+/// exclusivity.
+pub(super) fn keyboard_pan(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut camera: Query<(&mut Transform, &Projection), With<MainCamera>>) {
+    let Ok((mut transform, projection)) = camera.single_mut() else { return };
+
+    let mut dir = Vec2::ZERO;
+    if keys.pressed(KeyCode::ArrowUp) {
+        dir.y += 1.0;
+    }
+    if keys.pressed(KeyCode::ArrowDown) {
+        dir.y -= 1.0;
+    }
+    if keys.pressed(KeyCode::ArrowLeft) {
+        dir.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::ArrowRight) {
+        dir.x += 1.0;
+    }
+    if dir == Vec2::ZERO {
+        return;
+    }
+
+    let scale = orthographic_scale(projection);
+    transform.translation += (dir.normalize() * KEY_PAN_SPEED * scale * time.delta_secs()).extend(0.0);
 }
 
 /// Converts a left-click release into a world-space point, or `None` if it
@@ -570,8 +705,12 @@ fn issue_move_orders(sim: &mut SimRes, selected_units: &SelectedUnits, to: Stati
 /// menu of orders for someone else's territory isn't a "rejection" worth
 /// surfacing - there is no order to attempt yet, since no menu choice has
 /// been made). Uses the same click-vs-drag distinction as
-/// `map_click_select`/`mouse_pan_zoom`'s own right-button pan, so panning
-/// (a drag) and opening the menu (a clean click) never fight each other.
+/// `map_click_select` (`click_world_pos`'s `CLICK_DRAG_TOLERANCE`), so a
+/// stray drag on the right button (e.g. a slightly-sliding two-finger tap)
+/// just opens nothing rather than misfiring the menu - right-button drag
+/// itself no longer pans (`mouse_pan_zoom`'s own doc: that binding was
+/// unreachable on a macOS trackpad and this button was already overloaded
+/// with the region menu), so there is nothing left to fight over here.
 pub(super) fn map_right_click_menu(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -681,6 +820,10 @@ pub(super) fn nl_compose_text_input(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy::input::touch::TouchPhase;
+
     use super::*;
 
     use archipelago_sim::ids::FactionId;
@@ -748,5 +891,226 @@ mod tests {
         system.run((), &mut world).unwrap();
 
         assert_eq!(world.resource::<NlCompose>().buffer, "h", "a real keystroke after activation must still be collected");
+    }
+
+    /// Spawns the one entity `mouse_pan_zoom`/`keyboard_pan` both query for -
+    /// shared by every test below instead of a `Camera2d` bundle, since
+    /// these systems only ever touch `MainCamera`'s own `Transform`/
+    /// `Projection` and a bare `World::new()` (no render plugins) never
+    /// resolves `Camera2d`'s required-component chain the way `App` would.
+    fn spawn_main_camera(world: &mut World) {
+        world.spawn((MainCamera, Transform::default(), Projection::Orthographic(OrthographicProjection::default_2d())));
+    }
+
+    fn camera_state(world: &mut World) -> (Vec3, f32) {
+        let mut q = world.query_filtered::<(&Transform, &Projection), With<MainCamera>>();
+        let (transform, projection) = q.single(world).unwrap();
+        (transform.translation, orthographic_scale(projection))
+    }
+
+    /// Keyboard panning is the one binding the task requires to be
+    /// unreachable-proof (`keyboard_pan`'s own doc, "the map is always
+    /// movable") - this is the one path this Linux/X11 machine can actually
+    /// exercise end to end, since every other binding below depends on a
+    /// real trackpad/mouse the CI/dev box doesn't have either. Checked this
+    /// actually exercises the movement, not a no-op: temporarily changed
+    /// `KEY_PAN_SPEED` to `0.0` and reran - this assertion then fails
+    /// (`translation.y == 0.0` instead of `900.0`), and restored afterward.
+    #[test]
+    fn keyboard_pan_moves_camera_with_arrow_up() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowUp);
+        world.insert_resource(keys);
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(1.0));
+        world.insert_resource(time);
+
+        let mut system = IntoSystem::into_system(keyboard_pan);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        let (translation, scale) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::new(0.0, 900.0, 0.0), "one second of ArrowUp must move the camera up by exactly 900 world units - a literal, not `KEY_PAN_SPEED`, so this also catches an accidental retune, not just a broken axis/sign");
+        assert_eq!(scale, 1.0, "arrow-key panning must never touch zoom");
+    }
+
+    /// Regression guard for the two failure modes a "held-key" system can
+    /// have without ever failing to compile: doing nothing when it should
+    /// move (covered above), and moving when it shouldn't. No key held here
+    /// - the camera must not drift on its own every frame.
+    #[test]
+    fn keyboard_pan_is_a_noop_with_no_keys_held() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(1.0));
+        world.insert_resource(time);
+
+        let mut system = IntoSystem::into_system(keyboard_pan);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        let (translation, _) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::ZERO, "no key held must never move the camera");
+    }
+
+    /// Guards the direction accumulation itself, not just "some key does
+    /// something": opposite arrow keys held together must cancel exactly,
+    /// not add up or fall through to only one of the two branches.
+    #[test]
+    fn keyboard_pan_cancels_opposite_arrow_keys() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowLeft);
+        keys.press(KeyCode::ArrowRight);
+        keys.press(KeyCode::ArrowUp);
+        keys.press(KeyCode::ArrowDown);
+        world.insert_resource(keys);
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(1.0));
+        world.insert_resource(time);
+
+        let mut system = IntoSystem::into_system(keyboard_pan);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        let (translation, _) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::ZERO, "opposite held arrow keys must cancel out, not stack");
+    }
+
+    /// The whole point of moving panning off scroll's plain form: a
+    /// trackpad's two-finger scroll (or a physical wheel notch) pans with
+    /// no modifier and no button held at all - the one thing a macOS
+    /// trackpad user with no external mouse could never do with the old
+    /// right-drag binding. Checked this fails when broken: temporarily made
+    /// the pan branch a no-op (`if false && !ctrl_held`) and reran - this
+    /// assertion then fails (`translation == Vec3::ZERO`), restored after.
+    #[test]
+    fn mouse_wheel_scroll_pans_without_ctrl() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        world.init_resource::<Messages<MouseWheel>>();
+        world.init_resource::<Messages<MouseMotion>>();
+        world.init_resource::<Messages<PinchGesture>>();
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+
+        let mut system = IntoSystem::into_system(mouse_pan_zoom);
+        system.initialize(&mut world);
+
+        world.resource_mut::<Messages<MouseWheel>>().write(MouseWheel { unit: MouseScrollUnit::Line, x: 0.0, y: 1.0, window: Entity::PLACEHOLDER, phase: TouchPhase::Moved });
+        system.run((), &mut world).unwrap();
+
+        let (translation, scale) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::new(0.0, -60.0, 0.0), "one line of unmodified scroll must pan by exactly -60 world units (literal, not `SCROLL_PAN_SPEED`, for the same reason as the keyboard-pan test above)");
+        assert_eq!(scale, 1.0, "unmodified scroll must never touch zoom");
+    }
+
+    /// The other half of the same split: holding Ctrl turns that identical
+    /// scroll event into a zoom instead - the near-universal "Ctrl+scroll
+    /// zooms" convention, and the only zoom control a plain wheel mouse
+    /// (no pinch gesture available at all) has under this scheme.
+    #[test]
+    fn ctrl_scroll_zooms_instead_of_panning() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        world.init_resource::<Messages<MouseWheel>>();
+        world.init_resource::<Messages<MouseMotion>>();
+        world.init_resource::<Messages<PinchGesture>>();
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        world.insert_resource(keys);
+
+        let mut system = IntoSystem::into_system(mouse_pan_zoom);
+        system.initialize(&mut world);
+
+        world.resource_mut::<Messages<MouseWheel>>().write(MouseWheel { unit: MouseScrollUnit::Line, x: 0.0, y: 1.0, window: Entity::PLACEHOLDER, phase: TouchPhase::Moved });
+        system.run((), &mut world).unwrap();
+
+        let (translation, scale) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::ZERO, "Ctrl+scroll must never pan");
+        assert_eq!(scale, 0.9, "Ctrl+scroll must zoom the projection scale to exactly 0.9 (literal, not `ZOOM_STEP`)");
+    }
+
+    /// macOS/iOS's native two-finger pinch (`PinchGesture`) zooms
+    /// independently of the scroll channel above, so pinch-to-zoom and
+    /// two-finger-scroll-to-pan are both available on the same trackpad at
+    /// once - see `mouse_pan_zoom`'s own doc for why that split matters.
+    #[test]
+    fn pinch_gesture_zooms() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        world.init_resource::<Messages<MouseWheel>>();
+        world.init_resource::<Messages<MouseMotion>>();
+        world.init_resource::<Messages<PinchGesture>>();
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+
+        let mut system = IntoSystem::into_system(mouse_pan_zoom);
+        system.initialize(&mut world);
+
+        world.resource_mut::<Messages<PinchGesture>>().write(PinchGesture(0.2));
+        system.run((), &mut world).unwrap();
+
+        let (translation, scale) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::ZERO, "a pinch gesture must never pan");
+        assert_eq!(scale, 0.8, "a positive pinch delta (magnify) must zoom the projection scale to exactly 0.8 (literal, not `PINCH_ZOOM_SENSITIVITY`)");
+    }
+
+    /// The extra desktop-mouse convenience: a middle-button drag pans just
+    /// like the old right-drag used to, without occupying the right button
+    /// `map_right_click_menu` needs for the region menu, or the left button
+    /// `map_click_select` needs for select/order.
+    #[test]
+    fn middle_button_drag_pans() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        world.init_resource::<Messages<MouseWheel>>();
+        world.init_resource::<Messages<MouseMotion>>();
+        world.init_resource::<Messages<PinchGesture>>();
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Middle);
+        world.insert_resource(buttons);
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+
+        let mut system = IntoSystem::into_system(mouse_pan_zoom);
+        system.initialize(&mut world);
+
+        world.resource_mut::<Messages<MouseMotion>>().write(MouseMotion { delta: Vec2::new(10.0, 20.0) });
+        system.run((), &mut world).unwrap();
+
+        let (translation, _) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::new(-10.0, 20.0, 0.0), "a middle-button drag must pan by its motion delta");
+    }
+
+    /// The hard requirement from the task this fix was built for: plain
+    /// left-click (with or without motion) must never pan the camera -
+    /// `map_click_select` alone owns it, always meaning select/order.
+    #[test]
+    fn left_button_drag_does_not_pan_camera() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        world.init_resource::<Messages<MouseWheel>>();
+        world.init_resource::<Messages<MouseMotion>>();
+        world.init_resource::<Messages<PinchGesture>>();
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Left);
+        world.insert_resource(buttons);
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+
+        let mut system = IntoSystem::into_system(mouse_pan_zoom);
+        system.initialize(&mut world);
+
+        world.resource_mut::<Messages<MouseMotion>>().write(MouseMotion { delta: Vec2::new(50.0, 50.0) });
+        system.run((), &mut world).unwrap();
+
+        let (translation, scale) = camera_state(&mut world);
+        assert_eq!(translation, Vec3::ZERO, "a left-button drag must never pan the camera");
+        assert_eq!(scale, 1.0, "a left-button drag must never zoom the camera either");
     }
 }

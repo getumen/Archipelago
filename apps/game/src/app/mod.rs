@@ -427,6 +427,7 @@ pub fn run(
                 input::keyboard_input,
                 input::nl_compose_text_input,
                 input::mouse_pan_zoom,
+                input::keyboard_pan,
                 input::map_click_select,
                 input::map_right_click_menu,
                 sim_control::advance_simulation,

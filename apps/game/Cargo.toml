@@ -41,6 +41,15 @@ features = [
     # `libudev` (this build still needs no system package beyond X11's).
     "bevy_sprite_render",
     "bevy_ui_render",
+    # macOS/iOS trackpad pinch-to-zoom (`bevy::input::gestures::PinchGesture`,
+    # `input::mouse_pan_zoom`) - pure `bevy_input/gestures` addition, no
+    # extra system dependency (confirmed against `bevy_internal`'s and
+    # `bevy_input`'s own `Cargo.toml`: it gates nothing behind `wayland`/
+    # `alsa`/`libudev`, unlike the features this crate already avoids above).
+    # A no-op message stream on this (X11/Linux) machine - Winit only ever
+    # emits `PinchGesture` on macOS/iOS - but the system reading it is still
+    # exercised directly against a `World` in `input`'s own tests.
+    "gestures",
 ]
 
 [dependencies]

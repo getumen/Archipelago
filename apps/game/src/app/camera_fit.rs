@@ -7,11 +7,12 @@
 //! don't cover.
 //!
 //! Runs once per `RegionLayout` change and then gets out of the way -
-//! `input::mouse_pan_zoom` is the only other system touching the camera's
-//! `Transform`/`Projection`, so "keep manual pan/zoom working after the
-//! initial fit" (docs/phase7-spec.md "操作") holds by construction: this
-//! system never runs again once `layout.is_changed()` goes false, so it can
-//! never fight a player's drag/scroll.
+//! `input::mouse_pan_zoom` and `input::keyboard_pan` are the only other
+//! systems touching the camera's `Transform`/`Projection`, so "keep manual
+//! pan/zoom working after the initial fit" (docs/phase7-spec.md "操作")
+//! holds by construction: this system never runs again once
+//! `layout.is_changed()` goes false, so it can never fight a player's
+//! scroll/drag/arrow-key pan.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;

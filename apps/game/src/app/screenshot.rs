@@ -43,9 +43,9 @@ pub struct ScreenshotConfig {
     /// instead of the whole-map fit `camera_fit::fit_camera_to_map` computes
     /// by default - a dense map (japan47's 47 prefectures) can render a
     /// short link's overlay color at only a few pixels wide at whole-map
-    /// zoom, exactly what a real player would scroll in on with the mouse
-    /// wheel (`input::mouse_pan_zoom`) but a screenshot run has no mouse at
-    /// all.
+    /// zoom, exactly what a real player would Ctrl+scroll in on
+    /// (`input::mouse_pan_zoom`) but a screenshot run has no mouse or
+    /// keyboard at all.
     pub camera_focus_region: Option<RegionId>,
     /// `--debug-camera-zoom <scale>`: the orthographic projection's `scale`
     /// to use with `camera_focus_region` - smaller is closer in. Ignored

@@ -548,8 +548,12 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
 /// A small, always-present key to every mark Stage 7C's overlays can put on
 /// the map (`overlay`'s own module doc has the full visual-hierarchy
 /// rationale) - so a viewer never has to read this crate's source to know
-/// what a color means. Two groups: two rows that read on their own
-/// (blockade/construction, both always-on features), and the supply-
+/// what a color means - plus, at the top, the camera/order controls
+/// themselves (`input`'s own module doc for the full binding list): without
+/// this, nothing on screen ever told a player panning existed at all, let
+/// alone how to do it on a device with no right-drag-capable mouse. Three
+/// groups: the controls list and two always-on-legend rows
+/// (blockade/construction), both shown unconditionally, and the supply-
 /// overlay-specific rows, shown only while `SupplyOverlay` (`L`) is on -
 /// `overlay::sync_legend_visibility` toggles those together with the
 /// overlay itself. Sits in the one gap the rest of this crate's UI layout
@@ -577,6 +581,18 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
                     e.insert((Visibility::Hidden, SupplyOnlyLegendRow));
                 }
             };
+
+            // Camera/order controls (`input::mouse_pan_zoom`/`keyboard_pan`/
+            // `map_click_select`/`map_right_click_menu`) - see those systems'
+            // own docs for exactly what each binding does and why. Kept to
+            // one line per binding, matched to the same `<=31`-char width
+            // the longest existing legend row below already proves fits.
+            row("controls:", header_color, false);
+            row("pan: scroll or middle-drag", label_color, false);
+            row("pan: arrow keys (always)", label_color, false);
+            row("zoom: ctrl+scroll / pinch", label_color, false);
+            row("select/order: left click", label_color, false);
+            row("region menu: right click", label_color, false);
 
             row("legend", label_color, false);
             row("■ port blockaded", overlay::BLOCKADE_MARKER_COLOR, false);
