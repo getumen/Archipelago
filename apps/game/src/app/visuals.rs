@@ -18,7 +18,10 @@ use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER};
 
 use super::palette::{faction_color, Unit01, NEUTRAL};
 use super::setup::station_position;
-use super::{RegionLayout, RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, UnitMarker};
+use super::{
+    MainCamera, RegionLabelMarker, RegionLayout, RegionMarker, SeaZoneCenters, SeaZoneMarker,
+    SelectedRegion, SimRes, UnitMarker,
+};
 
 /// Scorched-earth tone `sync_region_visuals` mixes a devastated region's
 /// fill toward - dull, dark, faintly brown, never pure black (a fully-
@@ -164,5 +167,51 @@ pub(super) fn sync_unit_visuals(
         if let Some(mut mat) = materials.get_mut(&material_handle.0) {
             mat.color = faction_color(unit.owner.index());
         }
+    }
+}
+
+/// Threshold in `Projection::Orthographic::scale` (world units per screen
+/// pixel; `input::MIN_ZOOM..=MAX_ZOOM` is `0.25..=4.0`) below which every
+/// dense-map region label becomes visible, not just a
+/// `RegionLabelMarker::always_visible` (capital/top-decile-population) one
+/// or the current selection. Picked comfortably inside the zoomable range -
+/// past it a player still has plenty of room left to zoom in further
+/// (`input::MIN_ZOOM` is `0.25`) - but well under the default whole-map
+/// fitted scale a dense map like `japan_hex` computes
+/// (`camera_fit::fit_camera_to_map`, roughly 3.3 by default with `mod::
+/// window_height_for_layout`'s own sizing), so the *default* view stays
+/// clean territory, not a name-soup, and only reveals every name once the
+/// player has actually asked for more detail by zooming in.
+const LABEL_ZOOM_THRESHOLD: f32 = 1.5;
+
+/// Dense-map region label visibility policy (`RegionLabelMarker`'s own doc
+/// has the full rationale) - a no-op in effect on a sparse map, where every
+/// label's `always_visible` is unconditionally `true` (`setup::setup`), so
+/// the `||` chain below always resolves to `Visibility::Visible` there
+/// without ever consulting zoom, selection, or occupation. On a dense map,
+/// a label is visible while it's a capital/top-decile-population region
+/// (`always_visible`), the region is under active occupation (`occupier`
+/// - a fight over it is exactly the moment its name matters most, and
+/// unlike population/capital status this can start or end at any time, so
+/// it's checked fresh every frame rather than baked in at spawn), the
+/// camera has zoomed in past `LABEL_ZOOM_THRESHOLD`, or the player has
+/// selected that exact region - matching the task's own combined policy:
+/// "at sufficient zoom" plus "selected" plus "significant (population,
+/// capitals, contested)".
+pub(super) fn sync_region_label_visibility(
+    sim: Res<SimRes>,
+    selected: Res<SelectedRegion>,
+    camera: Query<&Projection, With<MainCamera>>,
+    mut labels: Query<(&RegionLabelMarker, &mut Visibility)>,
+) {
+    let world = sim.0.world();
+    let zoomed_in_enough = matches!(
+        camera.single(),
+        Ok(Projection::Orthographic(ortho)) if ortho.scale <= LABEL_ZOOM_THRESHOLD
+    );
+    for (marker, mut visibility) in &mut labels {
+        let contested = world.regions.get(marker.region.index()).is_some_and(|r| r.occupier.is_some());
+        let show = marker.always_visible || contested || zoomed_in_enough || selected.0 == Some(marker.region);
+        *visibility = if show { Visibility::Visible } else { Visibility::Hidden };
     }
 }

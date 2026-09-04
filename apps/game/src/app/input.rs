@@ -40,11 +40,11 @@ use archipelago_sim::good::{ALL_GOODS, GOOD_COUNT};
 use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::{Domain, Station};
 
-use super::setup::{region_radius, sea_zone_radius};
+use super::setup::sea_zone_radius;
 use super::{
     ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose, PlayerFaction,
-    RegionLayout, SeaZoneCenters, SelectedFaction, SelectedRegion, SelectedSeaZone, SelectedUnits,
-    SimRes, Speed, SpeedRes, SupplyOverlay, UnitMarker,
+    RegionLayout, RegionRadii, SeaZoneCenters, SelectedFaction, SelectedRegion, SelectedSeaZone,
+    SelectedUnits, SimRes, Speed, SpeedRes, SupplyOverlay, UnitMarker,
 };
 
 const MIN_ZOOM: f32 = 0.25;
@@ -642,6 +642,7 @@ pub(super) fn map_click_select(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     layout: Res<RegionLayout>,
+    radii: Res<RegionRadii>,
     sea_centers: Res<SeaZoneCenters>,
     units: Query<(&UnitMarker, &Transform)>,
     player: Res<PlayerFaction>,
@@ -686,7 +687,7 @@ pub(super) fn map_click_select(
     for region in &sim.0.world().regions {
         let [x, y] = layout.0[region.id.index()];
         let d = Vec2::new(x, y).distance(world_pos);
-        let radius = region_radius(region.population);
+        let radius = radii.0[region.id.index()];
         if d <= radius && region_hit.is_none_or(|(_, best)| d < best) {
             region_hit = Some((region.id, d));
         }
@@ -755,6 +756,7 @@ pub(super) fn map_right_click_menu(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     layout: Res<RegionLayout>,
+    radii: Res<RegionRadii>,
     player: Res<PlayerFaction>,
     sim: Res<SimRes>,
     mut menu: ResMut<MenuRegion>,
@@ -771,7 +773,7 @@ pub(super) fn map_right_click_menu(
     for region in &sim.0.world().regions {
         let [x, y] = layout.0[region.id.index()];
         let d = Vec2::new(x, y).distance(world_pos);
-        let radius = region_radius(region.population);
+        let radius = radii.0[region.id.index()];
         if d <= radius && hit.is_none_or(|(_, best)| d < best) {
             hit = Some((region.id, d));
         }

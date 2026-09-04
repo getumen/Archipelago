@@ -286,11 +286,40 @@ pub(crate) struct RegionLayout(pub Vec<[f32; 2]>);
 #[derive(Resource)]
 pub(crate) struct SeaZoneCenters(pub Vec<[f32; 2]>);
 
+/// One marker radius per region, indexed exactly like `RegionLayout` -
+/// `setup::compute_region_radii`'s own doc has the full population-circle-
+/// vs-hex-fill policy. Computed once, alongside `RegionLayout`, and shared
+/// by every system that needs to know how big a region is actually drawn
+/// (`setup::setup`'s own mesh/supply-ring/construction-marker geometry,
+/// `overlay::sync_blockade_visuals`'s marker offset, and `input`'s
+/// region click/right-click hit-tests) so all of them always agree.
+#[derive(Resource)]
+pub(crate) struct RegionRadii(pub Vec<f32>);
+
 #[derive(Component)]
 pub(crate) struct RegionMarker(pub RegionId);
 
 #[derive(Component)]
 pub(crate) struct SeaZoneMarker(pub SeaZoneId);
+
+/// A region name label's dense-map visibility policy
+/// (`visuals::sync_region_label_visibility`) - attached to every region
+/// label `setup::setup` spawns, sparse or dense alike.
+///
+/// `always_visible` is unconditionally `true` on a sparse map
+/// (`setup::DENSE_REGION_THRESHOLD`, `mvp`/`japan47`): Stage 7B's original
+/// "every label always on" behavior, exactly unchanged - the per-frame
+/// system's zoom/selection checks then never matter, since the `||` they
+/// sit behind already short-circuits true. On a dense map (`japan_hex`) it's
+/// `true` only for a faction capital or a population-top-decile region
+/// (`setup::significant_regions`) - every other label starts hidden and is
+/// revealed only once the player zooms in past `visuals::
+/// LABEL_ZOOM_THRESHOLD` or selects that exact region.
+#[derive(Component)]
+pub(crate) struct RegionLabelMarker {
+    pub region: RegionId,
+    pub always_visible: bool,
+}
 
 #[derive(Component)]
 pub(crate) struct UnitMarker(pub UnitId);
@@ -415,6 +444,11 @@ pub fn run(
     let region_count = world.regions.len();
     let unit_count = world.units.len();
     let start_day = world.day;
+    // Computed against `&world` before it moves into `SimDriver::new_with_player`
+    // below - see `RegionRadii`'s own doc for why every rendering system
+    // shares this one Vec instead of each recomputing its own.
+    let region_radii = setup::compute_region_radii(&world, &positions);
+    let window_height = window_height_for_layout(&positions);
 
     let player_faction = play.as_ref().map(|p| p.player);
     let record_path = play.as_ref().and_then(|p| p.record.clone());
@@ -425,7 +459,7 @@ pub fn run(
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("Archipelago — {scenario_name}"),
-            resolution: bevy::window::WindowResolution::new(1280, 800),
+            resolution: bevy::window::WindowResolution::new(WINDOW_WIDTH as u32, window_height as u32),
             ..default()
         }),
         ..default()
@@ -485,6 +519,7 @@ pub fn run(
         .insert_resource(EventLog::default())
         .insert_resource(ScenarioMeta { name: scenario_name, max_days })
         .insert_resource(RegionLayout(positions))
+        .insert_resource(RegionRadii(region_radii))
         .insert_resource(SeaZoneCenters(sea_centers))
         .insert_resource(PlayerFaction(player_faction))
         .insert_resource(SelectedUnits(debug_selected_units))
@@ -547,6 +582,19 @@ pub fn run(
             )
                 .chain()
                 .after(sim_control::advance_simulation),
+        )
+        .add_systems(
+            // A standalone call rather than folded into the 14-system chain
+            // above - that tuple is already at the practical size this
+            // crate's own `.chain()` calls have been kept under elsewhere
+            // (see the next block's own doc), so a 15th system goes here
+            // instead. Ordering only needs `SimRes`/`SelectedRegion` to be
+            // this frame's own post-tick state, same as every system in the
+            // chain above - `.after(...)` alone (no `.chain()`, nothing else
+            // in this call to chain against) gets that without needing to
+            // grow that tuple at all.
+            Update,
+            visuals::sync_region_label_visibility.after(sim_control::advance_simulation),
         )
         .add_systems(
             // Split from the block above - Bevy's `.chain()` tuple impl has
@@ -645,4 +693,96 @@ fn outward_push_distance(positions: &[[f32; 2]]) -> f32 {
         max = max.max(v);
     }
     ((max - min).length() * 0.12).max(40.0)
+}
+
+/// Window width - fixed, never adapted per scenario (unlike `window_height_
+/// for_layout` below): every panel in `setup::spawn_ui`/`panels` is
+/// positioned with an absolute `Val::Px` offset from an edge (`right: Val::
+/// Px(10.0)`, etc.), which stays correct at any height but would need a
+/// wholesale relayout to track a varying width safely.
+const WINDOW_WIDTH: f32 = 1280.0;
+/// Window height floor - the original Stage 7A default, and still exactly
+/// what a landscape-ish map (`mvp`'s bounding box is wider than tall)
+/// computes to below, so neither existing scenario's window size changes.
+const DEFAULT_WINDOW_HEIGHT: f32 = 800.0;
+/// Window height ceiling - keeps a pathological scenario (an extremely
+/// tall/narrow region layout) from demanding an unreasonably large window.
+const MAX_WINDOW_HEIGHT: f32 = 1300.0;
+
+/// Chooses the window's own height so its "safe" (panel-free) area
+/// (`camera_fit::SAFE_LEFT`/`RIGHT`/`TOP`/`BOTTOM`) ends up roughly the same
+/// *aspect ratio* as the region layout's own bounding box, instead of the
+/// fixed `DEFAULT_WINDOW_HEIGHT` alone.
+///
+/// `japan_hex`'s 289-region archipelago runs diagonally across a bounding
+/// box far taller than it is wide (~1580 x 2113 world units, aspect 0.75);
+/// the original fixed 800px-tall window's own safe area is *wider* than
+/// tall (aspect ~1.24) - `camera_fit::fit_camera_to_map`'s uniform,
+/// aspect-preserving scale then has to fit the box's own height, leaving
+/// roughly 38% of the safe area's width sitting empty on either side, with
+/// no distortion-free way for `fit_camera_to_map` alone to close that gap.
+/// Widening *this* window's height to better match the box's own aspect
+/// closes most of it without touching `fit_camera_to_map`'s math, or the
+/// scenario's own `Region::position` data, at all.
+///
+/// Width deliberately stays fixed (`WINDOW_WIDTH`) rather than also being
+/// adapted - see that constant's own doc. Clamped to
+/// `DEFAULT_WINDOW_HEIGHT..=MAX_WINDOW_HEIGHT`: `mvp`/`japan47`'s own
+/// bounding boxes are already close enough to the default safe area's
+/// aspect that the unclamped formula computes at or below
+/// `DEFAULT_WINDOW_HEIGHT` for both (checked directly in this function's
+/// own tests), so the floor leaves them at exactly the original window
+/// size - no regression for either.
+fn window_height_for_layout(positions: &[[f32; 2]]) -> f32 {
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    for &p in positions {
+        let v = Vec2::from(p);
+        min = min.min(v);
+        max = max.max(v);
+    }
+    let box_size = max - min;
+    if !(box_size.x > 0.0 && box_size.y > 0.0) {
+        return DEFAULT_WINDOW_HEIGHT; // Fewer than two distinct positions - nothing to match an aspect ratio to.
+    }
+    let safe_w = WINDOW_WIDTH - camera_fit::SAFE_LEFT - camera_fit::SAFE_RIGHT;
+    let desired_safe_h = safe_w * (box_size.y / box_size.x);
+    (desired_safe_h + camera_fit::SAFE_TOP + camera_fit::SAFE_BOTTOM).clamp(DEFAULT_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT)
+}
+
+#[cfg(test)]
+mod window_height_tests {
+    use super::*;
+
+    /// `mvp`'s own bounding box (520 x 400 world units, from `scenarios/
+    /// mvp.json`'s own `Region::position` spread) is already close to the
+    /// default safe area's aspect ratio - this must compute at or below
+    /// `DEFAULT_WINDOW_HEIGHT` so the clamp leaves `mvp`'s window size
+    /// exactly as it always was.
+    #[test]
+    fn mvp_shaped_layout_does_not_grow_the_window() {
+        let positions = [[0.0, 0.0], [520.0, 0.0], [0.0, 400.0], [520.0, 400.0]];
+        assert_eq!(window_height_for_layout(&positions), DEFAULT_WINDOW_HEIGHT);
+    }
+
+    /// A tall, narrow bounding box (`japan_hex`'s own ~1580 x 2113 shape)
+    /// must grow the window well past the default - this is the whole point
+    /// of the function - but never past `MAX_WINDOW_HEIGHT`.
+    #[test]
+    fn tall_narrow_layout_grows_the_window_within_the_ceiling() {
+        let positions = [[0.0, 0.0], [1580.0, 0.0], [0.0, 2113.0], [1580.0, 2113.0]];
+        let height = window_height_for_layout(&positions);
+        assert!(height > DEFAULT_WINDOW_HEIGHT, "a tall map must grow the window, got {height}");
+        assert!(height <= MAX_WINDOW_HEIGHT, "must never exceed the ceiling, got {height}");
+    }
+
+    /// Fewer than two distinct positions: no bounding-box aspect ratio
+    /// exists to match, so this must fall back to the default rather than
+    /// dividing by a zero-size box.
+    #[test]
+    fn degenerate_layout_falls_back_to_the_default() {
+        assert_eq!(window_height_for_layout(&[]), DEFAULT_WINDOW_HEIGHT);
+        assert_eq!(window_height_for_layout(&[[3.0, 4.0]]), DEFAULT_WINDOW_HEIGHT);
+        assert_eq!(window_height_for_layout(&[[3.0, 4.0], [3.0, 9.0]]), DEFAULT_WINDOW_HEIGHT); // zero width
+    }
 }

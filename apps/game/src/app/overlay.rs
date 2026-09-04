@@ -78,11 +78,11 @@ use archipelago_sim::logistics::{self, LinkThroughput, SupplyRegionRoute, Supply
 use archipelago_sim::naval::{self, PortBlockade};
 
 use super::palette::Unit01;
-use super::setup::{link_style, region_radius, Z_LINK, Z_LINK_CHOKEPOINT, Z_LINK_HIGHLIGHT};
+use super::setup::{link_style, Z_LINK, Z_LINK_CHOKEPOINT, Z_LINK_HIGHLIGHT};
 use super::{
     BlockadeVisual, ChokepointMarker, ConstructionMarker, LinkVisualMarker, MainCamera,
-    RegionLayout, SeaZoneCenters, SelectedRegion, SelectedSeaZone, SimRes, SupplyOnlyLegendRow,
-    SupplyOverlay, SupplyRingMarker,
+    RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion, SelectedSeaZone, SimRes,
+    SupplyOnlyLegendRow, SupplyOverlay, SupplyRingMarker,
 };
 
 /// Chokepoint tint - a link whose flow has reached its own `max_throughput`
@@ -387,6 +387,7 @@ pub(super) fn sync_blockade_visuals(
     mut materials: ResMut<Assets<ColorMaterial>>,
     sim: Res<SimRes>,
     layout: Res<RegionLayout>,
+    radii: Res<RegionRadii>,
     sea_centers: Res<SeaZoneCenters>,
     selected_region: Res<SelectedRegion>,
     selected_sea_zone: Res<SelectedSeaZone>,
@@ -415,7 +416,7 @@ pub(super) fn sync_blockade_visuals(
 
     for blockade in &blockades {
         let [rx, ry] = layout.0[blockade.region.index()];
-        let radius = region_radius(world.region(blockade.region).population);
+        let radius = radii.0[blockade.region.index()];
 
         // A small solid dot off to one side of the port region - deliberately
         // not a ring around it and not connected to anything by default
@@ -503,6 +504,7 @@ mod tests {
         // against a zero-length mesh), which an all-zero placeholder layout
         // would trip on every single region/zone pair.
         world.insert_resource(RegionLayout((0..sim_world.regions.len()).map(|i| [i as f32 * 100.0, 0.0]).collect()));
+        world.insert_resource(RegionRadii(sim_world.regions.iter().map(|r| super::super::setup::region_radius(r.population)).collect()));
         world.insert_resource(SeaZoneCenters((0..sim_world.sea_zones.len()).map(|i| [i as f32 * 100.0, 500.0]).collect()));
         world.insert_resource(SelectedRegion(None));
         world.insert_resource(SelectedSeaZone(None));

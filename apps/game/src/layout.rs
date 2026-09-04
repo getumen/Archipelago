@@ -78,6 +78,54 @@ pub fn label_push_directions(positions: &[[f32; 2]]) -> Vec<[f32; 2]> {
     out
 }
 
+/// The scenario's own effective grid "pitch" - the median nearest-neighbor
+/// distance between region centers - used by `app::setup::compute_region_radii`
+/// to size a filled hex marker for a dense, regularly-spaced scenario
+/// (`japan_hex`, 289 regions on a 40-world-unit hex grid) so adjacent cells
+/// tile without gaps or overlap, instead of `app::setup::region_radius`'s
+/// population-driven circle - tuned for the much sparser `mvp`/`japan47`
+/// scenarios, where a region's own on-screen footprint isn't itself
+/// meaningful grid data the way a hex cell's is.
+///
+/// Median, not mean or minimum: `japan_hex` has exactly one region whose
+/// nearest neighbor sits at 80 world units (twice the grid's own 40-unit
+/// pitch - evidently an edge case in how that scenario was generated) -
+/// a mean or minimum would let that one outlier skew the whole map's
+/// marker size; the median doesn't move for a single outlier among 289
+/// regions.
+///
+/// Returns `0.0` for fewer than two regions - there is no neighbor to
+/// measure, and no caller sizes anything from this without also handling a
+/// degenerate/single-region map on its own.
+pub fn nearest_neighbor_pitch(positions: &[[f32; 2]]) -> f32 {
+    let n = positions.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut nearest: Vec<f32> = Vec::with_capacity(n);
+    for (i, &[xi, yi]) in positions.iter().enumerate() {
+        let mut best = f32::INFINITY;
+        for (j, &[xj, yj]) in positions.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let dx = xj - xi;
+            let dy = yj - yi;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist < best {
+                best = dist;
+            }
+        }
+        nearest.push(best);
+    }
+    // Deterministic total order (`f32::total_cmp`) rather than the
+    // panic-on-NaN partial-order `sort_by(f32::partial_cmp)` would need -
+    // positions are always finite scenario data, but the total order costs
+    // nothing and keeps this infallible regardless.
+    nearest.sort_by(f32::total_cmp);
+    nearest[n / 2]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +259,32 @@ mod tests {
         for d in dirs {
             assert!(d[0].is_finite() && d[1].is_finite(), "push direction must stay finite, got {d:?}");
         }
+    }
+
+    #[test]
+    fn nearest_neighbor_pitch_is_zero_for_fewer_than_two_regions() {
+        assert_eq!(nearest_neighbor_pitch(&[]), 0.0);
+        assert_eq!(nearest_neighbor_pitch(&[[5.0, -3.0]]), 0.0);
+    }
+
+    /// A regular 2x2 grid, pitch 10 on both axes: every point's nearest
+    /// neighbor sits exactly 10 away, so the median must be exactly 10, not
+    /// some diagonal distance.
+    #[test]
+    fn nearest_neighbor_pitch_reads_a_regular_grid_exactly() {
+        let positions = [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]];
+        assert_eq!(nearest_neighbor_pitch(&positions), 10.0);
+    }
+
+    /// Four points on a pitch-10 grid plus one far outlier: the outlier's
+    /// own nearest-neighbor distance is huge, but it's exactly one value
+    /// among five - the median must still land on the grid's own 10, not be
+    /// dragged toward the outlier the way a mean would be. Mirrors
+    /// `japan_hex`'s real one-region 80-unit edge case at this function's
+    /// own doc.
+    #[test]
+    fn nearest_neighbor_pitch_is_robust_to_a_single_outlier() {
+        let positions = [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0], [1000.0, 1000.0]];
+        assert_eq!(nearest_neighbor_pitch(&positions), 10.0);
     }
 }

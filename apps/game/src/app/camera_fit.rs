@@ -17,21 +17,22 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use super::setup::MAX_REGION_RADIUS;
-use super::{MainCamera, RegionLayout};
+use super::{MainCamera, RegionLayout, RegionRadii};
 
 /// Screen-space margin (logical pixels) reserved for each UI panel, matching
 /// `setup::spawn_ui`'s own fixed geometry (300px-wide side panels each
 /// inset 10px, plus their own padding; the bottom event log runs up to
 /// `EVENT_LOG_CAPACITY` lines tall). The fitted map must not land under any
-/// of them.
-const SAFE_LEFT: f32 = 330.0;
-const SAFE_RIGHT: f32 = 330.0;
-const SAFE_TOP: f32 = 70.0;
-const SAFE_BOTTOM: f32 = 230.0;
+/// of them. `pub(super)` so `mod::window_height_for_layout` can size the
+/// window itself around the exact same margins this function fits inside -
+/// see that function's own doc.
+pub(super) const SAFE_LEFT: f32 = 330.0;
+pub(super) const SAFE_RIGHT: f32 = 330.0;
+pub(super) const SAFE_TOP: f32 = 70.0;
+pub(super) const SAFE_BOTTOM: f32 = 230.0;
 
 /// Extra world-space padding around the region bounding box, so the
-/// outermost region's own circle and name label aren't flush against the
+/// outermost region's own marker and name label aren't flush against the
 /// safe area's edge.
 const BOX_PADDING: f32 = 60.0;
 
@@ -41,6 +42,7 @@ const MIN_FIT_SCALE: f32 = 0.05;
 
 pub(super) fn fit_camera_to_map(
     layout: Res<RegionLayout>,
+    radii: Res<RegionRadii>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut camera: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
 ) {
@@ -57,7 +59,13 @@ pub(super) fn fit_camera_to_map(
         min = min.min(Vec2::new(x, y));
         max = max.max(Vec2::new(x, y));
     }
-    let pad = Vec2::splat(MAX_REGION_RADIUS + BOX_PADDING);
+    // The actual largest marker footprint this map draws (`RegionRadii`'s
+    // own doc) rather than the old hardcoded `setup::MAX_REGION_RADIUS` -
+    // correct for both a sparse map's population-scaled circles (whose max
+    // can fall well under that constant) and a dense map's uniform hex fill
+    // (which is sized from the grid's own pitch, not that constant at all).
+    let max_marker_radius = radii.0.iter().copied().fold(0.0f32, f32::max);
+    let pad = Vec2::splat(max_marker_radius + BOX_PADDING);
     min -= pad;
     max += pad;
     let box_size = max - min;

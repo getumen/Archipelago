@@ -7,15 +7,15 @@ use bevy::prelude::*;
 use bevy::sprite::{Anchor, Text2dShadow};
 
 use archipelago_sim::ids::RegionId;
-use archipelago_sim::world::{LinkKind, Station};
+use archipelago_sim::world::{LinkKind, Station, World as SimWorld};
 
 use super::fonts::AppFont;
 use super::overlay;
 use super::palette::faction_color;
 use super::{
-    EventLogText, FactionPanelText, InspectText, MainCamera, PlayerPanelText, RegionLayout,
-    RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, SupplyOnlyLegendRow, TopBarText,
-    UnitMarker,
+    EventLogText, FactionPanelText, InspectText, MainCamera, PlayerPanelText, RegionLabelMarker,
+    RegionLayout, RegionMarker, RegionRadii, SeaZoneCenters, SeaZoneMarker, SimRes,
+    SupplyOnlyLegendRow, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -33,6 +33,101 @@ use super::{
 pub(super) const MIN_REGION_RADIUS: f32 = 9.0;
 pub(super) const MAX_REGION_RADIUS: f32 = 22.0;
 const POP_SCALE: f32 = 0.4;
+
+/// Above this many regions, a map stops being able to carry the
+/// population-scaled-circle-plus-permanent-label presentation the
+/// `MIN_REGION_RADIUS..=MAX_REGION_RADIUS` tuning above and
+/// `RegionLabelMarker`'s "always visible" policy were built for
+/// (`japan47`'s 47 regions is the largest scenario that design was ever
+/// tuned against). `japan_hex`'s 289 regions sit far past it; `japan47`
+/// sits far under it - picked with wide margin on both sides so neither
+/// existing scenario is at risk of drifting across it as either gets minor
+/// future edits. Read by `compute_region_radii` (marker shape/size) and
+/// `setup` (label significance) - see both for what actually changes.
+pub(super) const DENSE_REGION_THRESHOLD: usize = 100;
+
+/// How much smaller than the exact tiling circumradius
+/// (`crate::layout::nearest_neighbor_pitch(..) / sqrt(3)`, the value that
+/// makes adjacent pointy-top hexes touch exactly) a dense map's hex marker
+/// is drawn - leaves a thin gap of background between same-color neighbours
+/// so individual cells still read as separate territory up close, instead
+/// of fusing into one undifferentiated blob.
+const DENSE_HEX_FILL_RATIO: f32 = 0.92;
+
+/// The population percentile (`setup::population_significance_threshold`)
+/// a dense map's region must clear to keep its label "always visible"
+/// (`RegionLabelMarker`'s own doc) - roughly the top decile, which keeps
+/// the always-on label count in the low dozens even for `japan_hex`'s 289
+/// regions (29 of them clear the 90th percentile) rather than either
+/// "every region" (the original crowding problem this whole change exists
+/// to fix) or "almost none" (a map that reads as anonymous colored
+/// territory with no names to anchor it at all).
+const POPULATION_SIGNIFICANCE_PERCENTILE: f32 = 0.90;
+
+/// Per-region marker radius for every region on this map, indexed exactly
+/// like `RegionLayout`/`RegionId::index()` - the single source of truth
+/// both `setup` (spawning the mesh/supply-ring/construction-marker
+/// geometry) and `overlay::sync_blockade_visuals`/`input`'s click hit-tests
+/// read, so every one of them agrees on how big a region actually is drawn.
+///
+/// Sparse maps (`world.regions.len() <= DENSE_REGION_THRESHOLD` -
+/// `mvp`/`japan47`, unchanged from Stage 7A): `region_radius(population)`
+/// per region, exactly as before.
+///
+/// Dense maps (`japan_hex`): one shared hex-fill radius for every region,
+/// derived from the scenario's own grid pitch
+/// (`crate::layout::nearest_neighbor_pitch`) rather than population -
+/// population-scaled circles at this density mostly cluster near
+/// `MIN_REGION_RADIUS` (task's own complaint: "sparse dots with gaps"),
+/// since `japan_hex`'s per-cell populations are individually much smaller
+/// than `japan47`'s per-prefecture ones even though the map covers the same
+/// territory. A uniform hex sized to the grid's own pitch instead tiles the
+/// map as continuous colored territory - see `DENSE_HEX_FILL_RATIO` for why
+/// it's not sized to *exactly* tile.
+pub(super) fn compute_region_radii(world: &SimWorld, positions: &[[f32; 2]]) -> Vec<f32> {
+    if world.regions.len() > DENSE_REGION_THRESHOLD {
+        let pitch = crate::layout::nearest_neighbor_pitch(positions);
+        let hex_radius = (pitch / 3f32.sqrt() * DENSE_HEX_FILL_RATIO).clamp(MIN_REGION_RADIUS, MAX_REGION_RADIUS);
+        vec![hex_radius; world.regions.len()]
+    } else {
+        world.regions.iter().map(|r| region_radius(r.population)).collect()
+    }
+}
+
+/// Regions whose name label stays visible on a dense map even before the
+/// player zooms in (`visuals::sync_region_label_visibility`,
+/// `RegionLabelMarker::always_visible`) - every faction's own capital, plus
+/// the population top decile (`population_significance_threshold`).
+/// Irrelevant on a sparse map, where every label is always visible
+/// regardless of this set (see `setup`'s own region-spawning loop).
+fn significant_regions(world: &SimWorld) -> std::collections::HashSet<RegionId> {
+    let mut significant: std::collections::HashSet<RegionId> = world.factions.iter().map(|f| f.capital).collect();
+    let threshold = population_significance_threshold(world);
+    for region in &world.regions {
+        if region.population >= threshold {
+            significant.insert(region.id);
+        }
+    }
+    significant
+}
+
+/// The population value at `POPULATION_SIGNIFICANCE_PERCENTILE` across
+/// every region on the map - `significant_regions`'s population-based
+/// criterion. Sorted with `f32::total_cmp` rather than the panic-on-`NaN`
+/// `partial_cmp`: population is never `NaN` in practice, but this keeps the
+/// sort itself infallible regardless. An empty region list returns
+/// `f32::INFINITY` so the (never-reached, since `setup` never runs against
+/// zero regions) percentile check below simply never matches anything,
+/// rather than indexing an empty `Vec`.
+fn population_significance_threshold(world: &SimWorld) -> f32 {
+    let mut populations: Vec<f32> = world.regions.iter().map(|r| r.population).collect();
+    if populations.is_empty() {
+        return f32::INFINITY;
+    }
+    populations.sort_by(f32::total_cmp);
+    let idx = ((populations.len() as f32) * POPULATION_SIGNIFICANCE_PERCENTILE) as usize;
+    populations[idx.min(populations.len() - 1)]
+}
 
 /// Sea zone marker radius: small and population-independent (unlike a
 /// region, a sea zone's "size" isn't meaningful map data) - see
@@ -138,6 +233,7 @@ pub(super) fn setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
     sim: Res<SimRes>,
     layout: Res<RegionLayout>,
+    radii: Res<RegionRadii>,
     sea_centers: Res<SeaZoneCenters>,
     font: Res<AppFont>,
     player: Res<super::PlayerFaction>,
@@ -222,19 +318,31 @@ pub(super) fn setup(
         }
     }
 
-    // Regions: a circle sized by population, colored by owner, plus a name
-    // label pushed outward from the region's own local cluster (see
+    // Regions: a marker sized/shaped by `compute_region_radii` (population-
+    // scaled circle on a sparse map, uniform hex-fill on a dense one - see
+    // that function's own doc), colored by owner, plus a name label pushed
+    // outward from the region's own local cluster (see
     // `crate::layout::label_push_directions`'s own doc, and the combined
     // region+sea-zone call feeding `region_label_dirs` above) rather than
     // always straight above it - at `japan47`'s density, stacking every
     // label above its region collides several neighbours' names in the
     // crowded Kyushu/Kinki/Chugoku clusters; radiating them out in whichever
     // direction is actually free spreads that collision out instead.
+    //
+    // `is_dense`/`significant` gate `RegionLabelMarker::always_visible`
+    // (`visuals::sync_region_label_visibility`'s own doc has the full
+    // policy): a sparse map keeps Stage 7B's original "every label always
+    // on" behavior unconditionally; a dense map only keeps a capital or
+    // population-top-decile region's label on by default; every other label
+    // waits for the player to zoom in or select that region.
+    let is_dense = world.regions.len() > DENSE_REGION_THRESHOLD;
+    let significant = if is_dense { significant_regions(world) } else { Default::default() };
     for region in &world.regions {
         let [x, y] = layout.0[region.id.index()];
-        let radius = region_radius(region.population);
+        let radius = radii.0[region.id.index()];
+        let mesh = if is_dense { meshes.add(RegularPolygon::new(radius, 6)) } else { meshes.add(Circle::new(radius)) };
         commands.spawn((
-            Mesh2d(meshes.add(Circle::new(radius))),
+            Mesh2d(mesh),
             MeshMaterial2d(materials.add(ColorMaterial::from_color(faction_color(region.owner.index())))),
             Transform::from_xyz(x, y, Z_REGION),
             RegionMarker(region.id),
@@ -281,6 +389,7 @@ pub(super) fn setup(
             label_shadow(),
             Anchor(Vec2::new(-dx, -dy) * 0.5),
             Transform::from_xyz(label_pos.x, label_pos.y, Z_REGION_LABEL),
+            RegionLabelMarker { region: region.id, always_visible: !is_dense || significant.contains(&region.id) },
         ));
     }
 
