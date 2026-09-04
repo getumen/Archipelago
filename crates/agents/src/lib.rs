@@ -1196,8 +1196,27 @@ impl Agent for HeuristicAgent {
     }
 }
 
-/// Unit-count ceiling the agent recruits toward (mvp-spec.md §7.3): scales
-/// with industrial base so a stronger economy can support a bigger army.
+/// Unit-count ceiling the agent recruits toward: a flat floor plus a slope
+/// on the faction's whole industrial base (mvp-spec.md §7.3), not derived
+/// from any single good's capacity. `3.0` guarantees every faction can hold
+/// its `scenarios::UNITS_PER_FACTION` starting army regardless of how its
+/// economy is shaped; `industry_total / 5.0` lets a faction grow its force
+/// as it industrializes, using `World::industry_total` - the sum of every
+/// non-Food good's `effective_capacity` across owned regions, the same
+/// devastation-adjusted "war-relevant industry" figure `choose_opening_focus`
+/// and `recruit`'s own region-picking already read - rather than any one
+/// good in isolation.
+///
+/// A cap keyed to Munitions capacity alone was tried and reverted: at a
+/// headroom tight enough to matter it floored every faction below its own
+/// fixed 3-unit start, freezing `scenarios/mvp.json` - the scenario whose
+/// economy this AI is actually tuned against - into a 720-day stalemate at
+/// starting strength instead of the decisive war it produces under this
+/// formula. `scenarios/japan_hex.json`'s small factions being unable to
+/// feed even their starting three units is real, but it is a scenario
+/// authoring problem (see `tools/hexmap/build_scenario.py`'s Munitions
+/// calibration), not one this shared, mvp-tuned cap should be bent to fix.
+///
 /// Shared by `recruit` (which stops raising new units at this cap) and
 /// `set_policy` (which uses proximity to this cap to decide whether a large
 /// manpower pool still has somewhere to go).

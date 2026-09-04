@@ -41,7 +41,7 @@ use crate::balance::{
     ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
     CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP,
     CONSCRIPT_RATE, FOCUS_TECHNOCRACY_PRODUCTION_MULT, FOOD_EFFICIENCY_DAMPENING,
-    FOOD_EFFICIENCY_FLOOR, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL,
+    FOOD_EFFICIENCY_FLOOR, INDUSTRIAL_STABILITY_FLOOR, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL,
     MANPOWER_DEMOBILIZATION_RATE, MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL,
     REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY, STRIKE_OUTPUT_MULT,
 };
@@ -141,6 +141,21 @@ pub fn tick_economy(world: &mut World) {
         let f = faction.id.index();
 
         let stability_mult = stability_output_mult(faction.stability);
+        // docs/phase8-spec.md Fix 2's follow-up (the "shortage → unrest →
+        // lower efficiency → worse shortage" loop for every commodity but
+        // Food - see `balance::INDUSTRIAL_STABILITY_FLOOR`'s doc): every
+        // non-Food good is about to be scaled by `stability_mult` below,
+        // and `stability_mult` on its own already floors at 0.6
+        // (`stability_output_mult`'s doc) - but combined with `efficiency`'s
+        // own independent 0.2 floor (Step 0), the compound worst case a
+        // fully collapsed faction's non-Food output can fall to is 0.12x
+        // capacity, the same value `FOOD_EFFICIENCY_FLOOR`'s doc found
+        // insufficient for Food. `industrial_stability_mult` raises just the
+        // `stability_mult` half of that product for non-Food goods - not
+        // `efficiency` itself, which stays exactly as sensitive to a
+        // region's own war damage/unrest as before (`devastation_still_...`-
+        // style tests for the other commodities must keep holding).
+        let industrial_stability_mult = stability_mult.max(INDUSTRIAL_STABILITY_FLOOR);
         // Stage 3A political events (docs/phase3-spec.md "政治イベント"):
         // `Event::Strike` depresses every non-Food commodity's potential
         // (a labor strike, not a farming one); `Event::RegimeChange`
@@ -166,6 +181,8 @@ pub fn tick_economy(world: &mut World) {
         // `stability_mult` is exempted for Food: `food_efficiency` (Step 0)
         // already folded a dampened, floored copy of it in, so applying the
         // shared, un-dampened multiplier again here would undo that floor.
+        // Every other commodity reads `industrial_stability_mult` instead of
+        // the raw `stability_mult` (see that binding's doc just above).
         // `regime_change_mult`/`focus_production_mult` still apply to every
         // commodity including Food - see their own doc comments for why
         // that's fine (a fixed-duration, self-resetting event and a pure
@@ -175,7 +192,7 @@ pub fn tick_economy(world: &mut World) {
         for (idx, v) in pot.iter_mut().enumerate() {
             *v *= regime_change_mult * focus_production_mult;
             if idx != Good::Food.index() {
-                *v *= stability_mult * strike_mult;
+                *v *= industrial_stability_mult * strike_mult;
             }
         }
         // `Event::CapitalFlight` narrows further: only Machinery output is

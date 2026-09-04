@@ -490,6 +490,9 @@ def solve_capacity_coefficients(hexes: dict, population: dict, weight: dict, coa
     energy_target = total * constants.CAPACITY_SHARE_ENERGY
     energy_pop_target = energy_target * (1.0 - constants.ENERGY_AREA_SHARE)
     energy_area_target = energy_target * constants.ENERGY_AREA_SHARE
+    munitions_target = total * constants.CAPACITY_SHARE_MUNITIONS
+    munitions_pop_target = munitions_target * (1.0 - constants.MUNITIONS_AREA_SHARE)
+    munitions_area_target = munitions_target * constants.MUNITIONS_AREA_SHARE
     food_target = constants.CIVILIAN_FOOD_DEMAND_PER_POP * prefecture_population.TOTAL_POPULATION * constants.TARGET_FOOD_CAPACITY_MULT
 
     coef = dict(
@@ -498,14 +501,16 @@ def solve_capacity_coefficients(hexes: dict, population: dict, weight: dict, coa
         energy_area=energy_area_target / n_hexes,
         steel=total * constants.CAPACITY_SHARE_STEEL / sum_steel_w,
         machinery=total * constants.CAPACITY_SHARE_MACHINERY / sum_machinery_w,
-        munitions=total * constants.CAPACITY_SHARE_MUNITIONS / sum_pop,
+        munitions_pop=munitions_pop_target / sum_pop,
+        munitions_area=munitions_area_target / n_hexes,
         arms=total * constants.CAPACITY_SHARE_ARMS / sum_arms_w,
     )
     log(f"  capacity coefficients solved against national targets: "
         f"food={food_target:.2f} energy={energy_target:.2f} "
         f"steel={total*constants.CAPACITY_SHARE_STEEL:.2f} "
         f"machinery={total*constants.CAPACITY_SHARE_MACHINERY:.2f} "
-        f"munitions={total*constants.CAPACITY_SHARE_MUNITIONS:.2f} "
+        f"munitions={munitions_target:.2f} (of which area-floor {munitions_area_target:.2f}, "
+        f"pop-scaled {munitions_pop_target:.2f}) "
         f"arms={total*constants.CAPACITY_SHARE_ARMS:.2f} (industry_total={total:.2f})")
     return coef
 
@@ -519,7 +524,7 @@ def build_capacities(hexes: dict, population: dict, weight: dict, coastal: dict,
             energy=coef["energy_pop"] * pop + coef["energy_area"],
             steel=coef["steel"] * pop * steel_factor(h["terrain"], coastal[hid]),
             machinery=coef["machinery"] * (pop ** constants.MACHINERY_DENSITY_EXPONENT),
-            munitions=coef["munitions"] * pop,
+            munitions=coef["munitions_pop"] * pop + coef["munitions_area"],
             arms=coef["arms"] * (pop ** constants.ARMS_DENSITY_EXPONENT),
         )
     return capacities
@@ -825,13 +830,24 @@ def main():
         capacities[hid][g] for hid in hexes for g in ("energy", "steel", "machinery", "munitions", "arms")
     )
     print(f"national industry_total (non-food): {industry_total_national:.2f}")
-    print("per-faction industry_total / estimated unit_cap (crates/agents unit_cap = 3 + industry_total/5):")
+    starting_munitions_need = (
+        constants.UNITS_PER_FACTION * constants.SUPPLY_NEED_PER_MANPOWER * constants.UNIT_MANPOWER
+    )
+    print(f"per-faction starting Munitions upkeep need (UNITS_PER_FACTION={constants.UNITS_PER_FACTION} * "
+          f"SUPPLY_NEED_PER_MANPOWER={constants.SUPPLY_NEED_PER_MANPOWER} * "
+          f"UNIT_MANPOWER={constants.UNIT_MANPOWER}): {starting_munitions_need:.2f} Munitions/day at eff=1.0")
+    print("per-faction industry_total / unit_cap / Munitions capacity vs. that need "
+          "(crates/agents unit_cap = 3 + industry_total/5):")
     region_by_id = {r["id"]: r for r in scenario["regions"]}
     for fac in scenario["factions"]:
         fac_regions = [region_by_id[rid] for rid in fac["regions"]]
         it = sum(r["capacity"][g] for r in fac_regions for g in ("energy", "steel", "machinery", "munitions", "arms"))
         pop = sum(r["population"] for r in fac_regions)
-        print(f"  {fac['id']:10s} pop={pop:8.1f} industry_total={it:8.2f} unit_cap~={3.0+it/5.0:5.2f}")
+        mun = sum(r["capacity"]["munitions"] for r in fac_regions)
+        eff_breakeven = starting_munitions_need / mun if mun > 0 else float("inf")
+        print(f"  {fac['id']:10s} pop={pop:8.1f} regions={len(fac_regions):3d} industry_total={it:8.2f} "
+              f"unit_cap~={3.0+it/5.0:5.2f} munitions_cap={mun:7.3f} "
+              f"(solvent down to eff>={eff_breakeven:.3f})")
 
     if args.dry_run:
         print("--dry-run: not writing output")

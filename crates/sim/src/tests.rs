@@ -5,7 +5,7 @@ use crate::balance::{
     CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
     CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
     CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR,
-    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE,
+    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, INDUSTRIAL_STABILITY_FLOOR, NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE,
     SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, TREATY_ACCEPT_OPINION_BONUS,
     UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
 };
@@ -2582,6 +2582,206 @@ fn collapsed_faction_can_recover() {
         shortage_end < 0.3,
         "expected shortage to recover to a comfortable level, not just drift off the ceiling: \
          {shortage_end}"
+    );
+}
+
+/// docs/phase8-spec.md Fix 2's follow-up (`balance::INDUSTRIAL_STABILITY_FLOOR`'s
+/// doc): companion to `food_output_survives_political_collapse` for every
+/// commodity Food's own Stage 3C fix didn't touch. At the true worst case
+/// (`efficiency`'s own 0.2 floor - needs `infrastructure == 0.0`, not just
+/// `unrest == 100.0`, to actually bottom out; `region.labor_ratio()` stays
+/// at its own ceiling of `1.0` with no conscription - and `stability == 0`,
+/// `stability_output_mult`'s own 0.6 floor) a non-Food good's compound
+/// multiplier used to be pinned at exactly `0.2 * 0.6 = 0.12`x capacity,
+/// the same value `FOOD_EFFICIENCY_FLOOR`'s doc found insufficient for
+/// Food. Energy is the cleanest commodity to measure this precisely on -
+/// like Food, it has no production inputs (`economy.rs`'s Step 2), so
+/// giving the region *only* Energy capacity means nothing else can ever
+/// draw on the stock this test reads. This confirms Energy now clears
+/// `INDUSTRIAL_STABILITY_FLOOR`'s higher `0.2 * 0.7 = 0.14`x instead -
+/// strictly above the old bound, so this test fails outright if
+/// `INDUSTRIAL_STABILITY_FLOOR` regresses to `stability_output_mult`'s own
+/// `0.6` (`industrial_output_outpaces_fixed_demand_only_with_new_floor`
+/// below covers Steel/Munitions, whose shared Energy/Steel inputs make an
+/// equally precise single-good formula impractical to isolate the same
+/// way).
+#[test]
+fn industrial_output_respects_higher_stability_floor_than_food_used_to_get() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let energy_capacity = 1000.0;
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.capacity[Good::Energy.index()] = energy_capacity;
+            region.infrastructure = 0.0; // together with unrest, drives `efficiency` to its true 0.2 floor
+            region.unrest = 100.0;
+            region.devastation = 0.0; // isolates political disorder from war damage
+            region.population = 1.0; // negligible civilian demand, isolates production
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stability = 0.0; // stability_output_mult's own 0.6 floor
+        f.stock = [0.0; GOOD_COUNT];
+    }
+    let total_energy_capacity: f32 = world
+        .regions
+        .iter()
+        .filter(|r| r.owner == faction)
+        .map(|r| r.capacity[Good::Energy.index()])
+        .sum();
+
+    economy::tick_economy(&mut world);
+
+    let energy_output = world.faction(faction).stock[Good::Energy.index()];
+
+    let old_floor_mult = 0.2 * 0.6; // pre-fix compound: efficiency's floor times stability_output_mult's own floor
+    let new_floor_mult = 0.2 * INDUSTRIAL_STABILITY_FLOOR;
+    assert!(
+        new_floor_mult > old_floor_mult,
+        "sanity: INDUSTRIAL_STABILITY_FLOOR must actually raise the compound floor"
+    );
+
+    assert!(
+        energy_output >= total_energy_capacity * new_floor_mult - 0.5,
+        "expected Energy output to respect INDUSTRIAL_STABILITY_FLOOR at minimum stability and \
+         maximum unrest: output={energy_output}, capacity={total_energy_capacity}, \
+         expected_mult={new_floor_mult}"
+    );
+    assert!(
+        energy_output > total_energy_capacity * old_floor_mult + 0.5,
+        "expected the new stability floor to lift Energy output strictly above the old, \
+         unprotected 0.6-stability-floor compound (0.12x capacity) - fails if \
+         INDUSTRIAL_STABILITY_FLOOR regresses to stability_output_mult's own floor: \
+         output={energy_output}, old_floor_output={}",
+        total_energy_capacity * old_floor_mult
+    );
+}
+
+/// Companion to `industrial_output_respects_higher_stability_floor_than_food_used_to_get`:
+/// the whole point of `docs/conventions.md` §6 ("状態には必ず回復経路を持たせる")
+/// is that a faction stuck at the *old* 0.12x compound floor could never
+/// outrun even a small, fixed daily draw - production never crossed the
+/// threshold needed to net positive, so stock stayed pinned at exactly zero
+/// no matter how long the faction waited. This pins `unrest`/`stability` at
+/// their absolute worst values for the entire run (never calling
+/// `politics::tick_politics` - `unrest_recovers_after_shortage` and
+/// `collapsed_faction_can_recover` already cover unrest/stability actually
+/// easing over time; this isolates the production side) and applies a
+/// fixed daily draw to Steel and Munitions calibrated to sit strictly
+/// between the old floor's output (12/day off a capacity of 100) and the
+/// new floor's (14/day) - so this test fails outright if
+/// `INDUSTRIAL_STABILITY_FLOOR` regresses to 0.6: at the old floor the
+/// faction could never accumulate a single unit of stock over any number of
+/// days, let alone the 50 here.
+#[test]
+fn industrial_output_outpaces_fixed_demand_only_with_new_floor() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    // `daily_draw`'s calibration below is against a *national* Steel/
+    // Munitions capacity of 100 each - split evenly across however many
+    // regions faction 0 actually owns, so the total stays 100 regardless of
+    // scenario detail.
+    let n_owned = world.regions.iter().filter(|r| r.owner == faction).count() as f32;
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.capacity[Good::Energy.index()] = 1000.0 / n_owned;
+            region.capacity[Good::Steel.index()] = 100.0 / n_owned;
+            region.capacity[Good::Munitions.index()] = 100.0 / n_owned;
+            region.infrastructure = 0.0;
+            region.unrest = 100.0;
+            region.devastation = 0.0;
+            region.population = 1.0;
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stability = 0.0;
+        f.stock = [0.0; GOOD_COUNT];
+        f.industry_priority = [0.0; GOOD_COUNT];
+        f.industry_priority[Good::Steel.index()] = 1.0;
+        f.industry_priority[Good::Munitions.index()] = 1.0;
+    }
+
+    // Munitions' own gross production is 12/day at the old floor (100 * 0.2
+    // * 0.6) and 14/day at the new one (100 * 0.2 *
+    // INDUSTRIAL_STABILITY_FLOOR) - nothing else draws on it within
+    // `economy::tick_economy`, so 13/day (strictly between) is calibrated
+    // directly against that. Steel is also spent as Munitions' own input
+    // (`MUNITIONS_INPUT_STEEL`) before this test's draw ever sees it, so
+    // what's left over nets to 8.4/day (old) vs 9.8/day (new) - 9.1/day is
+    // calibrated against *that* net figure instead of Steel's own gross
+    // production.
+    let munitions_draw = 13.0;
+    let steel_draw = 9.1;
+    for _ in 0..50 {
+        economy::tick_economy(&mut world);
+        let f = world.faction_mut(faction);
+        f.stock[Good::Steel.index()] = (f.stock[Good::Steel.index()] - steel_draw).max(0.0);
+        f.stock[Good::Munitions.index()] = (f.stock[Good::Munitions.index()] - munitions_draw).max(0.0);
+    }
+
+    let f = world.faction(faction);
+    assert!(
+        f.stock[Good::Steel.index()] > 10.0,
+        "expected Steel production to outpace a fixed daily draw calibrated to sit above the old \
+         (pre-fix) floor's output - if this is ~0.0 the faction is still trapped exactly the way \
+         Food used to be: steel_stock={}",
+        f.stock[Good::Steel.index()]
+    );
+    assert!(
+        f.stock[Good::Munitions.index()] > 10.0,
+        "expected Munitions production to outpace the same fixed daily draw - Munitions is the \
+         commodity docs/phase8-spec.md Fix 2's japan_hex report was actually about: \
+         munitions_stock={}",
+        f.stock[Good::Munitions.index()]
+    );
+}
+
+/// Companion to the two tests above: the new stability floor must not blunt
+/// war damage. `Region::effective_capacity`'s `(1 - devastation)` term is
+/// completely untouched by `INDUSTRIAL_STABILITY_FLOOR` - it multiplies raw
+/// `capacity` before any of `efficiency`/`stability_output_mult` ever runs
+/// - so a devastated region's non-Food output must still fall far below an
+/// otherwise-identical intact region's, even under calm political
+/// conditions where the new floor plays no role at all (mirrors
+/// `devastation_still_destroys_food` for the commodities that test doesn't
+/// cover).
+#[test]
+fn devastation_still_suppresses_industrial_output() {
+    let build = |devastation: f32| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Energy.index()] = 10.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.devastation = devastation;
+                region.population = 1.0; // negligible civilian demand
+            }
+        }
+        world.faction_mut(faction).stability = 100.0;
+        world.faction_mut(faction).stock = [0.0; GOOD_COUNT];
+
+        economy::tick_economy(&mut world);
+        world.faction(faction).stock[Good::Energy.index()]
+    };
+
+    let energy_intact = build(0.0);
+    let energy_devastated = build(0.9);
+
+    assert!(
+        energy_intact > 0.0,
+        "sanity: an intact, calm region should produce Energy: {energy_intact}"
+    );
+    assert!(
+        energy_devastated < energy_intact * 0.2,
+        "expected heavy devastation to still gut Energy output despite calm political conditions \
+         and INDUSTRIAL_STABILITY_FLOOR: intact={energy_intact}, devastated={energy_devastated}"
     );
 }
 

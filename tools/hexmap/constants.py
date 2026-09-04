@@ -290,6 +290,17 @@ assert abs(
 # purely to size TARGET_FOOD_CAPACITY below against actual civilian demand.
 CIVILIAN_FOOD_DEMAND_PER_POP = 0.0022
 
+# Mirrors `scenario::UNITS_PER_FACTION` (crates/sim/src/scenario.rs) and
+# `balance::SUPPLY_NEED_PER_MANPOWER` / `balance::UNIT_MANPOWER`
+# (crates/sim/src/balance.rs) - duplicated here for the same "no crates/
+# dependency" reason as `CIVILIAN_FOOD_DEMAND_PER_POP` above, purely so
+# `build_scenario.py`'s own report can check each faction's starting
+# Munitions capacity against what its starting army actually needs, in the
+# engine's own units, without guessing at the numbers by hand.
+UNITS_PER_FACTION = 3
+SUPPLY_NEED_PER_MANPOWER = 1.0
+UNIT_MANPOWER = 1.0
+
 # Target national Food capacity: docs/phase8-spec.md section 2's Food row
 # ("平地面積に比例") is independent of TARGET_INDUSTRY_TOTAL. Sized to
 # `balance::CIVILIAN_FOOD_DEMAND_PER_POP` (0.0022/capita) times the national
@@ -305,9 +316,34 @@ TARGET_FOOD_CAPACITY_MULT = 2.5
 # Energy is "薄く比例（全国に分散）" (section 2): most of each hex's Energy
 # capacity still scales with its population, but a fixed share is instead
 # spread flat across every land hex regardless of population, so a sparse
-# hex still contributes something (unlike Munitions/Steel, which are zero
-# in an empty hex).
+# hex still contributes something (unlike Steel, which is still zero in an
+# empty hex - Munitions gets the same treatment as Energy, just under its
+# own share below).
 ENERGY_AREA_SHARE = 0.2
+
+# Munitions ("人口密度に比例" per section 2) additionally gets its own flat
+# per-hex floor, the same mechanism as `ENERGY_AREA_SHARE` above: a fixed
+# share of the *national Munitions target* (not of `TARGET_INDUSTRY_TOTAL` -
+# this redistributes Munitions' own existing share, it does not add to it)
+# is spread evenly across every land hex regardless of population; the
+# remainder still scales with population as before.
+#
+# Why Munitions specifically, and not Steel/Machinery/Arms too: a large,
+# sparsely-populated faction's `unit_cap` peacetime floor
+# (`crates/agents/src/lib.rs`: `3 + industry_total/5`, `industry_total`
+# summing all five non-Food goods) is satisfied trivially by area alone once
+# any capacity exists, but *feeding* those 3 starting units
+# (`scenarios::UNITS_PER_FACTION`) is a Munitions-only draw
+# (`SUPPLY_NEED_PER_MANPOWER * UNIT_MANPOWER` per unit,
+# `logistics::distribute_supply`) - Steel/Machinery/Arms shortfalls degrade
+# output quality (`economy::tick_economy`'s input chain) but don't zero a
+# unit's supply outright the way Munitions does. A population-only Munitions
+# formula makes a faction's *territory* worthless for the one good its
+# starting army actually needs to survive - see build_scenario.py's module
+# docstring for the arithmetic this share was calibrated against
+# (`scenarios/japan_hex.json`'s 北海道方面軍: 61 hexes, only ~4% of national
+# population).
+MUNITIONS_AREA_SHARE = 0.65
 
 # Machinery/Arms concentrate super-linearly in dense hexes ("人口密度に強く
 # 比例（都市圏に集中）" / "人口密度に比例、Machinery より集中" - section 2):

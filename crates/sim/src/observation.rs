@@ -7,7 +7,7 @@ use crate::diplomacy::Treaty;
 use crate::good::GOOD_COUNT;
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
-use crate::world::World;
+use crate::world::{Station, World};
 
 /// Per-region field count in `Observation::encode()`: `[owned, population,
 /// infrastructure, supply, unrest, own_power, enemy_power]` (7 fixed
@@ -152,6 +152,81 @@ impl<'a> Observation<'a> {
         None
     }
 
+    /// One `O(units)` pass precomputing every faction's combat power per
+    /// region and per sea zone - what `encode()`'s per-region/per-sea-zone
+    /// loop used before this fix: `own_power`/`enemy_power` (and their
+    /// sea-zone counterparts) each do their own `O(units)` scan
+    /// (`World::region_power`/`zone_power` filters `world.units` by
+    /// station), and `enemy_power` additionally loops that scan once *per
+    /// other faction*. Calling them once per region turned `encode()`'s
+    /// dominant cost into `O(regions × factions × units)` - confirmed by
+    /// profiling: on `scenarios/japan_hex.json` (289 regions, 8 factions)
+    /// this term alone accounted for ~90% of `encode()`'s wall time even at
+    /// day 0 with as few as 24 units, and grew ~9.3x against
+    /// `scenarios/japan47.json`'s 47-region/6-faction map versus the map's
+    /// own 5.6x/6.15x growth in encoded length/region count - the
+    /// super-linear cost `docs/phase8-spec.md`'s Fix 1 asks to find and fix
+    /// (the per-tick simulation itself stayed sub-linear; Stage 6C's
+    /// diplomacy fix was a different instance of the same shape, in
+    /// `crates/agents`).
+    ///
+    /// Returns `region_power`/`zone_power`, each indexed
+    /// `[region_or_zone.index()][faction.index()]` - the exact per-
+    /// (region-or-zone, faction) subtotal `World::region_power`/`zone_power`
+    /// would themselves compute (same units, same array-order accumulation
+    /// per cell - see below), just computed for every cell in one pass over
+    /// `world.units` (`O(units)`) instead of one filtered scan per cell
+    /// (`O(units)` *each*, `O(regions × factions)` or `O(zones × factions)`
+    /// of them). `encode()` then reduces `own_power`/`enemy_power` from
+    /// these tables in `O(factions)` per region/zone - `O(regions × factions
+    /// + zones × factions)` total, still far below the `O(regions × factions
+    /// × units)` this replaces, and, critically, *bit-for-bit identical* to
+    /// calling `own_power`/`enemy_power` directly: `enemy_power(r)` folds
+    /// `region_power[r][f]` over every other faction in ascending
+    /// `FactionId` order, the exact same fold `World::region_power`'s own
+    /// `Observation::enemy_power` performs, over the exact same per-cell
+    /// values - not derived by subtracting a combined total, which would
+    /// reassociate the underlying floating-point sum (a different result in
+    /// general, per docs/conventions.md §5's fixed-accumulation-order rule,
+    /// even where it happens not to move any single scenario's hash).
+    /// `own_power(r)` is simply `region_power[r][self.faction.index()]`,
+    /// the same per-cell subtotal `World::region_power` computes directly.
+    ///
+    /// `own_power`/`enemy_power`/`own_zone_power`/`enemy_zone_power`
+    /// themselves are left as they were: `crates/agents`' AI still calls
+    /// them directly, once per candidate target it's actually scoring (a
+    /// small, front-line-bounded count per decision, not once per region on
+    /// the whole map), which profiling found is not the super-linear cost
+    /// here.
+    fn power_tables(&self) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let n_factions = self.world.factions.len();
+        let mut region_power = vec![vec![0.0f32; n_factions]; self.world.regions.len()];
+        let mut zone_power = vec![vec![0.0f32; n_factions]; self.world.sea_zones.len()];
+        for unit in &self.world.units {
+            if !unit.alive {
+                continue;
+            }
+            let power = unit.combat_power();
+            match unit.station {
+                Station::Region(r) => region_power[r.index()][unit.owner.index()] += power,
+                Station::Sea(z) => zone_power[z.index()][unit.owner.index()] += power,
+            }
+        }
+        (region_power, zone_power)
+    }
+
+    /// `enemy_power`/`enemy_zone_power`'s fold, reading from a precomputed
+    /// `power_tables()` cell-row instead of re-scanning `world.units` per
+    /// other faction - see `power_tables`'s doc for why this is bit-for-bit
+    /// identical to calling `enemy_power`/`enemy_zone_power` directly.
+    fn enemy_power_from_table(&self, cell_row: &[f32]) -> f32 {
+        self.world
+            .factions
+            .iter()
+            .filter(|f| f.id != self.faction)
+            .fold(0.0, |acc, f| acc + cell_row[f.id.index()])
+    }
+
     /// Length `encoding_len(regions.len(), sea_zones.len(), factions.len())`
     /// (`ENCODING_LEN` for the embedded default scenario specifically):
     /// per-region `[owned, population, infrastructure, supply, unrest,
@@ -175,14 +250,16 @@ impl<'a> Observation<'a> {
     pub fn encode(&self) -> Vec<f32> {
         let expected_len = encoding_len(self.world.regions.len(), self.world.sea_zones.len(), self.world.factions.len());
         let mut out = Vec::with_capacity(expected_len);
+        let (region_power, zone_power) = self.power_tables();
         for region in &self.world.regions {
             out.push(if region.owner == self.faction { 1.0 } else { 0.0 });
             out.push(region.population);
             out.push(region.infrastructure);
             out.push(self.world.supply[region.id.index()]);
             out.push(region.unrest);
-            out.push(self.own_power(region.id));
-            out.push(self.enemy_power(region.id));
+            let cell_row = &region_power[region.id.index()];
+            out.push(cell_row[self.faction.index()]);
+            out.push(self.enemy_power_from_table(cell_row));
             for g in 0..GOOD_COUNT {
                 out.push(region.capacity[g]);
             }
@@ -199,8 +276,9 @@ impl<'a> Observation<'a> {
             let own_control = zone.control.get(self.faction.index()).copied().unwrap_or(0.0);
             out.push(own_control);
             out.push(zone.enemy_control_max(self.faction));
-            out.push(self.own_zone_power(zone.id));
-            out.push(self.enemy_zone_power(zone.id));
+            let cell_row = &zone_power[zone.id.index()];
+            out.push(cell_row[self.faction.index()]);
+            out.push(self.enemy_power_from_table(cell_row));
         }
         let faction = self.world.faction(self.faction);
         out.push(faction.manpower);

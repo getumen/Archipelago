@@ -87,6 +87,64 @@ pub const ARMS_INPUT_STEEL: f32 = 0.3;
 pub const FOOD_EFFICIENCY_FLOOR: f32 = 0.6;
 pub const FOOD_EFFICIENCY_DAMPENING: f32 = 0.3;
 
+/// docs/phase8-spec.md Fix 2's follow-up: the Stage 3C playtest fixed the
+/// "shortage → unrest → lower efficiency → worse shortage" loop for `Food`
+/// specifically (`FOOD_EFFICIENCY_FLOOR`'s doc), but left every other
+/// commodity reading the exact same unprotected product it replaced -
+/// `efficiency[region]` (its own 0.2 floor, Step 0 of `economy.rs`) times
+/// `stability_output_mult(stability)` (its own 0.6 floor) - so a faction
+/// whose political support has genuinely collapsed can still see Energy,
+/// Steel, Machinery, Munitions and Arms output pinned at that product's
+/// compound worst case, `0.2 * 0.6 = 0.12`x capacity, with the same
+/// no-recovery shape `FOOD_EFFICIENCY_FLOOR`'s own doc describes: low
+/// output keeps `faction.shortage`/`supply_ratio` bad, which keeps unrest's
+/// target high (`politics::tick_politics`), which keeps `efficiency` and
+/// `stability_output_mult` pinned at their own floors - conventions.md §6's
+/// "状態には必ず回復経路を持たせる" applies here exactly as much as it did to
+/// Food, `japan_hex.json`'s smaller factions included
+/// (`tools/hexmap/constants.py`'s "Stage 8B" section names this same gap).
+///
+/// This is deliberately a **narrower** fix than `FOOD_EFFICIENCY_FLOOR`'s,
+/// not a copy of it, for two reasons:
+///
+/// - **Scope.** `FOOD_EFFICIENCY_FLOOR` floors the *combined*
+///   `efficiency[region] * stability_output_mult(stability)` product - it
+///   protects Food from a single region's own war-caused unrest as much as
+///   from national political collapse. That's right for Food (a starving
+///   population doesn't care which of the two caused it), but wrong for
+///   military-industrial output: "devastation must still hurt production
+///   hard" (`devastation_still_destroys_food`'s doc makes the same call for
+///   Food, just against `effective_capacity`'s separate `(1-devastation)`
+///   term rather than this one) extends here to unrest, too - a specific
+///   region under active contest should stay exactly as suppressed as
+///   before. So `INDUSTRIAL_STABILITY_FLOOR` only floors the
+///   `stability_output_mult` half of the product (`economy::tick_economy`'s
+///   `industrial_stability_mult`) - the faction-wide, policy-recoverable
+///   signal - and leaves `efficiency[region]`'s own independent 0.2 floor
+///   (unrest, labor mobilization, infrastructure) completely untouched.
+///   A region that's actively contested or devastated is hit exactly as
+///   hard as it always was; what changes is that a faction can no longer be
+///   *additionally* crushed by its own national stability cratering on top
+///   of that.
+/// - **Magnitude.** `0.7`, not `FOOD_EFFICIENCY_FLOOR`'s `0.6`-of-the-
+///   combined-product: still a genuine floor (raises the compound worst
+///   case from `0.12` to `0.2 * 0.7 = 0.14`x capacity, `stability` at rock
+///   bottom instead of `stability_output_mult`'s own unmodified `0.6`), but
+///   deliberately far short of Food's protection - `scenarios/mvp.json`
+///   seed 1's own 720-day run never drives any faction's
+///   `stability_output_mult` below `~0.796` (confirmed directly against its
+///   `docs/conventions.md` §5 hash: this floor is a no-op for every faction
+///   mvp's `HeuristicAgent`s ever produce, so it changes nothing about
+///   mvp's behaviour), so raising it any further into the range that would
+///   still leave `stability_output_mult` more disorder-sensitive than
+///   Food's own combined floor is not something this specific 720-day run
+///   can confirm safe. A faction driven to genuine political collapse
+///   (`stability == 0`, not merely a rough war) still gains real headroom
+///   from `0.6` to `0.7`; a merely-strained one (`stability_output_mult`
+///   already `> 0.7`, every faction `mvp`/`japan_hex.json` actually reach)
+///   sees no change at all.
+pub const INDUSTRIAL_STABILITY_FLOOR: f32 = 0.7;
+
 /// Civilian demand, per capita (population is tracked in 万人/"ten
 /// thousands"), for the three commodities civilians draw on directly.
 ///
