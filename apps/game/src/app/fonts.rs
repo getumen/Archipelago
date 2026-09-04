@@ -310,4 +310,232 @@ mod tests {
         std::fs::create_dir_all(&path).expect("failed to create temp dir");
         TempDir(path)
     }
+
+    // -------------------------------------------------------------------
+    // Scenario-acceptance property: "the bundled font actually covers the
+    // characters the game renders" (see `apps/headless/tests/
+    // scenario_acceptance.rs`'s module doc for the rest of this suite, and
+    // for what it explicitly cannot cover - legibility/aesthetics need a
+    // human, not a test). The original defect this guards against: every
+    // Japanese string in this entirely-Japanese game rendering as a tofu
+    // box, discovered by looking at the running client, not by any of the
+    // 236 pre-existing tests (none of which ever asked whether the font
+    // this binary ships actually *has a glyph* for the text it draws).
+    //
+    // This crate stays dependency-free beyond `bevy` itself
+    // (docs/conventions.md §4/"no new dependencies") - `read-fonts`/
+    // `skrifa` already sit in `Cargo.lock` transitively through
+    // `bevy_text`, but adding either as a *direct* dependency here would
+    // still be a new line in this crate's own `Cargo.toml`. So this parses
+    // just enough of the OpenType `cmap` table by hand (format 12, the
+    // full-Unicode "segmented coverage" subtable every Windows-targeting
+    // font - `NotoSansJP-VariableFont_wght.ttf` included, confirmed via a
+    // one-off dump during development) publishes at (platform 3, encoding
+    // 10) - std-only, no font-parsing dependency anywhere in this crate.
+    // -------------------------------------------------------------------
+
+    /// Reads a big-endian `u16` at `data[at..]`, or `None` if that's out of
+    /// bounds - every parser below fails closed (returns `None`/`false`)
+    /// rather than panicking on a malformed/truncated font, since a test
+    /// helper crashing the whole suite on bad input would be a worse
+    /// failure mode than just reporting "not covered".
+    fn u16_at(data: &[u8], at: usize) -> Option<u16> {
+        data.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
+    }
+
+    fn u32_at(data: &[u8], at: usize) -> Option<u32> {
+        data.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Finds the byte offset (from the start of `data`) of this font's
+    /// `cmap` format-12 subtable for (platform 3 "Windows", encoding 10
+    /// "UCS-4") - the subtable that actually covers the full Unicode range
+    /// this game's Japanese text needs (kanji well outside the BMP-only
+    /// format-4 subtable every OpenType font also carries for compatibility).
+    /// `None` means either no `cmap` table, or no such subtable - both
+    /// treated as "nothing is covered" by `covers`, not a panic.
+    fn find_cmap_format12_subtable(data: &[u8]) -> Option<usize> {
+        let num_tables = u16_at(data, 4)? as usize;
+        let mut dir_off = 12;
+        let mut cmap_off = None;
+        for _ in 0..num_tables {
+            let tag = data.get(dir_off..dir_off + 4)?;
+            if tag == b"cmap" {
+                cmap_off = Some(u32_at(data, dir_off + 8)? as usize);
+                break;
+            }
+            dir_off += 16;
+        }
+        let cmap_off = cmap_off?;
+
+        let num_subtables = u16_at(data, cmap_off + 2)? as usize;
+        let mut sub_off = cmap_off + 4;
+        for _ in 0..num_subtables {
+            let platform_id = u16_at(data, sub_off)?;
+            let encoding_id = u16_at(data, sub_off + 2)?;
+            let offset = u32_at(data, sub_off + 4)? as usize;
+            if platform_id == 3 && encoding_id == 10 {
+                let subtable_off = cmap_off + offset;
+                if u16_at(data, subtable_off)? == 12 {
+                    return Some(subtable_off);
+                }
+            }
+            sub_off += 8;
+        }
+        None
+    }
+
+    /// Whether `data`'s (3,10) format-12 `cmap` subtable at `subtable_off`
+    /// has a mapped glyph for codepoint `cp` - linear scan over the
+    /// subtable's `(startCharCode, endCharCode, startGlyphID)` groups
+    /// (OpenType spec, `cmap` format 12). A font this size has at most a
+    /// few hundred groups, so this is plenty fast for a handful of test
+    /// strings; nothing here runs outside `#[cfg(test)]`.
+    fn format12_covers(data: &[u8], subtable_off: usize, cp: u32) -> bool {
+        let Some(num_groups) = u32_at(data, subtable_off + 12) else { return false };
+        let mut group_off = subtable_off + 16;
+        for _ in 0..num_groups {
+            let (Some(start), Some(end)) = (u32_at(data, group_off), u32_at(data, group_off + 4)) else {
+                return false;
+            };
+            if (start..=end).contains(&cp) {
+                return true;
+            }
+            group_off += 12;
+        }
+        false
+    }
+
+    /// Self-test for the hand-rolled parser above, independent of anything
+    /// this game renders: a real font must cover plain ASCII and common
+    /// kanji, and must *not* claim to cover an unassigned Private Use Area
+    /// codepoint - the negative case is what proves this is actually
+    /// reading the font's real coverage data rather than trivially
+    /// returning `true` for everything.
+    #[test]
+    fn cmap_format12_parser_reads_real_coverage_from_the_bundled_font() {
+        let subtable = find_cmap_format12_subtable(BUNDLED_FONT_BYTES).expect("the bundled font must have a (3,10) format-12 cmap subtable");
+        assert!(format12_covers(BUNDLED_FONT_BYTES, subtable, 'A' as u32), "a real CJK font must still cover plain ASCII");
+        assert!(format12_covers(BUNDLED_FONT_BYTES, subtable, '近' as u32), "must cover a common kanji actually used by this game's faction/region names");
+        assert!(
+            !format12_covers(BUNDLED_FONT_BYTES, subtable, '\u{E000}' as u32),
+            "must NOT claim coverage for an unassigned Private Use Area codepoint - a parser that always returns true would pass every real assertion vacuously"
+        );
+    }
+
+    /// Every character actually drawn by a representative slice of this
+    /// game's real UI systems, run against a real `bevy::ecs::World` the
+    /// same way `ui::tests`/`panels::tests` already drive their own
+    /// systems - not a scan of raw scenario JSON. `japan_hex` (289 regions,
+    /// 8 factions, the richest name/vocabulary set of the three shipped
+    /// scenarios) is driven for a few in-game days so the event log picks
+    /// up real battle/political Japanese text
+    /// (`sim_control::advance_simulation` -> `event_text::format_event`),
+    /// not just static names.
+    ///
+    /// Every region/faction *name* in the scenario is unioned in directly
+    /// from `World` data (not just whichever one happened to be selected
+    /// during this run) - `Tab`/region-clicks make every single one of them
+    /// reachable in the real client, so font coverage has to hold for all
+    /// 289 of them, not only the lucky handful this test's own systems
+    /// happened to render.
+    ///
+    /// Checked this fails when broken: temporarily pointed the coverage
+    /// check at `plausible_bundled_bytes()` (a synthetic stand-in with no
+    /// real `cmap` table at all) instead of `BUNDLED_FONT_BYTES` - the
+    /// assertion then failed listing 225 distinct characters as uncovered,
+    /// starting with `'中'`/`'部'`/`'同'`/`'盟'` (faction name 中部同盟) -
+    /// i.e. every non-control character this fixture actually rendered.
+    /// Reverted before committing - see this test's own body for why the
+    /// real bundled font is what must be checked, not a stand-in.
+    #[test]
+    fn bundled_font_covers_every_character_the_running_game_actually_renders() {
+        use archipelago_sim::ids::FactionId;
+        use archipelago_sim::scenario;
+
+        use crate::app::{
+            EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperState, PlayerFaction, PlayerPanelText,
+            ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, TopBarPlayerStatsText, TopBarText,
+        };
+        use crate::sim_driver::{SimDriver, Speed};
+
+        // Same pattern `ui::tests`/`panels::tests` each already duplicate
+        // locally for driving one plain-function system against a `World`
+        // with no full `App`/schedule involved.
+        fn run<M>(world: &mut World, system: impl IntoSystem<(), (), M>) {
+            let mut system = IntoSystem::into_system(system);
+            system.initialize(world);
+            system.run((), world).unwrap();
+        }
+
+        let world_data = scenario::load_file("../../scenarios/japan_hex.json").expect("scenarios/japan_hex.json must load");
+        let player_faction = FactionId(0);
+        let region_names: Vec<String> = world_data.regions.iter().map(|r| r.name.clone()).collect();
+        let faction_names: Vec<String> = world_data.factions.iter().map(|f| f.name.clone()).collect();
+        let some_region = world_data.regions.first().map(|r| r.id).expect("japan_hex must have at least one region");
+
+        let mut world = World::new();
+        world.insert_resource(SimRes(SimDriver::new_with_player(world_data, 2, Some(player_faction), None)));
+        world.insert_resource(SpeedRes { last_active: Speed::X1, paused: false });
+        world.insert_resource(ScenarioMeta { name: "日本ヘクスマップ（テスト用）".to_string(), max_days: 720 });
+        world.insert_resource(EventLog::default());
+        world.insert_resource(LastRejection::default());
+        world.insert_resource(NewspaperState::default());
+        world.insert_resource(PlayerFaction(Some(player_faction)));
+        world.insert_resource(SelectedFaction(player_faction));
+        world.insert_resource(SelectedRegion(Some(some_region)));
+        world.insert_resource(SelectedUnits::default());
+        world.insert_resource(MenuRegion::default());
+
+        world.spawn((Text::new(String::new()), TopBarText));
+        world.spawn((Text::new(String::new()), TopBarPlayerStatsText));
+        world.spawn((Text::new(String::new()), FactionPanelText));
+        world.spawn((Text::new(String::new()), PlayerPanelText));
+        world.spawn((Text::new(String::new()), InspectText));
+        world.spawn((Text::new(String::new()), EventLogText));
+
+        // A few real in-game days, through the actual per-frame system
+        // (`sim_control::advance_simulation`) - populates `EventLog` with
+        // real Japanese event text, not just static names.
+        for _ in 0..20 {
+            run(&mut world, super::super::sim_control::advance_simulation);
+        }
+
+        run(&mut world, super::super::ui::update_top_bar);
+        run(&mut world, super::super::ui::update_top_bar_player_stats);
+        run(&mut world, super::super::ui::update_faction_panel);
+        run(&mut world, super::super::ui::update_player_panel);
+        run(&mut world, super::super::ui::update_inspect_panel);
+        run(&mut world, super::super::ui::update_event_log);
+
+        let mut rendered_text = String::new();
+        let mut texts = world.query::<&Text>();
+        for text in texts.iter(&world) {
+            rendered_text.push_str(&text.0);
+        }
+        for name in region_names.iter().chain(faction_names.iter()) {
+            rendered_text.push_str(name);
+        }
+
+        let subtable = find_cmap_format12_subtable(BUNDLED_FONT_BYTES).expect("the bundled font must have a (3,10) format-12 cmap subtable");
+        let mut missing: Vec<char> = Vec::new();
+        for ch in rendered_text.chars() {
+            // Whitespace/control characters carry no visible glyph
+            // requirement of their own (a font not covering U+000A isn't a
+            // "tofu box" bug) - every other character, ASCII included, is
+            // checked exactly like every Japanese one.
+            if ch.is_control() {
+                continue;
+            }
+            if !format12_covers(BUNDLED_FONT_BYTES, subtable, ch as u32) && !missing.contains(&ch) {
+                missing.push(ch);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "the bundled font is missing a glyph for {} character(s) actually rendered by the game: {:?} - these would draw as tofu boxes",
+            missing.len(),
+            missing
+        );
+    }
 }

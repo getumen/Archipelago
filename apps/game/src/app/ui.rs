@@ -488,4 +488,67 @@ mod tests {
         assert!(text.contains("※徴兵不能"), "manpower below UNIT_MANPOWER must be marked, got: {text}");
         assert!(text.contains("軍部") && text.contains("※反乱の危険"), "Military group support below MUTINY_THRESHOLD must be marked, got: {text}");
     }
+
+    /// Scenario-acceptance regression guard (see
+    /// `apps/headless/tests/scenario_acceptance.rs`'s own module doc for the
+    /// rest of this suite): today's `Tab` handler
+    /// (`input::keyboard_input`'s `KeyCode::Tab` arm) cycles the faction
+    /// panel through *every* faction, alive or not - `(selected_faction.0.0
+    /// + 1) % n` with no `alive` filter - so an accidental Tab press late in
+    /// a long game can easily land the panel on a faction that was
+    /// eliminated hundreds of days ago. It must say so plainly, not quietly
+    /// show that faction's frozen pre-elimination numbers as though it were
+    /// still playing - a real play-test finding (a faction panel that, by
+    /// day 719, was silently still showing an already-eliminated faction).
+    /// `update_faction_panel`'s own `if faction.alive {...}` guard already
+    /// covers this; this test is the regression guard that keeps it that
+    /// way.
+    ///
+    /// Runs a full `mvp` seed-1 game to completion (it ends well inside a
+    /// second - `sim_driver::tests::client_run_matches_headless`'s own doc
+    /// notes it ends in a day-366 `Victory`, eliminating two of the three
+    /// factions along the way) rather than hand-constructing an eliminated
+    /// `Faction`, so this exercises the real elimination path
+    /// (`military`/`politics` systems setting `alive = false`), not a
+    /// fixture standing in for it.
+    ///
+    /// Checked this fails when broken: temporarily changed
+    /// `update_faction_panel`'s `if faction.alive {"" } else {"(eliminated)
+    /// "}` to always the empty-string arm - the first assertion below then
+    /// fails, showing a blank-frozen panel with no elimination marker at
+    /// all. Reverted before committing.
+    #[test]
+    fn faction_panel_marks_an_eliminated_faction_as_eliminated_not_silently_frozen() {
+        let mut world = World::new();
+        // Plain `SimDriver::new` (every faction `HeuristicAgent`, nobody
+        // passive) rather than `player_sim` - a `--play`ed faction is driven
+        // by `HumanAgent`, which never acts on its own with nothing pushed
+        // to it, and that alone is enough to change mvp's whole war outcome
+        // (a passive faction 0 does not fight back the way the AI baseline
+        // does). This test only needs *some* faction to actually reach
+        // elimination through the real elimination path, which needs every
+        // faction actually playing.
+        let mut sim = SimRes(SimDriver::new(scenario::build_world(), 1));
+        while sim.0.outcome(720) == archipelago_sim::sim::Outcome::Ongoing {
+            sim.0.tick();
+        }
+        let eliminated = sim
+            .0
+            .world()
+            .factions
+            .iter()
+            .find(|f| !f.alive)
+            .map(|f| f.id)
+            .expect("mvp seed 1 must eliminate at least one faction by the time the game ends");
+        let eliminated_name = sim.0.world().faction(eliminated).name.clone();
+
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedFaction(eliminated));
+        spawn_faction_panel_text(&mut world);
+
+        let text = faction_panel_text(&mut world);
+        assert!(text.contains("(eliminated)"), "an eliminated faction's panel must say so plainly, got: {text}");
+        assert!(text.contains(&eliminated_name), "must still name which faction this is, not go blank, got: {text}");
+    }
 }
