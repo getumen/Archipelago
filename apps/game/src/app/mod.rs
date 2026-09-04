@@ -333,7 +333,19 @@ pub(crate) struct SupplyOnlyLegendRow;
 /// simulated days that accumulate before the shot are purely a side effect
 /// of `sim_control::advance_simulation` already running every unpaused
 /// frame at the default `Speed::X1`.
-pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, screenshot: Option<ScreenshotConfig>, play: Option<PlayConfig>) {
+///
+/// `cjk_font_override` is `main.rs`'s already-parsed `--cjk-font <path>` -
+/// see `fonts::load`/`fonts::resolve` for how it's combined with
+/// `ARCHIPELAGO_CJK_FONT` and this platform's own candidate search.
+pub fn run(
+    world: SimWorld,
+    seed: u64,
+    scenario_name: String,
+    max_days: u32,
+    screenshot: Option<ScreenshotConfig>,
+    play: Option<PlayConfig>,
+    cjk_font_override: Option<String>,
+) {
     let positions = crate::layout::region_positions(&world);
     let sea_centers = sea_zone_centers(&world, &positions);
     let region_count = world.regions.len();
@@ -360,7 +372,7 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
     // `setup::setup` - which reads it to build every `TextFont` this crate
     // spawns - runs, with no need to reason about command-flush ordering
     // between two `Startup` systems.
-    fonts::load(&mut app);
+    fonts::load(&mut app, cjk_font_override);
 
     // Stage 7B (docs/phase7-spec.md "時間の進め方"): "`--play` 指定時は一時
     // 停止で開始する" - a live human player always starts paused so the

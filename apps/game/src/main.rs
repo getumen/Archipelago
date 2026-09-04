@@ -15,7 +15,8 @@ fn print_usage_and_exit(msg: &str) -> ! {
          [--play <faction index or name>] [--record <path>] [--replay <path>] \
          [--screenshot <path>] [--screenshot-after <frames>] \
          [--debug-supply-overlay] [--debug-open-diplomacy] [--debug-open-newspaper] \
-         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]"
+         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>] \
+         [--cjk-font <path>]"
     );
     std::process::exit(1);
 }
@@ -38,6 +39,9 @@ struct Args {
     debug_open_newspaper: bool,
     debug_camera_region: Option<String>,
     debug_camera_zoom: f32,
+    /// `--cjk-font <path>`: overrides `apps/game/src/app/fonts.rs`'s
+    /// platform-specific search entirely - see that module's own doc.
+    cjk_font: Option<String>,
 }
 
 /// Default `--debug-camera-zoom` (orthographic `scale`) when `--debug-camera-region`
@@ -67,6 +71,7 @@ fn parse_args() -> Args {
     let mut debug_open_newspaper = false;
     let mut debug_camera_region = None;
     let mut debug_camera_zoom = DEFAULT_DEBUG_CAMERA_ZOOM;
+    let mut cjk_font = None;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -107,6 +112,9 @@ fn parse_args() -> Args {
                 let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-zoom expects a value"));
                 debug_camera_zoom = v.parse().unwrap_or_else(|_| print_usage_and_exit("--debug-camera-zoom expects a number"));
             }
+            "--cjk-font" => {
+                cjk_font = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--cjk-font expects a path")));
+            }
             other => {
                 if let Some(v) = other.strip_prefix("--scenario=") {
                     scenario = Some(v.to_string());
@@ -124,6 +132,8 @@ fn parse_args() -> Args {
                     screenshot = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--screenshot-after=") {
                     screenshot_after = v.parse().unwrap_or_else(|_| print_usage_and_exit("--screenshot-after expects an integer"));
+                } else if let Some(v) = other.strip_prefix("--cjk-font=") {
+                    cjk_font = Some(v.to_string());
                 } else {
                     print_usage_and_exit(&format!("unknown argument: {other}"));
                 }
@@ -144,6 +154,7 @@ fn parse_args() -> Args {
         debug_open_newspaper,
         debug_camera_region,
         debug_camera_zoom,
+        cjk_font,
     }
 }
 
@@ -233,5 +244,5 @@ fn main() {
         camera_zoom: args.debug_camera_zoom,
     });
 
-    archipelago_game::app::run(world, args.seed, scenario_name, args.days, screenshot, play_config);
+    archipelago_game::app::run(world, args.seed, scenario_name, args.days, screenshot, play_config, args.cjk_font);
 }
