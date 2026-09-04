@@ -29,6 +29,13 @@ pub enum Action {
     /// (`ActionError::NotAdjacent`).
     MoveUnit { unit: UnitId, to: Station },
     HoldUnit { unit: UnitId },
+    /// Stands a unit down, reversing `RecruitUnit`: the unit is removed
+    /// from play and its current manpower and equipment return to the
+    /// faction's pools rather than vanishing, mirroring how real
+    /// demobilisation returns people to the workforce and matériel to the
+    /// depot. See `apply_disband`'s doc for exactly what is refunded, and
+    /// why standing down is refused while the unit is under enemy contact.
+    DisbandUnit { unit: UnitId },
     /// Stage 2D (docs/phase2-spec.md "艦隊"): `domain` picks land or sea.
     /// A fleet can only be built in an owned, uncontested region that has a
     /// port (`region.port > 0.0`); it launches into that port's lowest-id
@@ -123,6 +130,7 @@ pub fn apply_action(
     match action {
         Action::MoveUnit { unit, to } => apply_move(world, faction, unit, to),
         Action::HoldUnit { unit } => apply_hold(world, faction, unit),
+        Action::DisbandUnit { unit } => apply_disband(world, faction, unit),
         Action::RecruitUnit { region, domain } => apply_recruit(world, faction, region, domain),
         Action::ReinforceUnit { unit } => apply_reinforce(world, faction, unit),
         Action::SetConscription(value) => apply_set_conscription(world, faction, value),
@@ -228,6 +236,59 @@ fn apply_move(
 fn apply_hold(world: &mut World, faction: FactionId, unit_id: UnitId) -> Result<(), ActionError> {
     owned_unit(world, faction, unit_id)?;
     world.unit_mut(unit_id).movement = None;
+    Ok(())
+}
+
+/// `Action::DisbandUnit`. Before this, `RecruitUnit` spent manpower and
+/// equipment to raise a unit and nothing ever gave a way to reverse it - a
+/// faction whose territory (and therefore `agents::unit_cap`) shrank after
+/// over-building had no path back to solvency at all. That is exactly the
+/// one-way accumulator shape docs/conventions.md §6 warns against, and this
+/// closes it.
+///
+/// Refunds the unit's *current* manpower and equipment - not the nominal
+/// `UNIT_MANPOWER`/`UNIT_EQUIPMENT` a fresh recruit costs, so a unit that
+/// took losses or was never fully reinforced gives back only what it
+/// actually has - to `Faction::manpower` and `Faction::stock[Arms]`
+/// respectively, the exact pools `apply_recruit` drew them from:
+///
+/// - Manpower goes back into the draft pool, not straight into the
+///   civilian workforce. `region.mobilized`/`labor_ratio` are recomputed
+///   every tick from `Faction::manpower` plus every living unit's manpower
+///   (`economy::tick_economy`), so crediting the pool rather than
+///   discarding the manpower keeps that identity honest, and
+///   `MANPOWER_DEMOBILIZATION_RATE` - the same outflow that already keeps
+///   the draft pool itself from being a one-way accumulator - drains it
+///   back into `labor_ratio` over the following weeks exactly as it does
+///   idle drafted conscripts. No new recovery mechanism is introduced;
+///   disbanding just hands the existing one more to work with.
+/// - Equipment goes back to `Good::Arms` stock outright - there is no
+///   equivalent "pool with its own decay" to route it through; Arms is
+///   already a plain stock every other system draws from and refills.
+///
+/// Rejected while the unit shares its station with an enemy
+/// (`ActionError::RegionContested`, the same check and error
+/// `apply_reinforce` uses for the same condition): a unit engaged with the
+/// enemy cannot simply walk away and demobilise. This also closes an
+/// exploit the refund above would otherwise open - without it, a faction
+/// about to lose a unit in combat (which becomes an unrefunded casualty,
+/// see `military::tick_combat`'s `Outcome::Destroyed`) could disband it the
+/// instant before to cash out a full refund instead of losing it for
+/// nothing.
+fn apply_disband(world: &mut World, faction: FactionId, unit_id: UnitId) -> Result<(), ActionError> {
+    let unit = owned_unit(world, faction, unit_id)?;
+    let (station, manpower, equipment) = (unit.station, unit.manpower, unit.equipment);
+    let pinned = match station {
+        Station::Region(r) => world.has_enemy_units(r, faction),
+        Station::Sea(z) => world.has_enemy_fleets(z, faction),
+    };
+    if pinned {
+        return Err(ActionError::RegionContested);
+    }
+
+    world.faction_mut(faction).manpower += manpower;
+    world.faction_mut(faction).stock[Good::Arms.index()] += equipment;
+    world.unit_mut(unit_id).alive = false;
     Ok(())
 }
 

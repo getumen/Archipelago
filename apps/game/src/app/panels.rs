@@ -404,9 +404,10 @@ const MAX_UNIT_ROWS: usize = 6;
 #[derive(Component)]
 pub(super) struct UnitPanelRoot;
 
-/// The per-slot container (row text + hold/reinforce buttons + reinforce
-/// reason) - hidden as a whole while its slot has no unit, so an empty pool
-/// slot doesn't leave a floating, unlabeled pair of buttons on screen.
+/// The per-slot container (row text + hold/reinforce/disband buttons +
+/// reinforce reason) - hidden as a whole while its slot has no unit, so an
+/// empty pool slot doesn't leave a floating, unlabeled set of buttons on
+/// screen.
 #[derive(Component)]
 pub(super) struct UnitRowContainer(usize);
 
@@ -417,6 +418,13 @@ pub(super) struct UnitRowText(usize);
 pub(super) enum UnitActionKind {
     Hold,
     Reinforce,
+    /// The disband-defect fix's button: `Action::DisbandUnit`, standing the
+    /// unit down and returning its manpower/equipment to the faction's
+    /// pools (`action::apply_disband`'s doc). Shares `reinforce_disabled_reason`
+    /// with `Reinforce` below - both are refused under the exact same
+    /// enemy-contact condition, not two independent checks that happen to
+    /// agree.
+    Disband,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -474,6 +482,16 @@ pub(super) fn spawn_unit_panel(commands: &mut Commands, font: &Handle<Font>) {
                             ))
                             .with_children(|b| {
                                 b.spawn((Text::new("補充 [J]"), text_font(11.0, font), TextColor(TEXT_ENABLED)));
+                            });
+                        buttons
+                            .spawn((
+                                Button,
+                                button_node(),
+                                BackgroundColor(COLOR_ENABLED),
+                                UnitActionButton { slot, kind: UnitActionKind::Disband },
+                            ))
+                            .with_children(|b| {
+                                b.spawn((Text::new("解散 [K]"), text_font(11.0, font), TextColor(TEXT_ENABLED)));
                             });
                     });
                     row.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(TEXT_REASON), UnitReinforceReason(slot)));
@@ -552,7 +570,7 @@ pub(super) fn sync_unit_panel(
             let enabled = unit.is_some()
                 && match button.kind {
                     UnitActionKind::Hold => true,
-                    UnitActionKind::Reinforce => reinforce_reason.is_none(),
+                    UnitActionKind::Reinforce | UnitActionKind::Disband => reinforce_reason.is_none(),
                 };
             bg.0 = if enabled { COLOR_ENABLED } else { COLOR_DISABLED };
         }
@@ -584,6 +602,7 @@ pub(super) fn handle_unit_action_clicks(mut sim: ResMut<SimRes>, slots: Res<Unit
         let action = match button.kind {
             UnitActionKind::Hold => Action::HoldUnit { unit: UnitId(unit_id) },
             UnitActionKind::Reinforce => Action::ReinforceUnit { unit: UnitId(unit_id) },
+            UnitActionKind::Disband => Action::DisbandUnit { unit: UnitId(unit_id) },
         };
         sim.0.push_human_action(action);
     }
@@ -1387,6 +1406,36 @@ mod tests {
         sim.0.tick();
         assert_eq!(sim.0.last_human_actions(), &[Action::HoldUnit { unit }], "the click must queue HoldUnit for exactly the unit in slot 1");
         assert!(sim.0.last_human_action_errors().is_empty());
+    }
+
+    /// The disband-defect fix's button: a click on `UnitActionKind::Disband`
+    /// must queue `Action::DisbandUnit` for the unit in that slot, and the
+    /// unit must actually be gone (and the faction's force smaller) once
+    /// that action is applied - not just that the right JSON-shaped enum
+    /// variant was pushed. Checked this fails when broken: temporarily
+    /// mapped `UnitActionKind::Disband` to `Action::HoldUnit` in
+    /// `handle_unit_action_clicks` - the first assertion below then fails.
+    #[test]
+    fn unit_action_click_disband_removes_the_unit() {
+        let mut world = World::new();
+        let sim = player_sim();
+        let before_count = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0) && u.alive).count();
+        let unit = sim.0.world().units.iter().find(|u| u.owner == FactionId(0) && u.alive).expect("faction 0 starts with a living unit").id;
+        world.insert_resource(sim);
+        let mut slots = UnitPanelSlots::default();
+        slots.0[1] = Some(unit.0);
+        world.insert_resource(slots);
+        world.spawn((Interaction::Pressed, UnitActionButton { slot: 1, kind: UnitActionKind::Disband }));
+
+        run(&mut world, handle_unit_action_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(sim.0.last_human_actions(), &[Action::DisbandUnit { unit }], "the click must queue DisbandUnit for exactly the unit in slot 1");
+        assert!(sim.0.last_human_action_errors().is_empty());
+        assert!(!sim.0.world().unit(unit).alive, "the disbanded unit must be gone after the tick that applies it");
+        let after_count = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0) && u.alive).count();
+        assert_eq!(after_count, before_count - 1, "the faction's living force must shrink by exactly one");
     }
 
     /// Regression guard for the policy panel's conscription `+` button

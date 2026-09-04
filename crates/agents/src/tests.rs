@@ -470,3 +470,175 @@ fn default_heuristic_agent_covers_every_table_entry() {
 fn default_heuristic_agent_beyond_the_table_fails_loudly() {
     let _ = default_heuristic_agent(DEFAULT_CAUTION.len());
 }
+
+/// Pushes `count` freshly-built, full-strength land units for `faction`,
+/// idle at `region` - the same shape `moving_unit_is_not_reissued_toward_
+/// same_destination`'s own "reserve" unit above already uses, factored out
+/// since the disband-policy tests below need several at once.
+fn push_idle_land_units(world: &mut archipelago_sim::world::World, faction: FactionId, region: RegionId, count: usize) -> Vec<UnitId> {
+    let mut ids = Vec::with_capacity(count);
+    for i in 0..count {
+        let id = UnitId(world.units.len() as u32);
+        world.units.push(Unit {
+            id,
+            owner: faction,
+            name: format!("Test Corps {i}"),
+            station: Station::Region(region),
+            movement: None,
+            manpower: UNIT_MANPOWER,
+            equipment: UNIT_EQUIPMENT,
+            organization: UNIT_ORG,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+        });
+        ids.push(id);
+    }
+    ids
+}
+
+/// The disband-defect fix's AI half: a faction whose land force has grown
+/// well past what its industry (`unit_cap`) can sustain must stand the
+/// excess down on its own, exactly like a human player would via the unit
+/// panel's new button - this is the regression guard for
+/// `crate::disband_excess` actually being wired into `decide_for_llm`.
+/// Checked this fails when broken: temporarily removed the
+/// `disband_excess(...)` call from `decide_for_llm` - `disbands.len()`
+/// then comes back `0` and the first assertion fails.
+#[test]
+fn heuristic_agent_disbands_when_over_extended() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    // Zero this faction's industry so `unit_cap` sits at its bare 3.0
+    // floor, regardless of mvp's own starting capacity numbers - the exact
+    // shape of 近畿府 on japan_hex: territory (and industry) lost after an
+    // army was already raised for a bigger economy.
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+        }
+    }
+
+    // mvp's faction 0 starts with 3 units; + 6 fresh ones = 9, well past
+    // `unit_cap` (3.0) * `DISBAND_UNIT_CAP_MARGIN` (1.25) = 3.75.
+    push_idle_land_units(&mut world, faction, capital, 6);
+    let total_before: usize = world.units.iter().filter(|u| u.owner == faction && u.alive).count();
+    assert_eq!(total_before, 9, "test setup: expected 3 starting + 6 fresh units");
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    let disbands: Vec<UnitId> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::DisbandUnit { unit } => Some(*unit),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        disbands.len(),
+        6,
+        "expected the force trimmed from 9 down to unit_cap's floor of 3 (6 disbands): {actions:?}"
+    );
+    let unique: std::collections::BTreeSet<UnitId> = disbands.iter().copied().collect();
+    assert_eq!(unique.len(), disbands.len(), "must never disband the same unit twice: {disbands:?}");
+    for &u in &disbands {
+        assert_eq!(world.unit(u).owner, faction, "must only disband this faction's own units");
+    }
+}
+
+/// A faction whose force is within (or only marginally past) `unit_cap`
+/// must never disband anything - this is not a policy that fires on every
+/// tick, only on a genuine, sustained overshoot. Uses mvp's untouched
+/// starting state, where faction 0's industry comfortably covers its 2
+/// starting units.
+#[test]
+fn heuristic_agent_does_not_disband_within_cap() {
+    let world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::DisbandUnit { .. })),
+        "a faction well within its unit cap must not disband anything: {actions:?}"
+    );
+}
+
+/// Even a faction badly over-extended must never stand down a unit that is
+/// currently under enemy contact - mirrors `action::apply_disband`'s own
+/// refusal (`ActionError::RegionContested`), and is exactly what stops this
+/// policy from ever disarming a faction mid-battle: the weakest unit in a
+/// contested region must be skipped in favour of a weak *uncontested* one,
+/// never queued at all. Checked this fails when broken: temporarily removed
+/// the `unit_contested` filter from `disband_excess` - the assertion below
+/// then fails (the contested unit appears in `disbands`).
+#[test]
+fn heuristic_agent_never_disbands_a_contested_unit() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+        }
+    }
+
+    // One of the two starting units is moved into contact with an enemy at
+    // its own capital - the weakest possible target (lowest manpower) so a
+    // policy that ignores contested status would pick it first.
+    let starting_units: Vec<UnitId> =
+        world.units.iter().filter(|u| u.owner == faction && u.alive).map(|u| u.id).collect();
+    let contested_unit = starting_units[0];
+    world.unit_mut(contested_unit).manpower = 0.01;
+    let enemy = FactionId(1);
+    let raider_id = UnitId(world.units.len() as u32);
+    world.units.push(Unit {
+        id: raider_id,
+        owner: enemy,
+        name: "Enemy Raiding Force".to_string(),
+        station: Station::Region(capital),
+        movement: None,
+        manpower: 1.0,
+        equipment: 1.0,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(capital),
+        experience: 0.0,
+        alive: true,
+    });
+
+    push_idle_land_units(&mut world, faction, capital, 6);
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    let disbands: Vec<UnitId> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::DisbandUnit { unit } => Some(*unit),
+            _ => None,
+        })
+        .collect();
+
+    assert!(!disbands.is_empty(), "test setup: this faction should still be over-extended enough to disband");
+    assert!(
+        !disbands.contains(&contested_unit),
+        "a unit under enemy contact must never be disbanded, even as the weakest candidate: {disbands:?}"
+    );
+}

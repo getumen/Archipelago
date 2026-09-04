@@ -7,7 +7,7 @@ use crate::balance::{
     CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR,
     GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, INDUSTRIAL_STABILITY_FLOOR, NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE,
     SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, TREATY_ACCEPT_OPINION_BONUS,
-    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
+    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
 };
 use crate::construction::{self, Construction, Project};
 use crate::diplomacy::{self, Treaty, TreatyTerm};
@@ -217,6 +217,186 @@ fn invalid_action_rejected() {
     assert_eq!(errors, vec![ActionError::NotAdjacent]);
     assert_eq!(sim.world.unit(unit_id).station, before_station);
     assert_eq!(sim.world.unit(unit_id).movement, before_movement);
+}
+
+/// The disband defect's most basic fix: `Action::DisbandUnit` removes the
+/// unit and shrinks its owner's living force by exactly one - the mechanic
+/// this codebase had no answer for at all until now. Also checks the
+/// refund this design deliberately grants (see `action::apply_disband`'s
+/// doc): the unit's *current* manpower/equipment land back in
+/// `Faction::manpower`/`stock[Arms]`, not the nominal recruit cost.
+#[test]
+fn disbanded_unit_is_gone_and_force_shrinks() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let unit_id = world.units.iter().find(|u| u.owner == faction && u.alive).unwrap().id;
+    // Give the unit non-nominal manpower/equipment so the refund can be
+    // told apart from "always refunds the fresh-recruit constants".
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.manpower = 0.6;
+        unit.equipment = 13.0;
+    }
+
+    let before_count = world.units.iter().filter(|u| u.owner == faction && u.alive).count();
+    let before_manpower = world.faction(faction).manpower;
+    let before_arms = world.faction(faction).stock[Good::Arms.index()];
+
+    let result = action::apply_action(&mut world, faction, Action::DisbandUnit { unit: unit_id });
+    assert_eq!(result, Ok(()));
+
+    assert!(!world.unit(unit_id).alive, "a disbanded unit must no longer be alive");
+    let after_count = world.units.iter().filter(|u| u.owner == faction && u.alive).count();
+    assert_eq!(after_count, before_count - 1, "the owner's living force must shrink by exactly one");
+
+    assert!(
+        (world.faction(faction).manpower - (before_manpower + 0.6)).abs() < 1e-4,
+        "expected the unit's current manpower (0.6), not UNIT_MANPOWER, to be refunded: got {}",
+        world.faction(faction).manpower
+    );
+    assert!(
+        (world.faction(faction).stock[Good::Arms.index()] - (before_arms + 13.0)).abs() < 1e-4,
+        "expected the unit's current equipment (13.0) to be refunded to Arms stock: got {}",
+        world.faction(faction).stock[Good::Arms.index()]
+    );
+}
+
+/// `Action::DisbandUnit` is validated like every other unit action: it must
+/// be rejected for a unit the acting faction doesn't own, and must leave
+/// that unit completely untouched. Checked this fails when broken:
+/// temporarily removed the `owner != faction` check from `owned_unit`
+/// (shared by every unit action, including this one) - the assertions
+/// below then fail (the foreign unit is disbanded).
+#[test]
+fn disband_rejected_for_unit_not_owned() {
+    let mut world = scenario::build_world();
+    let foreign_unit = world.units.iter().find(|u| u.owner == FactionId(1) && u.alive).unwrap().id;
+
+    let result = action::apply_action(&mut world, FactionId(0), Action::DisbandUnit { unit: foreign_unit });
+
+    assert_eq!(result, Err(ActionError::NotOwner));
+    assert!(world.unit(foreign_unit).alive, "a rejected disband must never touch the unit");
+    assert_eq!(world.unit(foreign_unit).owner, FactionId(1));
+}
+
+/// A unit sharing its station with the enemy cannot simply demobilise and
+/// walk away - the same "Pinned" condition `MoveUnit`/`ReinforceUnit`
+/// already refuse under. This also closes the exploit the refund above
+/// would otherwise open: cashing out a doomed unit's full manpower/
+/// equipment the instant before it would die in combat as an unrefunded
+/// casualty (`military::tick_combat`'s `Outcome::Destroyed`). Checked this
+/// fails when broken: temporarily removed the `pinned` check from
+/// `apply_disband` - the assertions below then fail (the contested unit is
+/// disbanded, refund and all).
+#[test]
+fn disband_rejected_under_enemy_contact() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let defender = world.units.iter().find(|u| u.owner == faction && u.alive).unwrap().id;
+    let contested_region = world.unit(defender).station.region().unwrap();
+
+    // An enemy unit merely stationed in the same region - enough to make
+    // `World::has_enemy_units` true - the same setup `supply_corridor_cut`
+    // uses to contest a region without capturing it.
+    let enemy = FactionId(1);
+    let raider_id = crate::ids::UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: raider_id,
+        owner: enemy,
+        name: "Enemy Raiding Force".to_string(),
+        station: Station::Region(contested_region),
+        movement: None,
+        manpower: 1.0,
+        equipment: 1.0,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(contested_region),
+        experience: 0.0,
+        alive: true,
+    });
+
+    let before_manpower = world.faction(faction).manpower;
+    let result = action::apply_action(&mut world, faction, Action::DisbandUnit { unit: defender });
+
+    assert_eq!(result, Err(ActionError::RegionContested));
+    assert!(world.unit(defender).alive, "a contested unit must not be disbanded");
+    assert_eq!(world.faction(faction).manpower, before_manpower, "a rejected disband must not refund anything");
+}
+
+/// Regression guard for the defect this whole action exists to fix
+/// (docs/conventions.md §6's one-way accumulator shape, measured on
+/// `scenarios/japan_hex.json`): a faction that over-recruited relative to
+/// its industry had no path back to solvency at all before `DisbandUnit`
+/// existed - Munitions demand from an oversized army permanently
+/// outstripped what its industry could produce, pinning the stockpile at
+/// zero forever no matter how many ticks passed. Standing enough of the
+/// excess down must let production catch back up. Checked this fails when
+/// broken: temporarily made `apply_disband` a no-op (`Ok(())` without
+/// touching `unit.alive`) - `munitions_recovered` then stays pinned at
+/// (approximately) `munitions_overextended`, and the final assertion fails.
+#[test]
+fn over_extended_faction_recovers_solvency_by_disbanding() {
+    let mut sim = Simulation::new(1);
+    let faction = FactionId(0);
+    let capital = sim.world.faction(faction).capital;
+
+    // Massively over-recruit: far more units than this faction's Munitions
+    // production could ever feed, so demand permanently swamps supply -
+    // the same shape as 近畿府 on japan_hex after losing territory its army
+    // was sized for.
+    let mut extra_units = Vec::new();
+    for _ in 0..40 {
+        let id = crate::ids::UnitId(sim.world.units.len() as u32);
+        sim.world.units.push(military::Unit {
+            id,
+            owner: faction,
+            name: "Overextension Test Corps".to_string(),
+            station: Station::Region(capital),
+            movement: None,
+            manpower: UNIT_MANPOWER,
+            equipment: UNIT_EQUIPMENT,
+            organization: UNIT_ORG,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(capital),
+            experience: 0.0,
+            alive: true,
+        });
+        extra_units.push(id);
+    }
+
+    for _ in 0..60 {
+        sim.step();
+    }
+    let munitions_overextended = sim.world.faction(faction).stock[Good::Munitions.index()];
+    assert!(
+        munitions_overextended < 0.01,
+        "sanity: an army this oversized should pin Munitions at zero: {munitions_overextended}"
+    );
+
+    // Stand the entire oversized addition back down - back toward something
+    // this faction's industry can actually feed - and let the economy run
+    // on.
+    for &unit in &extra_units {
+        let errors = sim.apply(faction, &[Action::DisbandUnit { unit }]);
+        assert!(errors.is_empty(), "disbanding an uncontested own unit must succeed: {errors:?}");
+    }
+
+    for _ in 0..90 {
+        sim.step();
+    }
+    let munitions_recovered = sim.world.faction(faction).stock[Good::Munitions.index()];
+
+    assert!(
+        munitions_recovered > munitions_overextended + 1.0,
+        "expected Munitions to recover once the oversized army was stood down: \
+         overextended={munitions_overextended}, recovered={munitions_recovered}"
+    );
 }
 
 #[test]

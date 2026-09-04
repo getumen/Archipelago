@@ -75,6 +75,11 @@ const CONSCRIPTION_THROTTLE_MANPOWER: f32 = 25.0;
 /// merely throttling it - the pool's own demobilization
 /// (`balance::MANPOWER_DEMOBILIZATION_RATE`) handles bringing it back down.
 const STOP_CONSCRIPTION_UNIT_CAP_FRACTION: f32 = 0.9;
+/// Multiple of `unit_cap` a faction's land force must exceed before
+/// `disband_excess` stands any of it down - see that function's own doc for
+/// why this is a margin above the bare `> cap` boundary `recruit` stops
+/// growing at, not that same boundary reused.
+const DISBAND_UNIT_CAP_MARGIN: f32 = 1.25;
 /// `civilian_ration` used when Munitions/Arms are critically short and
 /// stability can still absorb it (design.md §9's civilian/war trade-off):
 /// squeeze civilian Food/Energy/Machinery delivery down to this fraction to
@@ -1090,6 +1095,7 @@ impl HeuristicAgent {
 
         reinforce(self.faction, obs, &mut actions);
         recruit(self.faction, obs, &mut actions);
+        disband_excess(self.faction, obs, &mut actions);
         naval_recruit(self.faction, obs, &mut actions);
         build(self.faction, obs, &mut actions);
 
@@ -1458,6 +1464,67 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 
     if let Some(region) = region {
         actions.push(Action::RecruitUnit { region, domain: Domain::Land });
+    }
+}
+
+/// Disband-defect fix (docs/conventions.md §6's one-way accumulator shape,
+/// measured on `scenarios/japan_hex.json`: a faction stuck at zero
+/// Munitions, unable to feed an army sized for territory it no longer
+/// holds): `recruit` above stops *growing* the land force at `unit_cap`,
+/// but nothing ever shrank it back down once `unit_cap` itself fell - a
+/// faction's industry (and therefore its cap) can drop after losing
+/// regions while every unit it already raised stays on the books forever.
+///
+/// Only acts once the force is genuinely oversized -
+/// `DISBAND_UNIT_CAP_MARGIN` past cap, not the bare boundary `recruit`
+/// stops growing at - so a cap that dips for a tick or two (a border
+/// skirmish, a moment of devastation) doesn't immediately reverse itself
+/// into a disband the instant `recruit` would otherwise want to rebuild;
+/// only a genuinely oversized army crosses this. When it does, stands the
+/// *weakest* (`Unit::combat_power`, ascending) uncontested units down,
+/// exactly enough to bring the force back to `cap` - never more than the
+/// measured overshoot, and never a unit under enemy contact (the same
+/// refusal `action::apply_disband` itself enforces, so this never queues
+/// an order the simulation would reject anyway).
+///
+/// This is what keeps the war on japan_hex from going quiet: a faction
+/// actively fighting for territory it can't yet feed only ever loses its
+/// *weakest* rear units down to what its economy can carry, never units
+/// engaged at the front, and `unit_cap`'s own `3.0` floor (plus this
+/// margin) means it is never talked down toward zero - only back to a size
+/// it can actually sustain, which is a faction able to keep fighting, not
+/// one disarmed into irrelevance.
+///
+/// Land-only, mirroring `unit_cap`/`recruit`'s own land-only scope - fleets
+/// are sized by `NAVY_MIN_FLEETS` instead, a different mechanism this fix
+/// deliberately leaves untouched.
+fn disband_excess(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let cap = unit_cap(faction, obs);
+    let land_units: Vec<UnitId> = obs
+        .own_units()
+        .into_iter()
+        .filter(|&u| obs.world.unit(u).station.domain() == Domain::Land)
+        .collect();
+    let total = land_units.len() as f32;
+    if total <= cap * DISBAND_UNIT_CAP_MARGIN {
+        return;
+    }
+    let excess = (total - cap).round().max(0.0) as usize;
+
+    let mut eligible: Vec<UnitId> =
+        land_units.into_iter().filter(|&u| !unit_contested(obs.world, obs.world.unit(u), faction)).collect();
+    // Weakest combat power first; ties broken by unit id for determinism
+    // (`f32::partial_cmp` alone can't order NaN, which `combat_power`
+    // should never produce, but the tie-break also keeps equal-strength
+    // ties from depending on `own_units()`'s incoming order).
+    eligible.sort_by(|&a, &b| {
+        let power_a = obs.world.unit(a).combat_power();
+        let power_b = obs.world.unit(b).combat_power();
+        power_a.partial_cmp(&power_b).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+    });
+
+    for &unit in eligible.iter().take(excess) {
+        actions.push(Action::DisbandUnit { unit });
     }
 }
 

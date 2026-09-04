@@ -234,7 +234,7 @@ pub(crate) struct Rejection {
 /// directions.
 pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
     match action {
-        Action::MoveUnit { .. } | Action::HoldUnit { .. } | Action::ReinforceUnit { .. } => RejectionTarget::Unit,
+        Action::MoveUnit { .. } | Action::HoldUnit { .. } | Action::ReinforceUnit { .. } | Action::DisbandUnit { .. } => RejectionTarget::Unit,
         Action::RecruitUnit { region, .. } | Action::Build { region, .. } | Action::CancelBuild { region } => RejectionTarget::Region(*region),
         Action::SetConscription(_)
         | Action::SetIndustryPriority { .. }

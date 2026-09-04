@@ -106,6 +106,9 @@ class ActionTable:
         for unit in range(self.max_unit_slots):
             yield ActionEntry(f"reinforce_unit(unit={unit})", {"type": "reinforce_unit", "unit": unit})
 
+        for unit in range(self.max_unit_slots):
+            yield ActionEntry(f"disband_unit(unit={unit})", {"type": "disband_unit", "unit": unit})
+
         for region in range(self.region_count):
             for domain in self.domains:
                 yield ActionEntry(

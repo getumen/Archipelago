@@ -136,6 +136,7 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             Ok(Action::MoveUnit { unit, to: station_from_value(to)? })
         }
         "hold_unit" => Ok(Action::HoldUnit { unit: unit_id(v, "unit")? }),
+        "disband_unit" => Ok(Action::DisbandUnit { unit: unit_id(v, "unit")? }),
         "recruit_unit" => {
             let region = region_id(v, "region")?;
             let domain = match v.get("domain").and_then(Value::as_str) {
@@ -268,6 +269,7 @@ fn actions_schema() -> Value {
     Value::arr(vec![
         action_entry("move_unit", vec![field("unit", "integer", true), field_object("to", "station", true)]),
         action_entry("hold_unit", vec![field("unit", "integer", true)]),
+        action_entry("disband_unit", vec![field("unit", "integer", true)]),
         action_entry(
             "recruit_unit",
             vec![field("region", "integer", true), field_enum("domain", "domain", false)],

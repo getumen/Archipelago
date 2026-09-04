@@ -230,6 +230,14 @@ pub(super) fn keyboard_input(
             sim.0.push_human_action(Action::ReinforceUnit { unit: archipelago_sim::ids::UnitId(unit) });
         }
     }
+    // Disband-defect fix: stand down every currently selected unit -
+    // `panels::UnitPanelRoot`'s per-unit "解散 [K]" button does the same,
+    // one unit at a time.
+    if keys.just_pressed(KeyCode::KeyK) {
+        for &unit in &selected_units.0 {
+            sim.0.push_human_action(Action::DisbandUnit { unit: archipelago_sim::ids::UnitId(unit) });
+        }
+    }
     if keys.just_pressed(KeyCode::KeyG) {
         let cur = active_good.0.index();
         active_good.0 = ALL_GOODS[(cur + 1) % GOOD_COUNT];

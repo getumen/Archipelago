@@ -156,6 +156,7 @@ pub fn action_to_value(action: &Action) -> Value {
             Value::obj(vec![("type", Value::str("move_unit")), ("unit", Value::num(unit.0 as f64)), ("to", station_to_value(to))])
         }
         Action::HoldUnit { unit } => Value::obj(vec![("type", Value::str("hold_unit")), ("unit", Value::num(unit.0 as f64))]),
+        Action::DisbandUnit { unit } => Value::obj(vec![("type", Value::str("disband_unit")), ("unit", Value::num(unit.0 as f64))]),
         Action::RecruitUnit { region, domain } => Value::obj(vec![
             ("type", Value::str("recruit_unit")),
             ("region", Value::num(region.0 as f64)),
@@ -228,6 +229,7 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             Ok(Action::MoveUnit { unit, to: station_from_value(to)? })
         }
         "hold_unit" => Ok(Action::HoldUnit { unit: UnitId(u32_field("unit")?) }),
+        "disband_unit" => Ok(Action::DisbandUnit { unit: UnitId(u32_field("unit")?) }),
         "recruit_unit" => {
             let region = RegionId(u32_field("region")?);
             let domain = match v.get("domain").and_then(Value::as_str) {
@@ -373,6 +375,7 @@ mod tests {
             Action::MoveUnit { unit: UnitId(3), to: Station::Region(RegionId(5)) },
             Action::MoveUnit { unit: UnitId(3), to: Station::Sea(SeaZoneId(1)) },
             Action::HoldUnit { unit: UnitId(2) },
+            Action::DisbandUnit { unit: UnitId(2) },
             Action::RecruitUnit { region: RegionId(1), domain: Domain::Land },
             Action::RecruitUnit { region: RegionId(1), domain: Domain::Sea },
             Action::ReinforceUnit { unit: UnitId(4) },
