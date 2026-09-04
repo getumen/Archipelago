@@ -75,11 +75,22 @@ const CONSCRIPTION_THROTTLE_MANPOWER: f32 = 25.0;
 /// merely throttling it - the pool's own demobilization
 /// (`balance::MANPOWER_DEMOBILIZATION_RATE`) handles bringing it back down.
 const STOP_CONSCRIPTION_UNIT_CAP_FRACTION: f32 = 0.9;
-/// Multiple of `unit_cap` a faction's land force must exceed before
-/// `disband_excess` stands any of it down - see that function's own doc for
-/// why this is a margin above the bare `> cap` boundary `recruit` stops
-/// growing at, not that same boundary reused.
-const DISBAND_UNIT_CAP_MARGIN: f32 = 1.25;
+/// `Faction::supply_ratio` below which `disband_excess` treats the
+/// national supply network as failing to keep the fielded force fed - at
+/// least half of nationwide demand going unserved this tick. One half of
+/// the solvency check that replaced the old head-count margin; see that
+/// function's own doc for why both this and `DISBAND_SOLVENCY_BUFFER_DAYS`
+/// have to hold before anything gets stood down.
+const DISBAND_SOLVENCY_SUPPLY_RATIO: f32 = 0.5;
+/// Days of national Munitions buffer (`munitions_buffer_days`) below which
+/// `disband_excess` treats a bad `supply_ratio` as a real shortfall rather
+/// than routing noise from a cut-off front. Deliberately well below
+/// `LOW_SUPPLY_DAYS` (20): `set_policy`'s `munitions_running_low` already
+/// reacts to a thinning stockpile at that mark by leaning `industry_priority`
+/// toward Munitions, so disbanding only kicks in once that has clearly
+/// failed to keep up - a faction with a week or more of stock in the bank
+/// is not insolvent no matter how bad this tick's delivery ratio looks.
+const DISBAND_SOLVENCY_BUFFER_DAYS: f32 = 7.0;
 /// `civilian_ration` used when Munitions/Arms are critically short and
 /// stability can still absorb it (design.md §9's civilian/war trade-off):
 /// squeeze civilian Food/Energy/Machinery delivery down to this fraction to
@@ -1230,6 +1241,66 @@ fn unit_cap(faction: FactionId, obs: &Observation) -> f32 {
     3.0 + obs.world.industry_total(faction) / 5.0
 }
 
+/// National daily Munitions demand across every unit (land and sea) this
+/// faction currently fields - `SUPPLY_NEED_PER_MANPOWER` per unit of
+/// manpower, `balance::COMBAT_SUPPLY_MULT` higher for anything in contact
+/// with the enemy. Mirrors exactly what `logistics::distribute_supply`
+/// sums into that faction's `total_demand` this same tick, so comparing it
+/// against `Faction::stock[Munitions]` gives "how many days would the
+/// current stockpile cover at today's draw". Shared by `set_policy`'s
+/// industry-priority nudge and `disband_excess`'s solvency check below -
+/// both care about the same national Munitions economy, not a land-only
+/// slice of it.
+fn munitions_daily_demand(faction: FactionId, obs: &Observation) -> f32 {
+    obs.own_units()
+        .into_iter()
+        .map(|unit_id| {
+            let unit = obs.world.unit(unit_id);
+            let mult =
+                if unit_contested(obs.world, unit, faction) { COMBAT_SUPPLY_MULT } else { 1.0 };
+            unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult
+        })
+        .sum()
+}
+
+/// Days of national Munitions stock (`Faction::stock[Munitions]`) the
+/// current daily draw (`munitions_daily_demand`) would last -
+/// `f32::INFINITY` when there is no draw at all (an empty stockpile isn't
+/// a problem if nothing is drawing on it). The buffer half of
+/// `munitions_insolvent`'s solvency check.
+fn munitions_buffer_days(faction: FactionId, obs: &Observation) -> f32 {
+    let demand = munitions_daily_demand(faction, obs);
+    if demand <= 0.0 {
+        f32::INFINITY
+    } else {
+        obs.world.faction(faction).stock[Good::Munitions.index()] / demand
+    }
+}
+
+/// Whether `faction`'s economy is currently failing to feed the force it
+/// already fields: `Faction::supply_ratio` (the delivered/demanded ratio
+/// `logistics::distribute_supply` computes each tick) below
+/// `DISBAND_SOLVENCY_SUPPLY_RATIO` *and* `munitions_buffer_days` below
+/// `DISBAND_SOLVENCY_BUFFER_DAYS` - see `disband_excess`'s doc for why both
+/// must hold (this is what tells a genuinely failing economy apart from a
+/// front that's merely cut off).
+///
+/// Shared by `disband_excess` (stop shedding once this reads false) and
+/// `recruit` (stop growing while this reads true) - without the second use,
+/// `recruit`'s own gate (`own_unit_count >= cap`) has nothing to say about
+/// Munitions at all, so a structurally insolvent faction sitting one unit
+/// below a fractional `cap` would have its next `RecruitUnit` immediately
+/// undo `disband_excess`'s last cut, which would trigger again next tick,
+/// forever - the exact oscillation this refinement is supposed to avoid,
+/// just relocated from "unit-count margin" to "recruit and disband
+/// disagreeing about the same faction in the same breath". Gating both on
+/// the same signal is what keeps them in agreement.
+fn munitions_insolvent(faction: FactionId, obs: &Observation) -> bool {
+    let f = obs.world.faction(faction);
+    f.supply_ratio < DISBAND_SOLVENCY_SUPPLY_RATIO
+        && munitions_buffer_days(faction, obs) < DISBAND_SOLVENCY_BUFFER_DAYS
+}
+
 /// Count of `obs.own_units()` in a given domain — `unit_cap`/`recruit`'s
 /// land army sizing must not be diluted by fleets sharing the same
 /// `own_units()` list Stage 2D introduced (`naval_recruit` has its own,
@@ -1273,19 +1344,7 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
     };
     actions.push(Action::SetConscription(conscription));
 
-    let daily_demand: f32 = obs
-        .own_units()
-        .into_iter()
-        .map(|unit_id| {
-            let unit = obs.world.unit(unit_id);
-            let mult = if unit_contested(obs.world, unit, faction) {
-                COMBAT_SUPPLY_MULT
-            } else {
-                1.0
-            };
-            unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult
-        })
-        .sum();
+    let daily_demand = munitions_daily_demand(faction, obs);
     let munitions = f.stock[Good::Munitions.index()];
     let munitions_running_low = daily_demand > 0.0 && munitions / daily_demand < LOW_SUPPLY_DAYS;
 
@@ -1445,6 +1504,13 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     {
         return;
     }
+    // Munitions solvency gate (`munitions_insolvent`'s own doc): a faction
+    // that can't feed the force it already has must not add another mouth
+    // to feed, and must not immediately rebuild whatever `disband_excess`
+    // last cut for exactly that reason.
+    if munitions_insolvent(faction, obs) {
+        return;
+    }
 
     let capital = f.capital;
     let region = if is_safe_own_region(faction, obs, capital) {
@@ -1475,25 +1541,72 @@ fn recruit(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 /// faction's industry (and therefore its cap) can drop after losing
 /// regions while every unit it already raised stays on the books forever.
 ///
-/// Only acts once the force is genuinely oversized -
-/// `DISBAND_UNIT_CAP_MARGIN` past cap, not the bare boundary `recruit`
-/// stops growing at - so a cap that dips for a tick or two (a border
-/// skirmish, a moment of devastation) doesn't immediately reverse itself
-/// into a disband the instant `recruit` would otherwise want to rebuild;
-/// only a genuinely oversized army crosses this. When it does, stands the
+/// `total <= cap` is only the *precondition* for having anything to trim -
+/// mirrors the boundary `recruit` stops growing at, so there is nothing to
+/// shed back below it. Whether to actually act on an overshoot is a
+/// separate, solvency-driven question: a first cut of this fix gated it on
+/// `total` clearing `cap` by a flat 25% margin, which watches the wrong
+/// quantity - measured on `scenarios/japan_hex.json` day 720, a faction
+/// holding five times another's territory can field the same handful of
+/// units as that starved faction and read as "solvent" by pure head count,
+/// while a faction sitting at 36.5% `supply_ratio` with an empty Munitions
+/// stock never crossed the margin and starved forever. What actually
+/// determines whether a force is sustainable is whether the *economy* can
+/// feed it, which `Faction::supply_ratio` and `Faction::stock[Munitions]`
+/// say directly - so `munitions_insolvent` (its own doc has the two
+/// thresholds and why both must hold) reads those instead, and this is
+/// what tells a genuinely failing economy apart from a front that's merely
+/// cut off: a besieged region's demand goes unserved -
+/// `logistics::distribute_supply`'s `avail[r][f]` is zero for it - which
+/// drags `supply_ratio` down exactly like real insolvency does, but the
+/// Munitions that would have gone to that front is never drawn from
+/// `Faction::stock` in the first place (nothing was delivered), so the
+/// national buffer stays intact. A faction can therefore read as badly
+/// undersupplied on `supply_ratio` alone and still correctly read as
+/// solvent here, because the second, independent signal - the stockpile
+/// behind the whole force, not just the cut-off piece of it - says the
+/// economy is fine and this is a logistics problem, not an economic one.
+///
+/// `munitions_insolvent`'s two thresholds are themselves the hysteresis
+/// this fix's old flat margin used to provide, now hung off the quantity
+/// that actually matters: both sit below `LOW_SUPPLY_DAYS` (20), the point
+/// at which `set_policy`'s `munitions_running_low` already leans
+/// `industry_priority` toward Munitions - that policy gets first chance to
+/// fix a thinning stockpile before this one starts cutting force size, so a
+/// stockpile dipping for a tick or two (a border skirmish, a moment of
+/// devastation) doesn't immediately reverse itself into a disband; only a
+/// sustained, two-signal shortfall crosses this. When it does, stands the
 /// *weakest* (`Unit::combat_power`, ascending) uncontested units down,
 /// exactly enough to bring the force back to `cap` - never more than the
 /// measured overshoot, and never a unit under enemy contact (the same
-/// refusal `action::apply_disband` itself enforces, so this never queues
-/// an order the simulation would reject anyway).
+/// refusal `action::apply_disband` itself enforces, so this never queues an
+/// order the simulation would reject anyway).
+///
+/// That alone isn't sufficient for the hysteresis to hold, though: `cap` is
+/// a continuous, industry-derived value, and `total` an integer, so a
+/// structurally insolvent faction sitting exactly one unit above a
+/// fractional `cap` gets that one unit trimmed back down *below* `cap` -
+/// and `recruit`'s own gate (`own_unit_count >= cap`) would then see
+/// headroom and immediately rebuild it, without ever checking whether the
+/// stockpile that made this function cut in the first place has recovered.
+/// Measured on `scenarios/japan_hex.json` seed 1: one faction cycled
+/// through exactly this every recruit/disband tick from day 182 to day 718
+/// - over 500 days of build-then-cut with no change in outcome, purely
+/// because the two functions disagreed about the same faction's solvency.
+/// `recruit` therefore checks `munitions_insolvent` too now, and stops
+/// growing while it holds - `unit_cap` still sets *how big* the force is
+/// allowed to get (recruit's own boundary, untouched here), but whether
+/// it's currently allowed to move *toward* that size is the same solvency
+/// question this function asks about shrinking it. Expressing both in the
+/// same terms is what keeps them from fighting each other.
 ///
 /// This is what keeps the war on japan_hex from going quiet: a faction
 /// actively fighting for territory it can't yet feed only ever loses its
 /// *weakest* rear units down to what its economy can carry, never units
-/// engaged at the front, and `unit_cap`'s own `3.0` floor (plus this
-/// margin) means it is never talked down toward zero - only back to a size
-/// it can actually sustain, which is a faction able to keep fighting, not
-/// one disarmed into irrelevance.
+/// engaged at the front, and `unit_cap`'s own `3.0` floor means it is never
+/// talked down toward zero - only back to a size it can actually sustain,
+/// which is a faction able to keep fighting, not one disarmed into
+/// irrelevance.
 ///
 /// Land-only, mirroring `unit_cap`/`recruit`'s own land-only scope - fleets
 /// are sized by `NAVY_MIN_FLEETS` instead, a different mechanism this fix
@@ -1506,9 +1619,10 @@ fn disband_excess(faction: FactionId, obs: &Observation, actions: &mut Vec<Actio
         .filter(|&u| obs.world.unit(u).station.domain() == Domain::Land)
         .collect();
     let total = land_units.len() as f32;
-    if total <= cap * DISBAND_UNIT_CAP_MARGIN {
+    if total <= cap || !munitions_insolvent(faction, obs) {
         return;
     }
+
     let excess = (total - cap).round().max(0.0) as usize;
 
     let mut eligible: Vec<UnitId> =

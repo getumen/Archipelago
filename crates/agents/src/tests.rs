@@ -502,13 +502,24 @@ fn push_idle_land_units(world: &mut archipelago_sim::world::World, faction: Fact
 }
 
 /// The disband-defect fix's AI half: a faction whose land force has grown
-/// well past what its industry (`unit_cap`) can sustain must stand the
-/// excess down on its own, exactly like a human player would via the unit
-/// panel's new button - this is the regression guard for
-/// `crate::disband_excess` actually being wired into `decide_for_llm`.
-/// Checked this fails when broken: temporarily removed the
-/// `disband_excess(...)` call from `decide_for_llm` - `disbands.len()`
-/// then comes back `0` and the first assertion fails.
+/// well past what its industry (`unit_cap`) can sustain, *and* whose
+/// economy genuinely can't feed it (bad `supply_ratio` and an exhausted
+/// Munitions stock - the 近畿府 case from `scenarios/japan_hex.json` day
+/// 720: 36.5% `supply_ratio`, 0.0 Munitions), must stand the excess down on
+/// its own, exactly like a human player would via the unit panel's new
+/// button - this is the regression guard for `crate::disband_excess`
+/// actually being wired into `decide_for_llm`.
+///
+/// Changed from the original head-count-only version of this test: the
+/// trigger this guards is no longer "over `unit_cap` by a flat 25%" (that
+/// margin is gone - see `disband_excess`'s own doc) but "over `unit_cap`
+/// *and* insolvent", so this setup now explicitly drives both
+/// `supply_ratio` and `Faction::stock[Munitions]` down to the insolvent
+/// case, instead of relying on zeroed industry capacity alone to imply it.
+/// Checked this fails when broken: temporarily reverted the guard to the
+/// old `total <= cap * 1.25` head-count check - `disbands.len()` then comes
+/// back `0` (9 units sits within `3.75`, the old margin) and the first
+/// assertion fails.
 #[test]
 fn heuristic_agent_disbands_when_over_extended() {
     let mut world = scenario::build_world();
@@ -526,10 +537,17 @@ fn heuristic_agent_disbands_when_over_extended() {
     }
 
     // mvp's faction 0 starts with 3 units; + 6 fresh ones = 9, well past
-    // `unit_cap` (3.0) * `DISBAND_UNIT_CAP_MARGIN` (1.25) = 3.75.
+    // `unit_cap`'s bare 3.0 floor.
     push_idle_land_units(&mut world, faction, capital, 6);
     let total_before: usize = world.units.iter().filter(|u| u.owner == faction && u.alive).count();
     assert_eq!(total_before, 9, "test setup: expected 3 starting + 6 fresh units");
+
+    // Drive the new solvency signal into the insolvent case directly - an
+    // empty national Munitions stockpile (so `munitions_buffer_days` reads
+    // 0, however small the resulting daily demand is) and a `supply_ratio`
+    // matching 近畿府's own measured 36.5%.
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
+    world.faction_mut(faction).supply_ratio = 0.365;
 
     let mut agent = HeuristicAgent::new(faction, 1.15);
     let obs = Observation { faction, world: &world };
@@ -553,6 +571,151 @@ fn heuristic_agent_disbands_when_over_extended() {
     for &u in &disbands {
         assert_eq!(world.unit(u).owner, faction, "must only disband this faction's own units");
     }
+}
+
+/// The specific regression this refinement fixes: a faction only *slightly*
+/// past `unit_cap` must still shed its excess once the economy itself says
+/// it can't keep up, even at an overshoot small enough that the old flat
+/// head-count margin would have waved it through untouched. Uses mvp's
+/// untouched starting industry (`unit_cap` == 9.2, `3.0 + 31/5.0`) rather
+/// than zeroing it out, so the overshoot can be sized precisely: 10 units
+/// clears `cap` but sits under the old `cap * 1.25` (== 11.5) margin -
+/// exactly the 近畿府 shape, where the old trigger never fired because the
+/// head count never got *that* far past the cap, even though the economy
+/// was already failing to feed it.
+/// Checked this fails when broken: reverting the guard to
+/// `total <= cap * 1.25` (dropping the solvency check entirely) makes
+/// `disbands.len()` come back `0`, since `10.0 <= 11.5`.
+#[test]
+fn heuristic_agent_disbands_when_insolvent_even_within_old_head_count_margin() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    // mvp's faction 0 starts with 3 units; + 7 fresh ones = 10. `unit_cap`
+    // sits at 9.2 off mvp's own starting industry (untouched here), so
+    // `10.0` clears `cap` but stays under the old `cap * 1.25` (== 11.5)
+    // margin entirely.
+    push_idle_land_units(&mut world, faction, capital, 7);
+    let total_before: usize = world.units.iter().filter(|u| u.owner == faction && u.alive).count();
+    assert_eq!(total_before, 10, "test setup: expected 3 starting + 7 fresh units");
+
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
+    world.faction_mut(faction).supply_ratio = 0.365;
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    let disbands: Vec<UnitId> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::DisbandUnit { unit } => Some(*unit),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        disbands.len(),
+        1,
+        "an insolvent faction must shed its unit of overshoot even though it never crossed \
+         the old 25% head-count margin: {actions:?}"
+    );
+}
+
+/// The mirror image of the case above: a faction fielding a force well
+/// past `unit_cap` in raw head-count terms - far past even the old 25%
+/// margin - must not disband anything at all as long as its economy is
+/// actually keeping up. This is 北海道方面軍's exact shape on
+/// `scenarios/japan_hex.json`: a huge territory supports a healthy
+/// Munitions stockpile and a comfortable `supply_ratio` even while fielding
+/// several times its bare `unit_cap` floor in units, because the cap here
+/// (an industry-derived *estimate* of sustainable size) is a poor proxy for
+/// whether the force is actually being fed - the direct, measured signal
+/// says it is. Checked this fails when broken: reverting the guard to the
+/// old `total <= cap * DISBAND_UNIT_CAP_MARGIN` (1.25) check alone (with no
+/// solvency condition) makes `disbands.len()` come back non-zero, since 9
+/// units clears `3.0 * 1.25`.
+#[test]
+fn heuristic_agent_does_not_disband_when_solvent_despite_many_units_over_cap() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+        }
+    }
+
+    // Same 9-unit overshoot as `heuristic_agent_disbands_when_over_extended`
+    // - the only difference is solvency, isolating that as the variable
+    // that now decides the outcome.
+    push_idle_land_units(&mut world, faction, capital, 6);
+
+    // A deep Munitions reserve and a comfortable delivery ratio - the
+    // 北海道方面軍 shape: `munitions_buffer_days` comes out far past
+    // `DISBAND_SOLVENCY_BUFFER_DAYS`, and `supply_ratio` sits above
+    // `DISBAND_SOLVENCY_SUPPLY_RATIO`, so the `insolvent` check in
+    // `disband_excess` reads false on both counts.
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 1000.0;
+    world.faction_mut(faction).supply_ratio = 0.9;
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::DisbandUnit { .. })),
+        "a solvent faction must not disband anything, no matter how far past unit_cap its raw \
+         head count sits: {actions:?}"
+    );
+}
+
+/// Distinguishes a *temporarily cut-off* front from genuine insolvency -
+/// design goal explicitly called out for this refinement. A besieged
+/// region's demand goes unserved (`logistics::distribute_supply`'s
+/// `avail[r][f]` is zero for it), which drags `supply_ratio` down exactly
+/// like real insolvency does, but the Munitions that would have gone to
+/// that front is never drawn from the national `Faction::stock` in the
+/// first place (nothing was delivered there), so the buffer behind the
+/// rest of the force stays intact. This test drives exactly that
+/// combination directly - low `supply_ratio`, healthy Munitions stock - and
+/// checks `disband_excess` reads it as "logistics problem, not an economic
+/// one" and leaves the force alone. Checked this fails when broken:
+/// dropping the `munitions_buffer_days(...) < DISBAND_SOLVENCY_BUFFER_DAYS`
+/// half of the `insolvent` check (leaving only the `supply_ratio`
+/// condition) makes `disbands.len()` come back non-zero, since
+/// `supply_ratio` alone already reads as bad here.
+#[test]
+fn heuristic_agent_does_not_gut_itself_when_temporarily_cut_off() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+        }
+    }
+
+    push_idle_land_units(&mut world, faction, capital, 6);
+
+    // Bad delivery ratio (as if a front were cut off) but a deep national
+    // reserve behind it - unlike the insolvent case above, the stockpile is
+    // untouched.
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 1000.0;
+    world.faction_mut(faction).supply_ratio = 0.2;
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::DisbandUnit { .. })),
+        "a faction with a healthy Munitions reserve must not gut its own army just because one \
+         tick's delivery ratio looks bad: {actions:?}"
+    );
 }
 
 /// A faction whose force is within (or only marginally past) `unit_cap`
@@ -583,6 +746,12 @@ fn heuristic_agent_does_not_disband_within_cap() {
 /// never queued at all. Checked this fails when broken: temporarily removed
 /// the `unit_contested` filter from `disband_excess` - the assertion below
 /// then fails (the contested unit appears in `disbands`).
+///
+/// Also drives the solvency signal into the insolvent case directly (as
+/// `heuristic_agent_disbands_when_over_extended` above now does) - zeroed
+/// industry capacity alone no longer implies insolvency under the new,
+/// solvency-driven trigger, so this test's own "still over-extended enough
+/// to disband" precondition needs it spelled out explicitly too.
 #[test]
 fn heuristic_agent_never_disbands_a_contested_unit() {
     let mut world = scenario::build_world();
@@ -594,6 +763,8 @@ fn heuristic_agent_never_disbands_a_contested_unit() {
             region.capacity = [0.0; GOOD_COUNT];
         }
     }
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
+    world.faction_mut(faction).supply_ratio = 0.365;
 
     // One of the two starting units is moved into contact with an enemy at
     // its own capital - the weakest possible target (lowest manpower) so a
