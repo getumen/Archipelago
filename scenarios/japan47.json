@@ -1,0 +1,1775 @@
+{
+  "regions": [
+    {
+      "id": "hokkaido",
+      "name": "北海道",
+      "terrain": "plain",
+      "population": 520.0,
+      "capacity": {
+        "food": 8.299,
+        "energy": 0.502,
+        "steel": 0.132,
+        "machinery": 0.109,
+        "munitions": 0.072,
+        "arms": 0.0
+      },
+      "infrastructure": 0.55,
+      "port": 1.0,
+      "links": [
+        {
+          "to": "aomori",
+          "kind": "strait",
+          "strait_zone": "hoppou"
+        }
+      ]
+    },
+    {
+      "id": "aomori",
+      "name": "青森県",
+      "terrain": "hill",
+      "population": 120.0,
+      "capacity": {
+        "food": 1.915,
+        "energy": 0.116,
+        "steel": 0.03,
+        "machinery": 0.025,
+        "munitions": 0.017,
+        "arms": 0.0
+      },
+      "infrastructure": 0.45,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "hokkaido",
+          "kind": "strait",
+          "strait_zone": "hoppou"
+        },
+        {
+          "to": "iwate",
+          "kind": "rail"
+        },
+        {
+          "to": "akita",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "iwate",
+      "name": "岩手県",
+      "terrain": "hill",
+      "population": 118.0,
+      "capacity": {
+        "food": 1.883,
+        "energy": 0.114,
+        "steel": 0.03,
+        "machinery": 0.025,
+        "munitions": 0.016,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "aomori",
+          "kind": "rail"
+        },
+        {
+          "to": "akita",
+          "kind": "road"
+        },
+        {
+          "to": "miyagi",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "akita",
+      "name": "秋田県",
+      "terrain": "hill",
+      "population": 93.0,
+      "capacity": {
+        "food": 1.484,
+        "energy": 0.09,
+        "steel": 0.024,
+        "machinery": 0.019,
+        "munitions": 0.013,
+        "arms": 0.0
+      },
+      "infrastructure": 0.45,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "aomori",
+          "kind": "rail"
+        },
+        {
+          "to": "iwate",
+          "kind": "road"
+        },
+        {
+          "to": "yamagata",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "miyagi",
+      "name": "宮城県",
+      "terrain": "plain",
+      "population": 230.0,
+      "capacity": {
+        "food": 1.519,
+        "energy": 0.311,
+        "steel": 0.182,
+        "machinery": 0.18,
+        "munitions": 0.095,
+        "arms": 0.01
+      },
+      "infrastructure": 0.65,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "iwate",
+          "kind": "rail"
+        },
+        {
+          "to": "yamagata",
+          "kind": "rail"
+        },
+        {
+          "to": "fukushima",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "yamagata",
+      "name": "山形県",
+      "terrain": "hill",
+      "population": 105.0,
+      "capacity": {
+        "food": 1.676,
+        "energy": 0.101,
+        "steel": 0.027,
+        "machinery": 0.022,
+        "munitions": 0.014,
+        "arms": 0.0
+      },
+      "infrastructure": 0.45,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "akita",
+          "kind": "rail"
+        },
+        {
+          "to": "miyagi",
+          "kind": "rail"
+        },
+        {
+          "to": "fukushima",
+          "kind": "rail"
+        },
+        {
+          "to": "niigata",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "fukushima",
+      "name": "福島県",
+      "terrain": "hill",
+      "population": 180.0,
+      "capacity": {
+        "food": 1.189,
+        "energy": 0.243,
+        "steel": 0.142,
+        "machinery": 0.141,
+        "munitions": 0.075,
+        "arms": 0.008
+      },
+      "infrastructure": 0.65,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "miyagi",
+          "kind": "rail"
+        },
+        {
+          "to": "yamagata",
+          "kind": "rail"
+        },
+        {
+          "to": "niigata",
+          "kind": "road"
+        },
+        {
+          "to": "gunma",
+          "kind": "road"
+        },
+        {
+          "to": "tochigi",
+          "kind": "rail"
+        },
+        {
+          "to": "ibaraki",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "ibaraki",
+      "name": "茨城県",
+      "terrain": "plain",
+      "population": 285.0,
+      "capacity": {
+        "food": 0.941,
+        "energy": 0.66,
+        "steel": 0.857,
+        "machinery": 0.559,
+        "munitions": 0.275,
+        "arms": 0.091
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "fukushima",
+          "kind": "road"
+        },
+        {
+          "to": "tochigi",
+          "kind": "rail"
+        },
+        {
+          "to": "saitama",
+          "kind": "road"
+        },
+        {
+          "to": "chiba",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "tochigi",
+      "name": "栃木県",
+      "terrain": "plain",
+      "population": 190.0,
+      "capacity": {
+        "food": 1.255,
+        "energy": 0.257,
+        "steel": 0.15,
+        "machinery": 0.149,
+        "munitions": 0.079,
+        "arms": 0.008
+      },
+      "infrastructure": 0.65,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "fukushima",
+          "kind": "rail"
+        },
+        {
+          "to": "ibaraki",
+          "kind": "rail"
+        },
+        {
+          "to": "gunma",
+          "kind": "rail"
+        },
+        {
+          "to": "saitama",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "gunma",
+      "name": "群馬県",
+      "terrain": "plain",
+      "population": 190.0,
+      "capacity": {
+        "food": 1.255,
+        "energy": 0.257,
+        "steel": 0.15,
+        "machinery": 0.149,
+        "munitions": 0.079,
+        "arms": 0.008
+      },
+      "infrastructure": 0.65,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "fukushima",
+          "kind": "road"
+        },
+        {
+          "to": "tochigi",
+          "kind": "rail"
+        },
+        {
+          "to": "saitama",
+          "kind": "rail"
+        },
+        {
+          "to": "niigata",
+          "kind": "road"
+        },
+        {
+          "to": "nagano",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "saitama",
+      "name": "埼玉県",
+      "terrain": "plain",
+      "population": 735.0,
+      "capacity": {
+        "food": 2.427,
+        "energy": 1.703,
+        "steel": 2.209,
+        "machinery": 1.442,
+        "munitions": 0.71,
+        "arms": 0.235
+      },
+      "infrastructure": 0.8,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "ibaraki",
+          "kind": "road"
+        },
+        {
+          "to": "tochigi",
+          "kind": "rail"
+        },
+        {
+          "to": "gunma",
+          "kind": "rail"
+        },
+        {
+          "to": "chiba",
+          "kind": "rail"
+        },
+        {
+          "to": "tokyo",
+          "kind": "rail"
+        },
+        {
+          "to": "yamanashi",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "chiba",
+      "name": "千葉県",
+      "terrain": "plain",
+      "population": 628.0,
+      "capacity": {
+        "food": 2.074,
+        "energy": 1.455,
+        "steel": 1.887,
+        "machinery": 1.232,
+        "munitions": 0.607,
+        "arms": 0.201
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "ibaraki",
+          "kind": "rail"
+        },
+        {
+          "to": "saitama",
+          "kind": "rail"
+        },
+        {
+          "to": "tokyo",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "tokyo",
+      "name": "東京都",
+      "terrain": "urban",
+      "population": 1400.0,
+      "capacity": {
+        "food": 0.77,
+        "energy": 2.974,
+        "steel": 1.993,
+        "machinery": 4.028,
+        "munitions": 1.739,
+        "arms": 1.643
+      },
+      "infrastructure": 1.0,
+      "port": 1.5,
+      "links": [
+        {
+          "to": "saitama",
+          "kind": "rail"
+        },
+        {
+          "to": "chiba",
+          "kind": "rail"
+        },
+        {
+          "to": "kanagawa",
+          "kind": "rail"
+        },
+        {
+          "to": "yamanashi",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "kanagawa",
+      "name": "神奈川県",
+      "terrain": "urban",
+      "population": 923.0,
+      "capacity": {
+        "food": 0.508,
+        "energy": 1.961,
+        "steel": 1.314,
+        "machinery": 2.655,
+        "munitions": 1.146,
+        "arms": 1.083
+      },
+      "infrastructure": 0.95,
+      "port": 1.4,
+      "links": [
+        {
+          "to": "tokyo",
+          "kind": "rail"
+        },
+        {
+          "to": "yamanashi",
+          "kind": "road"
+        },
+        {
+          "to": "shizuoka",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "niigata",
+      "name": "新潟県",
+      "terrain": "plain",
+      "population": 215.0,
+      "capacity": {
+        "food": 3.431,
+        "energy": 0.208,
+        "steel": 0.054,
+        "machinery": 0.045,
+        "munitions": 0.03,
+        "arms": 0.0
+      },
+      "infrastructure": 0.45,
+      "port": 0.8,
+      "links": [
+        {
+          "to": "yamagata",
+          "kind": "rail"
+        },
+        {
+          "to": "fukushima",
+          "kind": "road"
+        },
+        {
+          "to": "gunma",
+          "kind": "road"
+        },
+        {
+          "to": "toyama",
+          "kind": "rail"
+        },
+        {
+          "to": "nagano",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "toyama",
+      "name": "富山県",
+      "terrain": "hill",
+      "population": 102.0,
+      "capacity": {
+        "food": 0.674,
+        "energy": 0.138,
+        "steel": 0.081,
+        "machinery": 0.08,
+        "munitions": 0.042,
+        "arms": 0.004
+      },
+      "infrastructure": 0.5,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "niigata",
+          "kind": "rail"
+        },
+        {
+          "to": "ishikawa",
+          "kind": "rail"
+        },
+        {
+          "to": "gifu",
+          "kind": "road"
+        },
+        {
+          "to": "nagano",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "ishikawa",
+      "name": "石川県",
+      "terrain": "hill",
+      "population": 111.0,
+      "capacity": {
+        "food": 0.733,
+        "energy": 0.15,
+        "steel": 0.088,
+        "machinery": 0.087,
+        "munitions": 0.046,
+        "arms": 0.005
+      },
+      "infrastructure": 0.5,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "toyama",
+          "kind": "rail"
+        },
+        {
+          "to": "fukui",
+          "kind": "rail"
+        },
+        {
+          "to": "gifu",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "fukui",
+      "name": "福井県",
+      "terrain": "plain",
+      "population": 75.0,
+      "capacity": {
+        "food": 0.495,
+        "energy": 0.101,
+        "steel": 0.059,
+        "machinery": 0.059,
+        "munitions": 0.031,
+        "arms": 0.003
+      },
+      "infrastructure": 0.5,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "ishikawa",
+          "kind": "rail"
+        },
+        {
+          "to": "gifu",
+          "kind": "road"
+        },
+        {
+          "to": "shiga",
+          "kind": "rail"
+        },
+        {
+          "to": "kyoto",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "yamanashi",
+      "name": "山梨県",
+      "terrain": "mountain",
+      "population": 80.0,
+      "capacity": {
+        "food": 0.44,
+        "energy": 0.062,
+        "steel": 0.02,
+        "machinery": 0.031,
+        "munitions": 0.011,
+        "arms": 0.0
+      },
+      "infrastructure": 0.55,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "saitama",
+          "kind": "road"
+        },
+        {
+          "to": "tokyo",
+          "kind": "road"
+        },
+        {
+          "to": "kanagawa",
+          "kind": "road"
+        },
+        {
+          "to": "shizuoka",
+          "kind": "road"
+        },
+        {
+          "to": "nagano",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "nagano",
+      "name": "長野県",
+      "terrain": "mountain",
+      "population": 202.0,
+      "capacity": {
+        "food": 1.112,
+        "energy": 0.156,
+        "steel": 0.051,
+        "machinery": 0.079,
+        "munitions": 0.028,
+        "arms": 0.0
+      },
+      "infrastructure": 0.55,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "gunma",
+          "kind": "road"
+        },
+        {
+          "to": "niigata",
+          "kind": "road"
+        },
+        {
+          "to": "toyama",
+          "kind": "road"
+        },
+        {
+          "to": "yamanashi",
+          "kind": "road"
+        },
+        {
+          "to": "gifu",
+          "kind": "road"
+        },
+        {
+          "to": "shizuoka",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "gifu",
+      "name": "岐阜県",
+      "terrain": "mountain",
+      "population": 195.0,
+      "capacity": {
+        "food": 1.073,
+        "energy": 0.151,
+        "steel": 0.049,
+        "machinery": 0.077,
+        "munitions": 0.027,
+        "arms": 0.0
+      },
+      "infrastructure": 0.55,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "toyama",
+          "kind": "road"
+        },
+        {
+          "to": "ishikawa",
+          "kind": "road"
+        },
+        {
+          "to": "fukui",
+          "kind": "road"
+        },
+        {
+          "to": "nagano",
+          "kind": "road"
+        },
+        {
+          "to": "shiga",
+          "kind": "rail"
+        },
+        {
+          "to": "aichi",
+          "kind": "rail"
+        },
+        {
+          "to": "mie",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "shizuoka",
+      "name": "静岡県",
+      "terrain": "plain",
+      "population": 360.0,
+      "capacity": {
+        "food": 1.189,
+        "energy": 0.834,
+        "steel": 1.082,
+        "machinery": 0.706,
+        "munitions": 0.348,
+        "arms": 0.115
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "kanagawa",
+          "kind": "rail"
+        },
+        {
+          "to": "yamanashi",
+          "kind": "road"
+        },
+        {
+          "to": "nagano",
+          "kind": "road"
+        },
+        {
+          "to": "aichi",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "aichi",
+      "name": "愛知県",
+      "terrain": "urban",
+      "population": 750.0,
+      "capacity": {
+        "food": 0.413,
+        "energy": 1.593,
+        "steel": 1.068,
+        "machinery": 2.158,
+        "munitions": 0.931,
+        "arms": 0.88
+      },
+      "infrastructure": 0.95,
+      "port": 1.3,
+      "links": [
+        {
+          "to": "gifu",
+          "kind": "rail"
+        },
+        {
+          "to": "shizuoka",
+          "kind": "rail"
+        },
+        {
+          "to": "mie",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "mie",
+      "name": "三重県",
+      "terrain": "plain",
+      "population": 172.0,
+      "capacity": {
+        "food": 0.568,
+        "energy": 0.399,
+        "steel": 0.517,
+        "machinery": 0.337,
+        "munitions": 0.166,
+        "arms": 0.055
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "gifu",
+          "kind": "road"
+        },
+        {
+          "to": "aichi",
+          "kind": "rail"
+        },
+        {
+          "to": "shiga",
+          "kind": "road"
+        },
+        {
+          "to": "nara",
+          "kind": "road"
+        },
+        {
+          "to": "wakayama",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "shiga",
+      "name": "滋賀県",
+      "terrain": "plain",
+      "population": 141.0,
+      "capacity": {
+        "food": 0.931,
+        "energy": 0.191,
+        "steel": 0.112,
+        "machinery": 0.111,
+        "munitions": 0.058,
+        "arms": 0.006
+      },
+      "infrastructure": 0.65,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "fukui",
+          "kind": "rail"
+        },
+        {
+          "to": "gifu",
+          "kind": "rail"
+        },
+        {
+          "to": "mie",
+          "kind": "road"
+        },
+        {
+          "to": "kyoto",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "kyoto",
+      "name": "京都府",
+      "terrain": "urban",
+      "population": 254.0,
+      "capacity": {
+        "food": 0.14,
+        "energy": 0.54,
+        "steel": 0.362,
+        "machinery": 0.731,
+        "munitions": 0.315,
+        "arms": 0.298
+      },
+      "infrastructure": 0.8,
+      "port": 0.4,
+      "links": [
+        {
+          "to": "fukui",
+          "kind": "road"
+        },
+        {
+          "to": "shiga",
+          "kind": "rail"
+        },
+        {
+          "to": "osaka",
+          "kind": "rail"
+        },
+        {
+          "to": "nara",
+          "kind": "rail"
+        },
+        {
+          "to": "hyogo",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "osaka",
+      "name": "大阪府",
+      "terrain": "urban",
+      "population": 878.0,
+      "capacity": {
+        "food": 0.483,
+        "energy": 1.865,
+        "steel": 1.25,
+        "machinery": 2.526,
+        "munitions": 1.09,
+        "arms": 1.031
+      },
+      "infrastructure": 0.95,
+      "port": 1.3,
+      "links": [
+        {
+          "to": "kyoto",
+          "kind": "rail"
+        },
+        {
+          "to": "nara",
+          "kind": "rail"
+        },
+        {
+          "to": "wakayama",
+          "kind": "rail"
+        },
+        {
+          "to": "hyogo",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "hyogo",
+      "name": "兵庫県",
+      "terrain": "urban",
+      "population": 540.0,
+      "capacity": {
+        "food": 0.297,
+        "energy": 1.147,
+        "steel": 0.769,
+        "machinery": 1.554,
+        "munitions": 0.671,
+        "arms": 0.634
+      },
+      "infrastructure": 0.85,
+      "port": 1.4,
+      "links": [
+        {
+          "to": "kyoto",
+          "kind": "rail"
+        },
+        {
+          "to": "osaka",
+          "kind": "rail"
+        },
+        {
+          "to": "okayama",
+          "kind": "rail"
+        },
+        {
+          "to": "tottori",
+          "kind": "road"
+        },
+        {
+          "to": "tokushima",
+          "kind": "strait",
+          "strait_zone": "setouchi"
+        }
+      ]
+    },
+    {
+      "id": "nara",
+      "name": "奈良県",
+      "terrain": "hill",
+      "population": 130.0,
+      "capacity": {
+        "food": 0.859,
+        "energy": 0.176,
+        "steel": 0.103,
+        "machinery": 0.102,
+        "munitions": 0.054,
+        "arms": 0.006
+      },
+      "infrastructure": 0.65,
+      "port": 0.0,
+      "links": [
+        {
+          "to": "mie",
+          "kind": "road"
+        },
+        {
+          "to": "kyoto",
+          "kind": "rail"
+        },
+        {
+          "to": "osaka",
+          "kind": "rail"
+        },
+        {
+          "to": "wakayama",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "wakayama",
+      "name": "和歌山県",
+      "terrain": "hill",
+      "population": 90.0,
+      "capacity": {
+        "food": 0.297,
+        "energy": 0.209,
+        "steel": 0.27,
+        "machinery": 0.177,
+        "munitions": 0.087,
+        "arms": 0.029
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "mie",
+          "kind": "road"
+        },
+        {
+          "to": "osaka",
+          "kind": "rail"
+        },
+        {
+          "to": "nara",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "tottori",
+      "name": "鳥取県",
+      "terrain": "hill",
+      "population": 55.0,
+      "capacity": {
+        "food": 0.878,
+        "energy": 0.053,
+        "steel": 0.014,
+        "machinery": 0.012,
+        "munitions": 0.008,
+        "arms": 0.0
+      },
+      "infrastructure": 0.45,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "hyogo",
+          "kind": "road"
+        },
+        {
+          "to": "okayama",
+          "kind": "rail"
+        },
+        {
+          "to": "shimane",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "shimane",
+      "name": "島根県",
+      "terrain": "hill",
+      "population": 65.0,
+      "capacity": {
+        "food": 1.037,
+        "energy": 0.063,
+        "steel": 0.016,
+        "machinery": 0.014,
+        "munitions": 0.009,
+        "arms": 0.0
+      },
+      "infrastructure": 0.45,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "tottori",
+          "kind": "rail"
+        },
+        {
+          "to": "hiroshima",
+          "kind": "road"
+        },
+        {
+          "to": "yamaguchi",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "okayama",
+      "name": "岡山県",
+      "terrain": "plain",
+      "population": 186.0,
+      "capacity": {
+        "food": 0.614,
+        "energy": 0.431,
+        "steel": 0.559,
+        "machinery": 0.365,
+        "munitions": 0.18,
+        "arms": 0.06
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "hyogo",
+          "kind": "rail"
+        },
+        {
+          "to": "tottori",
+          "kind": "rail"
+        },
+        {
+          "to": "hiroshima",
+          "kind": "rail"
+        },
+        {
+          "to": "kagawa",
+          "kind": "strait",
+          "strait_zone": "setouchi"
+        }
+      ]
+    },
+    {
+      "id": "hiroshima",
+      "name": "広島県",
+      "terrain": "hill",
+      "population": 278.0,
+      "capacity": {
+        "food": 0.918,
+        "energy": 0.644,
+        "steel": 0.836,
+        "machinery": 0.545,
+        "munitions": 0.269,
+        "arms": 0.089
+      },
+      "infrastructure": 0.75,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "shimane",
+          "kind": "road"
+        },
+        {
+          "to": "okayama",
+          "kind": "rail"
+        },
+        {
+          "to": "yamaguchi",
+          "kind": "rail"
+        },
+        {
+          "to": "ehime",
+          "kind": "strait",
+          "strait_zone": "setouchi"
+        }
+      ]
+    },
+    {
+      "id": "yamaguchi",
+      "name": "山口県",
+      "terrain": "hill",
+      "population": 132.0,
+      "capacity": {
+        "food": 0.436,
+        "energy": 0.306,
+        "steel": 0.397,
+        "machinery": 0.259,
+        "munitions": 0.128,
+        "arms": 0.042
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "shimane",
+          "kind": "rail"
+        },
+        {
+          "to": "hiroshima",
+          "kind": "rail"
+        },
+        {
+          "to": "fukuoka",
+          "kind": "tunnel"
+        }
+      ]
+    },
+    {
+      "id": "tokushima",
+      "name": "徳島県",
+      "terrain": "hill",
+      "population": 70.0,
+      "capacity": {
+        "food": 1.117,
+        "energy": 0.068,
+        "steel": 0.018,
+        "machinery": 0.015,
+        "munitions": 0.01,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "kagawa",
+          "kind": "rail"
+        },
+        {
+          "to": "kochi",
+          "kind": "road"
+        },
+        {
+          "to": "ehime",
+          "kind": "road"
+        },
+        {
+          "to": "hyogo",
+          "kind": "strait",
+          "strait_zone": "setouchi"
+        }
+      ]
+    },
+    {
+      "id": "kagawa",
+      "name": "香川県",
+      "terrain": "hill",
+      "population": 93.0,
+      "capacity": {
+        "food": 0.614,
+        "energy": 0.126,
+        "steel": 0.074,
+        "machinery": 0.073,
+        "munitions": 0.039,
+        "arms": 0.004
+      },
+      "infrastructure": 0.65,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "tokushima",
+          "kind": "rail"
+        },
+        {
+          "to": "ehime",
+          "kind": "rail"
+        },
+        {
+          "to": "okayama",
+          "kind": "strait",
+          "strait_zone": "setouchi"
+        }
+      ]
+    },
+    {
+      "id": "ehime",
+      "name": "愛媛県",
+      "terrain": "hill",
+      "population": 130.0,
+      "capacity": {
+        "food": 0.859,
+        "energy": 0.176,
+        "steel": 0.103,
+        "machinery": 0.102,
+        "munitions": 0.054,
+        "arms": 0.006
+      },
+      "infrastructure": 0.65,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "tokushima",
+          "kind": "road"
+        },
+        {
+          "to": "kagawa",
+          "kind": "rail"
+        },
+        {
+          "to": "kochi",
+          "kind": "road"
+        },
+        {
+          "to": "hiroshima",
+          "kind": "strait",
+          "strait_zone": "setouchi"
+        }
+      ]
+    },
+    {
+      "id": "kochi",
+      "name": "高知県",
+      "terrain": "hill",
+      "population": 68.0,
+      "capacity": {
+        "food": 1.085,
+        "energy": 0.066,
+        "steel": 0.017,
+        "machinery": 0.014,
+        "munitions": 0.009,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "tokushima",
+          "kind": "road"
+        },
+        {
+          "to": "ehime",
+          "kind": "road"
+        }
+      ]
+    },
+    {
+      "id": "fukuoka",
+      "name": "福岡県",
+      "terrain": "urban",
+      "population": 510.0,
+      "capacity": {
+        "food": 0.281,
+        "energy": 1.083,
+        "steel": 0.726,
+        "machinery": 1.467,
+        "munitions": 0.633,
+        "arms": 0.599
+      },
+      "infrastructure": 0.85,
+      "port": 1.2,
+      "links": [
+        {
+          "to": "yamaguchi",
+          "kind": "tunnel"
+        },
+        {
+          "to": "saga",
+          "kind": "rail"
+        },
+        {
+          "to": "oita",
+          "kind": "rail"
+        },
+        {
+          "to": "kumamoto",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "saga",
+      "name": "佐賀県",
+      "terrain": "hill",
+      "population": 80.0,
+      "capacity": {
+        "food": 1.277,
+        "energy": 0.077,
+        "steel": 0.02,
+        "machinery": 0.017,
+        "munitions": 0.011,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "fukuoka",
+          "kind": "rail"
+        },
+        {
+          "to": "nagasaki",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "nagasaki",
+      "name": "長崎県",
+      "terrain": "hill",
+      "population": 128.0,
+      "capacity": {
+        "food": 0.845,
+        "energy": 0.173,
+        "steel": 0.101,
+        "machinery": 0.1,
+        "munitions": 0.053,
+        "arms": 0.005
+      },
+      "infrastructure": 0.65,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "saga",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "kumamoto",
+      "name": "熊本県",
+      "terrain": "plain",
+      "population": 171.0,
+      "capacity": {
+        "food": 2.729,
+        "energy": 0.165,
+        "steel": 0.043,
+        "machinery": 0.036,
+        "munitions": 0.024,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "fukuoka",
+          "kind": "rail"
+        },
+        {
+          "to": "oita",
+          "kind": "road"
+        },
+        {
+          "to": "miyazaki",
+          "kind": "road"
+        },
+        {
+          "to": "kagoshima",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "oita",
+      "name": "大分県",
+      "terrain": "plain",
+      "population": 111.0,
+      "capacity": {
+        "food": 0.367,
+        "energy": 0.257,
+        "steel": 0.334,
+        "machinery": 0.218,
+        "munitions": 0.107,
+        "arms": 0.036
+      },
+      "infrastructure": 0.8,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "fukuoka",
+          "kind": "rail"
+        },
+        {
+          "to": "kumamoto",
+          "kind": "road"
+        },
+        {
+          "to": "miyazaki",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "miyazaki",
+      "name": "宮崎県",
+      "terrain": "plain",
+      "population": 105.0,
+      "capacity": {
+        "food": 1.676,
+        "energy": 0.101,
+        "steel": 0.027,
+        "machinery": 0.022,
+        "munitions": 0.014,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "kumamoto",
+          "kind": "road"
+        },
+        {
+          "to": "oita",
+          "kind": "rail"
+        },
+        {
+          "to": "kagoshima",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "kagoshima",
+      "name": "鹿児島県",
+      "terrain": "hill",
+      "population": 155.0,
+      "capacity": {
+        "food": 2.474,
+        "energy": 0.15,
+        "steel": 0.039,
+        "machinery": 0.032,
+        "munitions": 0.021,
+        "arms": 0.0
+      },
+      "infrastructure": 0.6,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "kumamoto",
+          "kind": "rail"
+        },
+        {
+          "to": "miyazaki",
+          "kind": "rail"
+        },
+        {
+          "to": "okinawa",
+          "kind": "strait",
+          "strait_zone": "toshina"
+        }
+      ]
+    },
+    {
+      "id": "okinawa",
+      "name": "沖縄県",
+      "terrain": "hill",
+      "population": 146.0,
+      "capacity": {
+        "food": 0.964,
+        "energy": 0.197,
+        "steel": 0.115,
+        "machinery": 0.115,
+        "munitions": 0.06,
+        "arms": 0.006
+      },
+      "infrastructure": 0.65,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "kagoshima",
+          "kind": "strait",
+          "strait_zone": "toshina"
+        }
+      ]
+    }
+  ],
+  "sea_zones": [
+    {
+      "id": "hoppou",
+      "name": "北方海域",
+      "coast": [
+        "hokkaido",
+        "aomori"
+      ],
+      "adjacent": [
+        "taiheiyo_kita",
+        "nihonkai_kita"
+      ]
+    },
+    {
+      "id": "taiheiyo_kita",
+      "name": "太平洋北",
+      "coast": [
+        "iwate",
+        "miyagi",
+        "fukushima",
+        "ibaraki",
+        "chiba",
+        "tokyo",
+        "kanagawa"
+      ],
+      "adjacent": [
+        "hoppou",
+        "taiheiyo_chuo"
+      ]
+    },
+    {
+      "id": "taiheiyo_chuo",
+      "name": "太平洋中",
+      "coast": [
+        "shizuoka",
+        "aichi",
+        "mie",
+        "wakayama"
+      ],
+      "adjacent": [
+        "taiheiyo_kita",
+        "taiheiyo_minami",
+        "setouchi"
+      ]
+    },
+    {
+      "id": "taiheiyo_minami",
+      "name": "太平洋南",
+      "coast": [
+        "tokushima",
+        "kochi",
+        "oita",
+        "miyazaki"
+      ],
+      "adjacent": [
+        "taiheiyo_chuo",
+        "setouchi",
+        "toshina"
+      ]
+    },
+    {
+      "id": "setouchi",
+      "name": "瀬戸内海",
+      "coast": [
+        "osaka",
+        "hyogo",
+        "okayama",
+        "hiroshima",
+        "yamaguchi",
+        "kagawa",
+        "ehime",
+        "tokushima"
+      ],
+      "adjacent": [
+        "taiheiyo_chuo",
+        "taiheiyo_minami",
+        "nihonkai_minami",
+        "toshina"
+      ]
+    },
+    {
+      "id": "nihonkai_kita",
+      "name": "日本海北部",
+      "coast": [
+        "akita",
+        "yamagata",
+        "niigata"
+      ],
+      "adjacent": [
+        "hoppou",
+        "nihonkai_minami"
+      ]
+    },
+    {
+      "id": "nihonkai_minami",
+      "name": "日本海南部",
+      "coast": [
+        "toyama",
+        "ishikawa",
+        "fukui",
+        "kyoto",
+        "tottori",
+        "shimane"
+      ],
+      "adjacent": [
+        "nihonkai_kita",
+        "setouchi",
+        "toshina"
+      ]
+    },
+    {
+      "id": "toshina",
+      "name": "東シナ海",
+      "coast": [
+        "fukuoka",
+        "saga",
+        "nagasaki",
+        "kumamoto",
+        "kagoshima",
+        "okinawa"
+      ],
+      "adjacent": [
+        "taiheiyo_minami",
+        "setouchi",
+        "nihonkai_minami"
+      ]
+    }
+  ],
+  "factions": [
+    {
+      "id": "hokuto_rengou",
+      "name": "北方連合",
+      "capital": "miyagi",
+      "regions": [
+        "hokkaido",
+        "aomori",
+        "iwate",
+        "akita",
+        "miyagi",
+        "yamagata",
+        "fukushima"
+      ]
+    },
+    {
+      "id": "kanto_fu",
+      "name": "関東府",
+      "capital": "tokyo",
+      "regions": [
+        "ibaraki",
+        "tochigi",
+        "gunma",
+        "saitama",
+        "chiba",
+        "tokyo",
+        "kanagawa"
+      ]
+    },
+    {
+      "id": "chubu_domei",
+      "name": "中部同盟",
+      "capital": "aichi",
+      "regions": [
+        "niigata",
+        "toyama",
+        "ishikawa",
+        "fukui",
+        "yamanashi",
+        "nagano",
+        "gifu",
+        "shizuoka",
+        "aichi"
+      ]
+    },
+    {
+      "id": "kinki_fu",
+      "name": "近畿府",
+      "capital": "osaka",
+      "regions": [
+        "mie",
+        "shiga",
+        "kyoto",
+        "osaka",
+        "hyogo",
+        "nara",
+        "wakayama"
+      ]
+    },
+    {
+      "id": "seinihon_domei",
+      "name": "西日本同盟",
+      "capital": "fukuoka",
+      "regions": [
+        "tottori",
+        "shimane",
+        "okayama",
+        "hiroshima",
+        "yamaguchi",
+        "fukuoka",
+        "saga",
+        "nagasaki",
+        "kumamoto",
+        "oita",
+        "miyazaki",
+        "kagoshima",
+        "okinawa"
+      ]
+    },
+    {
+      "id": "shikoku_rengou",
+      "name": "四国連合",
+      "capital": "ehime",
+      "regions": [
+        "tokushima",
+        "kagawa",
+        "ehime",
+        "kochi"
+      ]
+    }
+  ]
+}

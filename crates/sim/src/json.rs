@@ -89,7 +89,13 @@ impl Value {
     /// already applied to the LLM doctrine parser's `to_faction`/`to_region`
     /// (`crates/agents/src/llm.rs`) for exactly this defect shape.
     pub fn as_u64(&self) -> Option<u64> {
-        self.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0).map(|n| n as u64)
+        // `u64::MAX as f64` rounds *up* to exactly `2^64` (`u64::MAX` itself
+        // isn't representable as an `f64`), so a `<=` bound here would admit
+        // `n == 2^64` and the `as u64` cast below would then saturate to
+        // `u64::MAX` for it - the exact defect this bound exists to close.
+        // Strict `<` excludes that one value; every accepted `n` is then
+        // `< 2^64` and the cast never saturates.
+        self.as_f64().filter(|n| n.is_finite() && *n >= 0.0 && *n < u64::MAX as f64 && n.fract() == 0.0).map(|n| n as u64)
     }
 
     /// See `as_u64`'s doc - same integrality requirement, bounded to `u32`.
@@ -479,5 +485,26 @@ mod tests {
         for bad in ["", "{", "[1,2", "\"unterminated", "{\"a\":}", "nul", "12x"] {
             assert!(parse(bad, 32).is_err(), "expected error for {bad:?}");
         }
+    }
+
+    /// `as_u64` must reject a huge finite integer-valued `f64` rather than
+    /// silently saturating it to `u64::MAX` via the `as u64` cast - the same
+    /// upper-bound discipline `as_u32` already applies against `u32::MAX`.
+    /// Regression for a review finding: the bound used to be missing
+    /// entirely, so `1e30` (finite, integral, wildly out of range) passed
+    /// through as `Some(u64::MAX)` instead of `None`.
+    #[test]
+    fn as_u64_rejects_out_of_range_values() {
+        assert_eq!(Value::Number(1e30).as_u64(), None);
+        assert_eq!(Value::Number(f64::MAX).as_u64(), None);
+        // The exact boundary: `u64::MAX as f64` rounds up to `2^64`, which
+        // itself must still be rejected (it would saturate on cast), while
+        // the largest `f64` strictly below `2^64` must still be accepted.
+        assert_eq!(Value::Number(u64::MAX as f64).as_u64(), None);
+        let largest_valid = 18_446_744_073_709_549_568.0f64; // 2^64 - 2048
+        assert_eq!(Value::Number(largest_valid).as_u64(), Some(largest_valid as u64));
+        // Ordinary values still round-trip.
+        assert_eq!(Value::Number(42.0).as_u64(), Some(42));
+        assert_eq!(Value::Number(0.0).as_u64(), Some(0));
     }
 }

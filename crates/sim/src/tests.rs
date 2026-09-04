@@ -26,7 +26,7 @@ use crate::rng::Rng;
 use crate::scenario;
 use crate::sim::Simulation;
 use crate::trade;
-use crate::world::{Domain, Station};
+use crate::world::{Domain, Station, World};
 
 #[test]
 fn supply_corridor_cut() {
@@ -4104,4 +4104,322 @@ fn default_scenario_dimensions_match_embedded_json() {
     assert_eq!(world.regions.len(), scenario::REGION_COUNT);
     assert_eq!(world.sea_zones.len(), scenario::SEA_ZONE_COUNT);
     assert_eq!(world.factions.len(), scenario::FACTION_COUNT);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6B (docs/phase6-spec.md "Stage 6B — 47 都道府県マップ"):
+// `scenarios/japan47.json`, the 47-prefecture scale-up of the 10-region MVP
+// map. `cargo test` runs with this crate's own directory as the working
+// directory, so the path below (not `scenarios/mvp.json`'s `include_str!`)
+// is relative to `crates/sim/`, exactly like `apps/headless/tests/
+// scenario_integration.rs`'s own `--scenario` argument.
+// ---------------------------------------------------------------------------
+
+const JAPAN47_PATH: &str = "../../scenarios/japan47.json";
+
+fn load_japan47_str() -> String {
+    std::fs::read_to_string(JAPAN47_PATH).expect("scenarios/japan47.json must exist and be readable")
+}
+
+/// Stage 6B acceptance test: `scenarios/japan47.json` passes every rule
+/// `Scenario::validate` enforces (non-empty, ids resolve, links are
+/// bidirectional and internally consistent, every faction owns territory,
+/// the region graph is connected, sea zone coasts name real regions) - the
+/// same "検証を通る" bullet Stage 6A's own `invalid_scenario_is_rejected`
+/// guards the *rules* for; this test guards that the authored *data*
+/// actually satisfies them at 47-region scale.
+#[test]
+fn japan47_is_valid() {
+    let scenario = scenario::Scenario::parse(&load_japan47_str()).expect("scenarios/japan47.json must be valid JSON matching the scenario schema");
+    scenario.validate().expect("scenarios/japan47.json must pass every Scenario::validate rule");
+    assert_eq!(scenario.regions.len(), 47, "expected exactly 47 prefectures");
+    assert!(
+        scenario.sea_zones.len() >= 6 && scenario.sea_zones.len() <= 8,
+        "docs/phase6-spec.md Stage 6B: 海域は6〜8程度, got {}",
+        scenario.sea_zones.len()
+    );
+    assert!(
+        scenario.factions.len() >= 6 && scenario.factions.len() <= 8,
+        "docs/phase6-spec.md Stage 6B: 勢力数を増やして6〜8勢力とする, got {}",
+        scenario.factions.len()
+    );
+}
+
+/// Stage 6B acceptance test: 720 simulated days must run to completion on
+/// the 47-region map without panicking - the same bare `Simulation::step`
+/// loop `determinism` above already exercises on the embedded 10-region
+/// scenario, just for the full MVP run length instead of 200 days. No
+/// agent actions are applied (`crates/sim` cannot depend on
+/// `archipelago-agents`) - `apps/headless`'s own `--scenario
+/// scenarios/japan47.json --days 720` run (with real `HeuristicAgent`
+/// decisions) is this test's integration-level companion.
+#[test]
+fn japan47_completes_720_days() {
+    let world = scenario::load_str(&load_japan47_str()).expect("scenarios/japan47.json must build a valid World");
+    let mut sim = Simulation::with_world(world, 1);
+    for _ in 0..720 {
+        sim.step();
+    }
+    assert_eq!(sim.world.day, 720);
+}
+
+/// Stage 6B's key regression guard (docs/phase6-spec.md "japan47_chokepoints_
+/// still_bind"): Phase 2's chokepoint design ("回廊を断つと奥が枯れる") must
+/// still hold at 47-region scale for all three deliberately-placed
+/// chokepoints - Kanmon (山口—福岡, `Tunnel`), Seikan (青森—北海道,
+/// `Strait`), and the central highlands (長野・岐阜, `Road`/`Mountain`).
+///
+/// External code review fix (P2): the original version of this test flipped
+/// the target region's *owner* to "cut" every corridor. `recompute_supply`
+/// refuses to relay across a faction boundary unconditionally (`if
+/// world.regions[j].owner != owner_i { continue }`), so that always zeroed
+/// supply regardless of link kind, `max_throughput`, sea control, or
+/// whether an alternate route existed - the test could not fail even if the
+/// chokepoint mechanic were completely broken. This version keeps ownership
+/// unchanged throughout and instead drives the *actual* mechanism each
+/// chokepoint is supposed to bind through:
+///   - Seikan (`Strait`): enemy sea control over 北方海域, via
+///     `naval::strait_factor` - exactly how a real blockade throttles a
+///     strait link (docs/phase2-spec.md "1. 海峡リンクの遮断").
+///   - Kanmon (`Tunnel`, deliberately blockade-immune): its own low
+///     `max_throughput` as the binding cap, an enemy landing force holding
+///     福岡 (contested, not captured - `recompute_supply`'s `contested[i]`
+///     skip) as the sever, and an explicit check that sea control leaves it
+///     untouched.
+///   - Central highlands (`Road`, no `strait_zone` at all): an enemy force
+///     holding both 長野 and 岐阜 (again contested, not captured), which
+///     blocks them from relaying onward exactly like a real siege would,
+///     with no ownership change anywhere.
+/// `isolate_single_source` (below) still boosts one region into a saturated
+/// source and zeroes every other same-faction region's own base, so
+/// whatever the target region receives remains provably attributable to
+/// relay across the corridor under test, not some other region's own idle
+/// production.
+#[test]
+fn japan47_chokepoints_still_bind() {
+    let base_world = || scenario::load_str(&load_japan47_str()).expect("scenarios/japan47.json must build a valid World");
+
+    fn id_of(ids: &[String], target: &str) -> RegionId {
+        let i = ids.iter().position(|id| id == target).expect("region id must exist in scenarios/japan47.json");
+        RegionId(i as u32)
+    }
+
+    fn zone_id_of(ids: &[String], target: &str) -> SeaZoneId {
+        let i = ids.iter().position(|id| id == target).expect("sea zone id must exist in scenarios/japan47.json");
+        SeaZoneId(i as u32)
+    }
+
+    // Zeroes every region owned by `source`'s faction *except* `source`
+    // itself, then boosts `source` into a saturated supply base. Every
+    // faction here spans several prefectures - unlike mvp's 10-region map,
+    // where a chokepoint's two sides were each a single region - so without
+    // this, a downstream region's own (unboosted, unzeroed) local
+    // `supply_source` would keep contributing something after the corridor
+    // is cut, masking whether the cut actually mattered. With it, `source`
+    // is provably the *only* thing feeding the rest of the faction, so
+    // whatever the target region receives is entirely attributable to
+    // relay across the corridor being tested.
+    fn isolate_single_source(world: &mut World, source: RegionId) {
+        let faction = world.region(source).owner;
+        for i in 0..world.regions.len() {
+            let r = RegionId(i as u32);
+            if r != source && world.region(r).owner == faction {
+                world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+                world.region_mut(r).port = 0.0;
+            }
+        }
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(source).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(source).infrastructure = 1.0;
+    }
+
+    // Stations a single foreign, at-war unit in `region` - enough to make
+    // `World::has_enemy_units`/`recompute_supply`'s `contested[i]` true -
+    // without touching `Region::owner`. This is what actually stops a
+    // region from relaying supply onward per `recompute_supply`'s `if
+    // contested[i] { continue }`; it does not stop the region from itself
+    // still receiving whatever a non-contested neighbor relays into it,
+    // which is exactly the "corridor besieged, not captured" case this test
+    // wants for Kanmon/central-highlands (as opposed to Seikan, where the
+    // real mechanism under test is sea control, not land contest).
+    fn contest_with_enemy(world: &mut World, region: RegionId) {
+        let owner = world.region(region).owner;
+        let enemy = FactionId((owner.0 + 1) % world.factions.len() as u32);
+        let id = crate::ids::UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner: enemy,
+            name: "Enemy Raiding Force".to_string(),
+            station: Station::Region(region),
+            movement: None,
+            manpower: 1.0,
+            equipment: 1.0,
+            organization: 100.0,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+        });
+    }
+
+    // Gives `enemy` total (1.0) control of `zone`, every other faction 0.0 -
+    // `naval::strait_factor`/`SeaZone::enemy_control_max` then read this
+    // directly, the same shape `tick_sea_control` itself would produce if
+    // `enemy`'s fleet were the only power present.
+    fn dominate_zone(world: &mut World, zone: SeaZoneId, enemy: FactionId) {
+        let mut control = vec![0.0f32; world.factions.len()];
+        control[enemy.index()] = 1.0;
+        world.sea_zone_mut(zone).control = control;
+    }
+
+    // Region/sea-zone ids in file order = RegionId/SeaZoneId assignment
+    // order (`Scenario::build_world`'s doc), so recover both id->index
+    // tables once from the raw scenario, the same way `Scenario::
+    // build_world` itself does.
+    let scenario = scenario::Scenario::parse(&load_japan47_str()).unwrap();
+    let ids: Vec<String> = scenario.regions.iter().map(|r| r.id.clone()).collect();
+    let zone_ids: Vec<String> = scenario.sea_zones.iter().map(|z| z.id.clone()).collect();
+
+    // 1. Seikan (青森—北海道 Strait, zone 北方海域/`hoppou`): 青森 is the
+    //    sole source for all of 北方連合. 北海道's *only* link is this
+    //    strait, so enemy sea control there (`naval::strait_factor` -> 0)
+    //    must starve it - ownership of 北海道 never changes.
+    {
+        let aomori = id_of(&ids, "aomori");
+        let hokkaido = id_of(&ids, "hokkaido");
+        let hoppou = zone_id_of(&zone_ids, "hoppou");
+
+        let mut world = base_world();
+        isolate_single_source(&mut world, aomori);
+        logistics::recompute_supply(&mut world);
+        let open = world.supply[hokkaido.index()];
+
+        let mut cut = base_world();
+        isolate_single_source(&mut cut, aomori);
+        let owner = cut.region(aomori).owner;
+        let enemy = FactionId((owner.0 + 1) % cut.factions.len() as u32);
+        dominate_zone(&mut cut, hoppou, enemy);
+        logistics::recompute_supply(&mut cut);
+        let severed = cut.supply[hokkaido.index()];
+
+        assert_eq!(cut.region(hokkaido).owner, owner, "test setup requires ownership to stay unchanged");
+        assert!(open > 0.0, "sanity: Seikan should relay something when intact: {open}");
+        assert!(
+            severed < open * 0.1,
+            "enemy sea control over 北方海域 must starve 北海道's relayed supply without touching ownership: open={open}, severed={severed}"
+        );
+    }
+
+    // 2. Kanmon (山口—福岡 Tunnel, deliberately blockade-immune - no
+    //    `strait_zone`): 山口 is the sole source for all of 西日本同盟
+    //    (spanning both 中国 and 九州).
+    {
+        let yamaguchi = id_of(&ids, "yamaguchi");
+        let fukuoka = id_of(&ids, "fukuoka");
+        let kagoshima = id_of(&ids, "kagoshima");
+        // Sea zones actually touching the corridor's two ends, used only for
+        // the immunity check below - `setouchi` faces 山口, `toshina` faces
+        // 福岡/鹿児島.
+        let setouchi = zone_id_of(&zone_ids, "setouchi");
+        let toshina = zone_id_of(&zone_ids, "toshina");
+
+        let mut world = base_world();
+        isolate_single_source(&mut world, yamaguchi);
+        logistics::recompute_supply(&mut world);
+        let open_fukuoka = world.supply[fukuoka.index()];
+        let open_kagoshima = world.supply[kagoshima.index()];
+
+        assert!(open_kagoshima > 0.0, "sanity: Kanmon should relay something into Kyushu when intact: {open_kagoshima}");
+
+        // 2a. Its low `max_throughput` (8.0, versus a Rail link's 25.0) is
+        //     what actually binds - even with 山口 saturated far past what
+        //     any single link could carry, 福岡's inbound supply cannot
+        //     exceed the tunnel's own ceiling.
+        let tunnel_cap = crate::world::LinkKind::Tunnel.max_throughput();
+        assert!(
+            open_fukuoka <= tunnel_cap + 0.05,
+            "Kanmon's max_throughput ({tunnel_cap}) must cap what reaches 福岡 even from a saturated source: open_fukuoka={open_fukuoka}"
+        );
+        assert!(
+            (open_fukuoka - tunnel_cap).abs() < 0.5,
+            "with 山口 saturated, 福岡's inbound supply should sit at (not far below) Kanmon's max_throughput ceiling \
+             of {tunnel_cap}, proving the tunnel - not downstream Kyushu rail (max_throughput 25.0) - is what binds: \
+             open_fukuoka={open_fukuoka}"
+        );
+
+        // 2b. An enemy force holding 福岡 (contested, not captured) severs
+        //     the rest of Kyushu from 山口 - ownership never changes.
+        let mut cut = base_world();
+        isolate_single_source(&mut cut, yamaguchi);
+        let owner = cut.region(yamaguchi).owner;
+        contest_with_enemy(&mut cut, fukuoka);
+        logistics::recompute_supply(&mut cut);
+        let severed = cut.supply[kagoshima.index()];
+
+        assert_eq!(cut.region(fukuoka).owner, owner, "test setup requires ownership to stay unchanged");
+        assert!(
+            severed < open_kagoshima * 0.1,
+            "an enemy force holding 福岡 must starve the rest of Kyushu without capturing it: \
+             open={open_kagoshima}, severed={severed}"
+        );
+
+        // 2c. Immunity, the deliberate flip side of 2b (docs/phase2-spec.md
+        //     "関門トンネルが封鎖の影響を受けないのは意図的である"): total
+        //     enemy sea control over *both* zones the corridor touches must
+        //     leave Kyushu's supply untouched, because the tunnel names no
+        //     `strait_zone` for `naval::strait_factor` to throttle.
+        let mut blockaded = base_world();
+        isolate_single_source(&mut blockaded, yamaguchi);
+        let enemy = FactionId((owner.0 + 1) % blockaded.factions.len() as u32);
+        dominate_zone(&mut blockaded, setouchi, enemy);
+        dominate_zone(&mut blockaded, toshina, enemy);
+        logistics::recompute_supply(&mut blockaded);
+        let under_blockade = blockaded.supply[kagoshima.index()];
+
+        assert!(
+            under_blockade > open_kagoshima * 0.9,
+            "Kanmon must stay immune to sea control by design - total enemy control of the zones either end \
+             faces must not throttle it: open={open_kagoshima}, under_blockade={under_blockade}"
+        );
+    }
+
+    // 3. Central highlands (長野・岐阜, Road - no `strait_zone` at all):
+    //    愛知 is the sole source for all of 中部同盟. 愛知 has no direct
+    //    link to 石川's Hokuriku cluster (新潟/富山/石川/福井) at all - every
+    //    route runs through 岐阜 directly, or through 静岡->長野. An enemy
+    //    force holding both 長野 and 岐阜 (contested, not captured) blocks
+    //    both from relaying onward, leaving Hokuriku with no alternate
+    //    route and no ownership change anywhere.
+    {
+        let aichi = id_of(&ids, "aichi");
+        let nagano = id_of(&ids, "nagano");
+        let gifu = id_of(&ids, "gifu");
+        let ishikawa = id_of(&ids, "ishikawa");
+
+        let mut world = base_world();
+        isolate_single_source(&mut world, aichi);
+        logistics::recompute_supply(&mut world);
+        let open = world.supply[ishikawa.index()];
+
+        let mut cut = base_world();
+        isolate_single_source(&mut cut, aichi);
+        let owner = cut.region(aichi).owner;
+        contest_with_enemy(&mut cut, nagano);
+        contest_with_enemy(&mut cut, gifu);
+        logistics::recompute_supply(&mut cut);
+        let severed = cut.supply[ishikawa.index()];
+
+        assert_eq!(cut.region(nagano).owner, owner, "test setup requires ownership to stay unchanged");
+        assert_eq!(cut.region(gifu).owner, owner, "test setup requires ownership to stay unchanged");
+        assert!(open > 0.0, "sanity: 石川 should receive relayed supply via 長野/岐阜 when intact: {open}");
+        assert!(
+            severed < open * 0.1,
+            "an enemy force holding both 長野 and 岐阜 must starve Hokuriku's relayed supply, \
+             with no alternate route quietly carrying it: open={open}, severed={severed}"
+        );
+    }
 }
