@@ -124,18 +124,85 @@ features = ["bevy_winit", "bevy_render", "bevy_core_pipeline",
 
 ---
 
-## Stage 7B — 遊ぶ（概要）
+## Stage 7B — 遊ぶ
 
-- `HumanAgent` を `crates/agents` に実装する。UI から集めた `Action` を返すだけの
-  薄いもので、Bevy には依存しない
-- 地域と部隊を選択して命令を出す。移動・徴募・補充・建設・政策・条約提案
-- プレイヤーが担当する勢力を起動時に選ぶ。残りは `HeuristicAgent`
-- 不正な命令は UI 上で理由を表示する。`Simulation::apply` の
-  `ActionError` をそのまま見せる
+企画書 §14 の `HumanAgent` を実装し、人間がプレイヤーとして参加できるようにする。
 
-詳細は 7A 着地後に確定する。
+### HumanAgent
 
----
+```rust
+pub struct HumanAgent {
+    faction: FactionId,
+    queue: Vec<Action>,   // UI が積み、decide() が吐き出す
+}
+```
+
+- `crates/agents` に置く。**Bevy に依存しない。** UI から `Action` を受け取り、
+  `decide()` でそれを返すだけの薄いもの
+- 人間も AI と同じ `Agent` トレイトを通る。行動は `Simulation::apply` の
+  検証を通り、不正なら `ActionError` になる。**人間だけの特権的な経路を作らない**
+- 起動時に `--play <勢力名または id>` で担当勢力を選ぶ。残りは `HeuristicAgent`
+- `--play` を指定しなければ従来どおり全勢力が AI（観戦モード）
+
+### 操作
+
+選択と命令はマップ上で完結させる。
+
+| 操作 | 結果 |
+|---|---|
+| 自国地域をクリック | 選択。その地域の部隊一覧を表示 |
+| 部隊をクリック | 部隊を選択（複数選択可） |
+| 選択中に隣接地域をクリック | 移動命令 |
+| 自国地域を右クリック | その地域で可能な命令のメニュー（徴募・建設） |
+| 選択解除 | `Esc` |
+
+キーボードで政策を変更する。
+
+- 徴兵率・配給率・生産優先度・物流優先度・輸入計画・国家方針
+- 条約の提案・受諾・拒否は外交パネルから
+
+### 命令の可否を隠さない
+
+プレイヤーが出した命令が通らなかったとき、**理由をそのまま見せる**。
+`Simulation::apply` が返す `ActionError` を日本語にして UI に出す
+（「敵部隊がいるため移動できない」「装備が足りない」「隣接していない」）。
+
+これは企画書 §2 の主題に直結する。なぜ動けないのかが分からなければ、
+補給と兵站を考える動機が生まれない。
+
+### 時間の進め方
+
+- `--play` 指定時は**一時停止で開始する**
+- プレイヤーが命令を出してから `Space` で進める
+- 速度は観戦時と同じ（1x / 5x / 20x）
+
+### 決定論
+
+プレイヤー入力が入っても決定論は保たれること。
+
+- `--record <path>` で、日ごとのプレイヤー行動を記録する
+- `--replay <path>` で、記録した行動列を再生する
+- **同じ seed と同じ記録なら、必ず同じ結果になること**
+
+これは 7B の回帰ガードであり、同時に「対戦のリプレイ」「不具合の再現」
+「学習データの採取」の基盤にもなる。
+
+### Stage 7B の受け入れ基準
+
+- `cargo build --workspace` 警告 0、`cargo test --workspace` 全通過
+- `cargo tree -p archipelago-sim` が空のまま
+- `crates/agents` が Bevy に依存しないこと
+- `scenarios/mvp.json` のハッシュが不変
+- 新規テスト
+  - `human_agent_actions_go_through_validation`: `HumanAgent` が積んだ不正な
+    行動が `ActionError` になり、状態が変わらない
+  - `recorded_play_replays_identically`: 記録した行動列の再生が
+    バイト単位で同じ最終状態になる（**決定論の回帰ガード**）
+  - `human_agent_is_bevy_free`: `crates/agents` の依存に bevy が入らない
+    （`cargo tree` を使わずコンパイル時に担保できる形でよい）
+- `cargo run -p archipelago-game -- --play 0` で東方連合を操作でき、
+  部隊を動かして敵地を占領できる
+- 不正な命令を出すと理由が画面に出る
 
 ## Stage 7C — 詰める（概要）
 

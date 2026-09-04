@@ -14,16 +14,33 @@ mod sim_control;
 mod ui;
 mod visuals;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use bevy::prelude::*;
 
 pub use screenshot::ScreenshotConfig;
 
+use archipelago_sim::action::Action;
+use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use archipelago_sim::world::World as SimWorld;
 
 use crate::sim_driver::{SimDriver, Speed};
+
+/// Stage 7B (docs/phase7-spec.md "Stage 7B — 遊ぶ"): `--play`/`--record`/
+/// `--replay`, resolved by `main.rs` before `run` is ever called (faction
+/// name/index lookup and `--replay` file parsing both need the loaded
+/// `World`, which `main.rs` already has in hand).
+pub struct PlayConfig {
+    pub player: FactionId,
+    /// `--record <path>`: where to write the player's per-day actions.
+    /// `None` when `--record` wasn't given - playing is fully supported
+    /// without recording anything.
+    pub record: Option<String>,
+    /// `--replay <path>`, already parsed - `Some` means `player` is driven
+    /// by this recording instead of live input.
+    pub replay: Option<Vec<Vec<Action>>>,
+}
 
 /// Wraps the Bevy-free `SimDriver` as a Bevy `Resource` - the seam between
 /// `crate::sim_driver` and everything else in this module.
@@ -45,6 +62,70 @@ pub(crate) struct SelectedRegion(pub Option<RegionId>);
 
 #[derive(Resource)]
 pub(crate) struct SelectedFaction(pub FactionId);
+
+/// Stage 7B (docs/phase7-spec.md "Stage 7B — 遊ぶ"): the human-controlled
+/// faction, if `--play` was given - `None` means every faction is AI
+/// (Stage 7A's observing-only mode, unchanged). Every player-input system
+/// in `input.rs` gates on this before touching `SimRes`.
+#[derive(Resource)]
+pub(crate) struct PlayerFaction(pub Option<FactionId>);
+
+/// Units the player has clicked to select (map-driven order issuing,
+/// docs/phase7-spec.md "操作": "部隊をクリック... 複数選択可"). Stores raw
+/// `UnitId.0` (not `UnitId` itself, which has no `Ord`... actually it does,
+/// kept as `u32` simply to avoid importing `UnitId` into every call site
+/// that only ever compares/iterates these).
+#[derive(Resource, Default)]
+pub(crate) struct SelectedUnits(pub BTreeSet<u32>);
+
+/// The region a right-click opened the recruit/build menu for - `None` when
+/// no menu is open. Opening the menu never touches `SelectedUnits` (a menu
+/// and a move-order-in-progress are independent bits of player intent).
+#[derive(Resource, Default)]
+pub(crate) struct MenuRegion(pub Option<RegionId>);
+
+/// Diplomacy panel state (`D` to toggle, `V` to cycle `target` - see
+/// `input::keyboard_input`'s diplomacy branch). docs/phase7-spec.md "条約の
+/// 提案・受諾・拒否は外交パネルから".
+#[derive(Resource)]
+pub(crate) struct DiplomacyPanel {
+    pub open: bool,
+    pub target: Option<FactionId>,
+}
+
+/// Which commodity the industry-priority/logistics-priority/import-plan
+/// policy keys (`input::keyboard_input`) currently act on - cycled with
+/// `G`. A single shared pointer rather than one keybinding per `Good`
+/// (there are six) keeps the keymap small.
+#[derive(Resource)]
+pub(crate) struct ActiveGood(pub Good);
+
+impl Default for ActiveGood {
+    fn default() -> Self {
+        // `Steel` - the shared input every faction's industry-priority
+        // tuning actually contends over (`balance.rs`'s Stage 2A section) -
+        // is the good a new player is most likely to want to adjust first.
+        ActiveGood(ALL_GOODS[2])
+    }
+}
+
+/// Present only when `--record <path>` was given: the recording accumulated
+/// so far, rewritten to `path` after every tick that grows it
+/// (`sim_control::advance_simulation`) - see `crate::action_codec`'s own
+/// doc for why a full rewrite rather than an append.
+#[derive(Resource)]
+pub(crate) struct RecordConfig {
+    pub path: String,
+    pub days: Vec<Vec<Action>>,
+}
+
+/// The human/replay faction's most recent rejected orders, translated to
+/// Japanese (docs/phase7-spec.md "命令の可否を隠さない") - cleared and
+/// refilled every tick by `sim_control::advance_simulation`, so this always
+/// reflects the *last* day actions were actually applied, not a
+/// accumulating log.
+#[derive(Resource, Default)]
+pub(crate) struct LastRejection(pub Vec<&'static str>);
 
 /// Most-recent-first ring of formatted event lines - "直近のものから流れる"
 /// (docs/phase7-spec.md "UI"): the bottom log panel.
@@ -95,6 +176,12 @@ pub(crate) struct EventLogText;
 #[derive(Component)]
 pub(crate) struct InspectText;
 
+/// Stage 7B's player-facing panel: selection state, the recruit/build menu,
+/// the diplomacy panel, current policy values, and the most recent
+/// rejection reasons - see `ui::update_player_panel`.
+#[derive(Component)]
+pub(crate) struct PlayerPanelText;
+
 /// Builds and runs the Bevy `App`. `world` must already be validated
 /// (`archipelago_sim::scenario::build_world`/`load_str`/`load_file`) -
 /// `main.rs` never constructs one any other way.
@@ -106,11 +193,16 @@ pub(crate) struct InspectText;
 /// simulated days that accumulate before the shot are purely a side effect
 /// of `sim_control::advance_simulation` already running every unpaused
 /// frame at the default `Speed::X1`.
-pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, screenshot: Option<ScreenshotConfig>) {
+pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, screenshot: Option<ScreenshotConfig>, play: Option<PlayConfig>) {
     let positions = crate::layout::region_positions(&world);
     let sea_centers = sea_zone_centers(&world, &positions);
     let region_count = world.regions.len();
     let unit_count = world.units.len();
+
+    let player_faction = play.as_ref().map(|p| p.player);
+    let record_path = play.as_ref().and_then(|p| p.record.clone());
+    let replay_days = play.as_ref().and_then(|p| p.replay.clone());
+    let is_replay = replay_days.is_some();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -129,15 +221,28 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
     // between two `Startup` systems.
     fonts::load(&mut app);
 
+    // Stage 7B (docs/phase7-spec.md "時間の進め方"): "`--play` 指定時は一時
+    // 停止で開始する" - a live human player always starts paused so the
+    // first day's board can actually be looked at before anything moves.
+    // Observing-only (no `--play`) and a `--replay` run (nothing left for
+    // the player to decide) both keep Stage 7A's running-at-1x default.
+    let start_paused = player_faction.is_some() && !is_replay;
+
     app.insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.10)))
-        .insert_resource(SimRes(SimDriver::new(world, seed)))
-        .insert_resource(SpeedRes { last_active: Speed::X1, paused: false })
+        .insert_resource(SimRes(SimDriver::new_with_player(world, seed, player_faction, replay_days)))
+        .insert_resource(SpeedRes { last_active: Speed::X1, paused: start_paused })
         .insert_resource(SelectedRegion::default())
         .insert_resource(SelectedFaction(FactionId(0)))
         .insert_resource(EventLog::default())
         .insert_resource(ScenarioMeta { name: scenario_name, max_days })
         .insert_resource(RegionLayout(positions))
         .insert_resource(SeaZoneCenters(sea_centers))
+        .insert_resource(PlayerFaction(player_faction))
+        .insert_resource(SelectedUnits::default())
+        .insert_resource(MenuRegion::default())
+        .insert_resource(DiplomacyPanel { open: false, target: None })
+        .insert_resource(ActiveGood::default())
+        .insert_resource(LastRejection::default())
         .add_systems(Startup, setup::setup)
         .add_systems(
             Update,
@@ -145,7 +250,8 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
                 camera_fit::fit_camera_to_map,
                 input::keyboard_input,
                 input::mouse_pan_zoom,
-                input::region_click_select,
+                input::map_click_select,
+                input::map_right_click_menu,
                 sim_control::advance_simulation,
             )
                 .chain(),
@@ -160,14 +266,19 @@ pub fn run(world: SimWorld, seed: u64, scenario_name: String, max_days: u32, scr
                 ui::update_faction_panel,
                 ui::update_event_log,
                 ui::update_inspect_panel,
+                ui::update_player_panel,
             )
                 .chain()
                 .after(sim_control::advance_simulation),
         )
         .add_systems(
             Update,
-            screenshot::maybe_capture_screenshot.after(ui::update_inspect_panel),
+            screenshot::maybe_capture_screenshot.after(ui::update_player_panel),
         );
+
+    if let Some(path) = record_path {
+        app.insert_resource(RecordConfig { path, days: Vec::new() });
+    }
 
     if let Some(config) = screenshot {
         app.insert_resource(config);

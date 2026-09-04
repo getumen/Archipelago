@@ -12,8 +12,8 @@ use archipelago_sim::world::{LinkKind, Station};
 use super::fonts::AppFont;
 use super::palette::faction_color;
 use super::{
-    EventLogText, FactionPanelText, InspectText, MainCamera, RegionLayout, RegionMarker,
-    SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
+    EventLogText, FactionPanelText, InspectText, MainCamera, PlayerPanelText, RegionLayout,
+    RegionMarker, SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -78,7 +78,7 @@ pub(super) fn region_radius(population: f32) -> f32 {
 /// (a zone touching more coastline reads as "bigger" without needing any
 /// population-style figure), clamped small so it always reads as a compact
 /// token next to the coast rather than a wash over the map.
-fn sea_zone_radius(coastal_region_count: usize) -> f32 {
+pub(super) fn sea_zone_radius(coastal_region_count: usize) -> f32 {
     (MIN_SEA_ZONE_RADIUS + 3.0 * coastal_region_count as f32).clamp(MIN_SEA_ZONE_RADIUS, MAX_SEA_ZONE_RADIUS)
 }
 
@@ -338,5 +338,23 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
         text_font(14.0, font),
         TextColor(Color::srgb(0.92, 0.92, 0.95)),
         InspectText,
+    ));
+
+    // Bottom-right panel: Stage 7B player controls - selection state, the
+    // recruit/build menu, the diplomacy panel, current policy values, and
+    // the most recent rejection reasons. Empty (no text spawned) whenever
+    // there is no `--play`ed faction - see `ui::update_player_panel`.
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(6.0),
+            right: Val::Px(10.0),
+            width: Val::Px(320.0),
+            ..default()
+        },
+        Text::new(String::new()),
+        text_font(13.0, font),
+        TextColor(Color::srgb(1.0, 0.82, 0.45)),
+        PlayerPanelText,
     ));
 }

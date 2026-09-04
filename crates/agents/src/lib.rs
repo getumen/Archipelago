@@ -26,8 +26,11 @@ use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::world::{Domain, Station, World};
 
+pub mod human;
 pub mod llm;
 pub mod newspaper;
+
+pub use human::HumanAgent;
 
 use llm::Doctrine;
 

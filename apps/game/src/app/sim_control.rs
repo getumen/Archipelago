@@ -12,13 +12,22 @@ use bevy::prelude::*;
 
 use archipelago_sim::sim::Outcome;
 
-use super::{event_text, EventLog, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
+use super::{event_text, EventLog, LastRejection, RecordConfig, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
 
+/// Also where Stage 7B's `--record`/rejection-surfacing hooks in
+/// (docs/phase7-spec.md "決定論" / "命令の可否を隠さない"): after every
+/// `SimDriver::tick()`, this is the one place that knows exactly what the
+/// human/replay faction's `decide()` returned and what `Simulation::apply`
+/// did with it, so it's also the one place that appends to `RecordConfig`
+/// and refreshes `LastRejection` - `SimDriver::last_human_actions`/
+/// `last_human_errors` never leave `SimRes` any other way.
 pub(super) fn advance_simulation(
     mut sim: ResMut<SimRes>,
     speed: Res<SpeedRes>,
     meta: Res<ScenarioMeta>,
     mut log: ResMut<EventLog>,
+    mut record: Option<ResMut<RecordConfig>>,
+    mut rejection: ResMut<LastRejection>,
 ) {
     if speed.paused {
         return;
@@ -32,6 +41,19 @@ pub(super) fn advance_simulation(
         for event in &events {
             let line = event_text::format_event(sim.0.world(), event);
             log.0.push_front(format!("day {}: {line}", sim.0.world().day));
+        }
+
+        if sim.0.human_faction().is_some() {
+            rejection.0 = sim.0.last_human_errors().iter().copied().map(crate::action_codec::action_error_ja).collect();
+            if let Some(record) = &mut record {
+                record.days.push(sim.0.last_human_actions().to_vec());
+                // Rewritten in full after every tick that grows it, not
+                // appended - see `crate::action_codec`'s own doc for why (a
+                // whole-file rewrite is simpler and the recording is small).
+                if let Err(e) = crate::action_codec::write_record(std::path::Path::new(&record.path), &record.days) {
+                    eprintln!("archipelago-game: warning: could not write --record {}: {e}", record.path);
+                }
+            }
         }
     }
     while log.0.len() > EVENT_LOG_CAPACITY {

@@ -5,6 +5,7 @@
 //! `sim_driver` and `layout` are plain Rust, no `bevy` import anywhere in
 //! either file - only `app` (and its submodules) touches Bevy at all.
 
+pub mod action_codec;
 pub mod layout;
 pub mod sim_driver;
 
