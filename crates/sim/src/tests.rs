@@ -28,22 +28,94 @@ use crate::sim::Simulation;
 use crate::trade;
 use crate::world::{Domain, Station, World};
 
+/// Stage 6C (docs/phase6-spec.md "Stage 6C" item 1): this test used to
+/// "cut" the corridor by reassigning `RegionId(2)`'s `owner` to another
+/// faction outright. But `recompute_supply` refuses to relay across *any*
+/// faction boundary unconditionally (`if world.regions[j].owner !=
+/// owner_i { continue; }`), regardless of link kind, throughput, or
+/// whether the chokepoint mechanism the corridor is supposed to exercise
+/// does anything at all — an owner change always "works", which means this
+/// test passed for a reason unrelated to what it claimed to test and would
+/// never have caught a broken `recompute_supply`. Rewritten the same way
+/// `japan47_chokepoints_still_bind` was: cut the corridor through the real
+/// mechanism (`contested[i]`, an enemy unit *contesting* the region without
+/// capturing it) instead, on mvp's 10-region map, and prove below that the
+/// rewritten assertion can in fact fail.
+///
+/// Region 2 (`minami_tohoku`, a same-owner Rail link with no `strait_zone`)
+/// is the only land corridor between region 1 (`kita_tohoku`) and
+/// touhou_rengou's industrial base at region 3 (`kanto`) — region 1 has no
+/// other route there. `isolate_single_source` zeroes every other
+/// touhou_rengou region's own capacity/port and saturates `kanto`'s, so
+/// whatever reaches region 1 is provably attributable to the corridor
+/// being tested rather than region 1's own (unboosted, unzeroed)
+/// `supply_source` masking the cut, the same reasoning
+/// `japan47_chokepoints_still_bind`'s own `isolate_single_source` doc
+/// explains for a multi-region faction.
 #[test]
 fn supply_corridor_cut() {
+    fn isolate_single_source(world: &mut World, source: RegionId) {
+        let faction = world.region(source).owner;
+        for i in 0..world.regions.len() {
+            let r = RegionId(i as u32);
+            if r != source && world.region(r).owner == faction {
+                world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+                world.region_mut(r).port = 0.0;
+            }
+        }
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(source).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(source).infrastructure = 1.0;
+    }
+
+    let kanto = RegionId(3);
+    let kita_tohoku = RegionId(1);
+    let minami_tohoku = RegionId(2);
+
     let mut world = scenario::build_world();
+    isolate_single_source(&mut world, kanto);
     logistics::recompute_supply(&mut world);
-    let before = world.supply[RegionId(1).index()];
+    let before = world.supply[kita_tohoku.index()];
 
-    // Region 2 is the only corridor between region 1 and the industrial
-    // heartland at region 3; handing it to another faction should starve
-    // region 1's relayed supply.
-    world.region_mut(RegionId(2)).owner = FactionId(1);
-    logistics::recompute_supply(&mut world);
-    let after = world.supply[RegionId(1).index()];
+    let mut cut = scenario::build_world();
+    isolate_single_source(&mut cut, kanto);
+    let owner = cut.region(minami_tohoku).owner;
+    // A foreign, at-war unit merely *stationed* in region 2 - enough to
+    // make `World::has_enemy_units`/`recompute_supply`'s `contested[i]`
+    // true - without ever touching `Region::owner`.
+    let enemy = FactionId((owner.0 + 1) % cut.factions.len() as u32);
+    let raider_id = crate::ids::UnitId(cut.units.len() as u32);
+    cut.units.push(military::Unit {
+        id: raider_id,
+        owner: enemy,
+        name: "Enemy Raiding Force".to_string(),
+        station: Station::Region(minami_tohoku),
+        movement: None,
+        manpower: 1.0,
+        equipment: 1.0,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(minami_tohoku),
+        experience: 0.0,
+        alive: true,
+    });
+    logistics::recompute_supply(&mut cut);
+    let after = cut.supply[kita_tohoku.index()];
 
+    assert_eq!(
+        cut.region(minami_tohoku).owner,
+        owner,
+        "test setup requires ownership to stay unchanged - the cut must come from contest, not conquest"
+    );
+    assert!(before > 0.0, "sanity: region 1 should receive relayed supply via region 2 when intact: {before}");
     assert!(
-        after < before * 0.7,
-        "expected corridor cut to reduce supply: before={before}, after={after}"
+        after < before * 0.1,
+        "an enemy force holding region 2 (contested, not captured) must starve region 1's relayed supply \
+         without touching ownership: before={before}, after={after}"
     );
 }
 

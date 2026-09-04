@@ -4,7 +4,7 @@
 //! the front. No randomness of its own, so a run stays fully determined by
 //! the simulation's seed.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
@@ -297,6 +297,33 @@ fn total_military_power(world: &World, faction: FactionId) -> f32 {
         .fold(0.0, |acc, p| acc + p)
 }
 
+/// Every living faction's `total_military_power`, indexed by `FactionId`,
+/// computed in one `O(units)` pass over `world.units` instead of one
+/// `O(units)` pass per faction.
+///
+/// Stage 6C (docs/phase6-spec.md "Stage 6C"): profiling `HeuristicAgent`
+/// on japan47 found `diplomacy_ai` — not `advance_interior`'s BFS, the
+/// risk docs/phase6-spec.md §0 named — was the largest single contributor
+/// to the AI's per-faction growth (~7.5x per decision call versus mvp,
+/// worse than either the 4.7x region-count or 2x faction-count ratio on
+/// their own), because `dominant_threat` called `total_military_power`
+/// once *per other living faction* to find the strongest one, and
+/// `diplomacy_ai` itself called it again for every faction it's at war
+/// with — an `O(factions × units)` cost every single `decide()` call, on
+/// top of `evaluate_proposal`'s own already-small use. Precomputing every
+/// faction's power once here and passing the array down turns that into
+/// `O(units + factions)`, called once per `diplomacy_ai` invocation
+/// instead of scattered across it.
+fn power_by_faction(world: &World) -> Vec<f32> {
+    let mut power = vec![0.0f32; world.factions.len()];
+    for unit in &world.units {
+        if unit.alive {
+            power[unit.owner.index()] += unit.combat_power();
+        }
+    }
+    power
+}
+
 /// Whether `faction` should accept a proposed `treaty` from `from`
 /// (docs/phase3-spec.md "AI" under "Stage 3B"): relative power for the two
 /// stance-easing treaties, an opinion floor for every kind (higher for the
@@ -483,7 +510,13 @@ fn diplomacy_ai(faction: FactionId, peace_disposition: f32, obs: &Observation, a
         }
     }
 
-    let own_power = total_military_power(world, faction);
+    // Stage 6C: one O(units) pass for every faction's power, reused by
+    // `own_power` below, by `dominant_threat`'s scan over every other
+    // faction, and by the at-war loop's `enemy_power` - see
+    // `power_by_faction`'s doc for the O(factions × units) cost this
+    // replaces.
+    let power = power_by_faction(world);
+    let own_power = power[faction.index()];
     let own_casualties = world.faction(faction).casualties;
     // Worst of Food/Energy/Machinery shortage - the same three goods
     // `Treaty::TradeAgreement` moves (`trade::TRADE_GOODS`).
@@ -493,7 +526,7 @@ fn diplomacy_ai(faction: FactionId, peace_disposition: f32, obs: &Observation, a
         .any(|g| shortage[g.index()] > TRADE_SEEK_SHORTAGE_THRESHOLD);
     // External code review fix C1: who (if anyone) is a common dominant
     // threat worth allying against - see `dominant_threat`'s doc.
-    let threat = dominant_threat(world, faction);
+    let threat = dominant_threat(&power, world, faction);
 
     // Proactive proposals, in ascending faction-id order for determinism -
     // at most one outstanding outgoing proposal per target already enforced
@@ -513,7 +546,7 @@ fn diplomacy_ai(faction: FactionId, peace_disposition: f32, obs: &Observation, a
             // External code review fix C2: judged off starting army size
             // alone this reaches the same verdict on the same day in every
             // seed - see `MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING`'s doc.
-            let enemy_power = total_military_power(world, other);
+            let enemy_power = power[other_idx];
             let outmatched = own_casualties >= MIN_WAR_CASUALTIES_FOR_PEACE_SEEKING
                 && own_power < enemy_power * PEACE_SEEK_BASE_RATIO * peace_disposition;
             let opinion_ok = world.diplomacy.opinion(faction, other) >= PEACE_ACCEPT_MIN_OPINION;
@@ -559,8 +592,12 @@ fn diplomacy_ai(faction: FactionId, peace_disposition: f32, obs: &Observation, a
 /// (common enemy) AI note calls for. `None` when nobody meets
 /// `ALLIANCE_THREAT_RATIO` against `faction` itself, so a faction that
 /// isn't actually threatened never goes looking for an ally.
-fn dominant_threat(world: &World, faction: FactionId) -> Option<(FactionId, f32)> {
-    let own_power = total_military_power(world, faction);
+///
+/// `power` is `faction`'s and every other living faction's
+/// `total_military_power`, precomputed once by `power_by_faction` - see
+/// that function's doc for why this no longer recomputes it per faction.
+fn dominant_threat(power: &[f32], world: &World, faction: FactionId) -> Option<(FactionId, f32)> {
+    let own_power = power[faction.index()];
     let n = world.factions.len();
     let mut best: Option<(FactionId, f32)> = None;
     for idx in 0..n {
@@ -568,13 +605,13 @@ fn dominant_threat(world: &World, faction: FactionId) -> Option<(FactionId, f32)
         if other == faction || !world.factions[idx].alive {
             continue;
         }
-        let power = total_military_power(world, other);
-        if power <= own_power * ALLIANCE_THREAT_RATIO {
+        let p = power[idx];
+        if p <= own_power * ALLIANCE_THREAT_RATIO {
             continue;
         }
         match best {
-            Some((_, best_power)) if power <= best_power => {}
-            _ => best = Some((other, power)),
+            Some((_, best_power)) if p <= best_power => {}
+            _ => best = Some((other, p)),
         }
     }
     best
@@ -969,18 +1006,57 @@ pub struct HeuristicAgent {
 /// `archipelago-api`'s uncontrolled-faction agents both go through
 /// `default_heuristic_agent` below, so both produce byte-identical default
 /// play for the same seed (docs/phase5-spec.md's `api_run_matches_headless`).
-pub const DEFAULT_CAUTION: [f32; 3] = [1.15, 1.30, 1.45];
+///
+/// Stage 6C (docs/phase6-spec.md "Stage 6C" item 4): extended from 3 to 8
+/// entries so japan47's 6 factions each get a genuinely distinct value
+/// instead of `default_heuristic_agent`'s old flat `(1.25, 1.0)` fallback
+/// for every faction index beyond 2 - with every faction past the third
+/// behaving identically, no consistent asymmetry could ever develop
+/// between them. This is deliberately an *AI tuning* value, not a
+/// `balance.rs` constant (per this file's own module-level split from
+/// `crates/sim`'s: "バランス定数は balance.rs、AI のチューニング値は
+/// crates/agents"), so extending it changes no shared simulation constant
+/// - and appending past index 2 rather than editing indices `0..3` leaves
+/// mvp (3 factions, indices `0..3` only) exactly as before: its `--json`
+/// hash for seed 1 is unchanged by this edit.
+///
+/// This alone does not make japan47 resolve decisively within a 720-day
+/// run - measured (see docs/phase6-spec.md "Stage 6C" item 4's write-up):
+/// with this spread every seed 1-5 still ends in `Outcome::Stalemate` at
+/// day 720, same as before, though territory swings noticeably harder
+/// (e.g. seed 2's largest faction ends day 720 owning 18/47 regions
+/// against a flat-fallback baseline's max of 13/47, and keeps climbing
+/// well past day 720 - re-run to day 6000, the same seed reaches 4 of 6
+/// factions actually eliminated). The elimination bar itself (`Outcome::
+/// Victory` needs `alive.len() == 1`, i.e. every *other* faction's
+/// `region_count` at zero) is what won't fit in 720 days here: japan47
+/// starts 6 factions in `Diplomacy::new`'s unconditional mutual War (same
+/// as mvp), so a leader has to grind down five separate rivals instead of
+/// mvp's two, and the pace that finishes territory conquest is set by
+/// `unit_cap`'s industry-driven army growth and `balance.rs`'s combat/
+/// occupation constants - both shared with mvp and therefore off limits
+/// for this fix (retuning either changes mvp's byte-identical `--json`
+/// hash too). Confirmed empirically, not by inspection alone: `COMBAT_DAMAGE`
+/// at up to 10x, `OCCUPATION_RATE`/`OCCUPATION_DECAY` at 3x/5x, `unit_cap`'s
+/// divisor from 1/3 to 5x, and this caution spread pushed to even more
+/// extreme values, were each tried in isolation against 20-50 seeds; none
+/// changed the day-720 outcome type. A genuine fix needs either a longer
+/// day budget scaled to region count, or a scenario-scoped mechanism (e.g.
+/// letting a scenario specify non-`War` starting `Stance` pairs, forming
+/// blocs so a leader only has to eliminate one rival bloc rather than five
+/// separate factions) - out of scope for this pass since either changes
+/// shared code paths mvp also runs through.
+pub const DEFAULT_CAUTION: [f32; 8] = [1.15, 1.30, 1.45, 0.80, 1.90, 0.95, 1.70, 2.10];
 
 /// Default per-faction diplomatic disposition spread, paired with
 /// `DEFAULT_CAUTION` - see `HeuristicAgent::with_peace_disposition`'s doc
-/// for what the knob does.
-pub const DEFAULT_PEACE_DISPOSITION: [f32; 3] = [1.05, 0.80, 1.15];
+/// for what the knob does, and `DEFAULT_CAUTION`'s doc for why this was
+/// extended past its original 3 entries.
+pub const DEFAULT_PEACE_DISPOSITION: [f32; 8] = [1.05, 0.80, 1.15, 0.70, 1.25, 0.90, 1.10, 1.35];
 
 /// Builds the default `HeuristicAgent` for faction index `i`, using
-/// `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION` for the first three
-/// factions and `(1.25, 1.0)` beyond that spread - the same fallback
-/// `apps/headless`'s own `build_agents` used before this was factored out
-/// here.
+/// `DEFAULT_CAUTION`/`DEFAULT_PEACE_DISPOSITION` for the first eight
+/// factions and `(1.25, 1.0)` - the middle of both spreads - beyond that.
 pub fn default_heuristic_agent(i: usize) -> HeuristicAgent {
     let caution = DEFAULT_CAUTION.get(i).copied().unwrap_or(1.25);
     let peace_disposition = DEFAULT_PEACE_DISPOSITION.get(i).copied().unwrap_or(1.0);
@@ -1884,6 +1960,43 @@ fn offensive(
 /// Walks units that aren't already at (or ordered toward) the front one
 /// step closer, via `Observation::path_next`, toward whichever front region
 /// is nearest by raw map distance.
+///
+/// Stage 6C (docs/phase6-spec.md "Stage 6C"): this used to run a fresh
+/// `map_distances` (a full, unconstrained `O(regions)` BFS) *per idle unit*,
+/// picking whichever front minimized `distances[front]`. That was written
+/// for mvp's 10 regions and handful of units; at 47 regions with a unit
+/// count that grows with industry (`unit_cap`), it was a candidate for the
+/// dominant cost in `HeuristicAgent::decide` docs/phase6-spec.md §0 flagged
+/// ("AI の探索が破綻する") — one BFS per unit, when the map only has a
+/// handful of front regions. Profiling `HeuristicAgent` on japan47 showed
+/// it in fact isn't the *biggest* single contributor (`diplomacy_ai`'s
+/// `O(factions × units)` cost, fixed by `power_by_faction`, was larger) —
+/// but on any tick with at least one idle unit to walk forward, this is
+/// still real BFS-per-unit cost worth removing, and on most ticks
+/// (determined empirically: idle-unit-needing-a-move ticks are rare -
+/// most units are already at the front, already moving, or in combat)
+/// there's nothing to walk at all, so the fix below must stay just as
+/// cheap as the original on *those* ticks - no BFS paid for that never
+/// gets used.
+///
+/// Since the map's links are always bidirectional (`scenario` validation
+/// requires it), `distance(location, f) == distance(f, location)`, so the
+/// exact same nearest-front-by-id-on-ties value can be had by running
+/// `map_distances` once *per front region* (bounded by how many of this
+/// faction's own regions border an enemy — typically a handful, and never
+/// more than `own_regions().len()`) instead of once per idle unit — but
+/// only once at least one unit has actually cleared every other
+/// disqualifying check below (already moving, not on land, already at the
+/// front, contested). Collecting that eligible list first, and returning
+/// before ever touching `map_distances` if it's empty, is what keeps a
+/// quiet tick's cost at zero, same as before this change. This is the
+/// identical formula for the eligible units, just with the outer loop
+/// swapped from "one BFS per unit" to "one BFS per front", so it produces
+/// byte-identical results while scaling with border length instead of
+/// army size. A small `path_next` cache below is the same trick for the
+/// second BFS `Observation::path_next` runs per unit — units idling in the
+/// same region heading to the same nearest front (common right after a
+/// recruitment wave) now share one BFS instead of repeating it.
 fn advance_interior(
     faction: FactionId,
     obs: &Observation,
@@ -1899,32 +2012,52 @@ fn advance_interior(
     let mut units = obs.own_units();
     units.sort_by_key(|u| u.0);
 
-    for unit_id in units {
-        if already_moved.contains(&unit_id) {
-            continue;
-        }
-        let unit = obs.world.unit(unit_id);
-        if unit.movement.is_some() {
-            continue;
-        }
-        // Fleets are steered by `naval_ops`, not this land-only walk toward
-        // the region front.
-        let Some(location) = unit.station.region() else {
-            continue;
-        };
-        if front.binary_search(&location).is_ok() {
-            continue;
-        }
-        if obs.world.has_enemy_units(location, faction) {
-            continue;
-        }
+    // Only the units that actually need a move order - filtering this
+    // first (no BFS touched yet) is what keeps a tick with nothing to walk
+    // exactly as cheap as before this change.
+    let eligible: Vec<(UnitId, RegionId)> = units
+        .into_iter()
+        .filter(|unit_id| !already_moved.contains(unit_id))
+        .filter_map(|unit_id| {
+            let unit = obs.world.unit(unit_id);
+            if unit.movement.is_some() {
+                return None;
+            }
+            // Fleets are steered by `naval_ops`, not this land-only walk
+            // toward the region front.
+            let location = unit.station.region()?;
+            if front.binary_search(&location).is_ok() {
+                return None;
+            }
+            if obs.world.has_enemy_units(location, faction) {
+                return None;
+            }
+            Some((unit_id, location))
+        })
+        .collect();
+    if eligible.is_empty() {
+        return;
+    }
 
-        let distances = map_distances(obs.world, location);
+    // One BFS per front region (see doc above), reused by every eligible
+    // unit below instead of one BFS per unit.
+    let front_distances: Vec<Vec<u32>> =
+        front.iter().map(|&f| map_distances(obs.world, f)).collect();
+
+    let mut path_cache: HashMap<(RegionId, RegionId), Option<RegionId>> = HashMap::new();
+
+    for (unit_id, location) in eligible {
+        // Exactly `map_distances(obs.world, location)[f]` for each front
+        // `f` (undirected graph, so `distance(location, f) ==
+        // distance(f, location)`) - same argmin, same ascending-front-id
+        // tie-break as the original per-unit computation, just read from
+        // the precomputed per-front tables instead of a fresh per-unit BFS.
         let nearest_front = front
             .iter()
             .copied()
-            .fold(None, |best: Option<(RegionId, u32)>, f| {
-                let d = distances[f.index()];
+            .enumerate()
+            .fold(None, |best: Option<(RegionId, u32)>, (fi, f)| {
+                let d = front_distances[fi][location.index()];
                 match best {
                     Some((_, best_d)) if d >= best_d => best,
                     _ => Some((f, d)),
@@ -1933,7 +2066,10 @@ fn advance_interior(
             .map(|(f, _)| f);
         let Some(nearest_front) = nearest_front else { continue };
 
-        if let Some(next) = obs.path_next(location, nearest_front) {
+        let next = *path_cache
+            .entry((location, nearest_front))
+            .or_insert_with(|| obs.path_next(location, nearest_front));
+        if let Some(next) = next {
             actions.push(Action::MoveUnit { unit: unit_id, to: Station::Region(next) });
         }
     }

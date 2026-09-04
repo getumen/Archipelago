@@ -2,6 +2,8 @@
 //! rationed to units once there. This is design.md §8's core loop — cutting
 //! a single corridor region starves everything behind it.
 
+use std::collections::VecDeque;
+
 use crate::balance::{
     ARMS_SUPPLY_NEED_PER_GAP, PROJECTED_SUPPLY_FACTOR, SUPPLY_NEED_PER_MANPOWER, SUPPLY_SMOOTHING,
     UNIT_EQUIPMENT,
@@ -46,40 +48,61 @@ pub fn recompute_supply(world: &mut World) {
         .map(|(i, r)| r.supply_source_blockaded(blockaded[i]))
         .collect();
 
-    for _ in 0..n {
-        let mut changed = false;
-        for i in 0..n {
-            if contested[i] {
+    // Stage 6C (docs/phase6-spec.md "Stage 6C"): `cap` only ever grows
+    // during this relaxation (`if v > cap[j]`) and each region's outgoing
+    // contribution is a pure function of its own current `cap[i]`, so the
+    // fixed point this converges to does not depend on the order regions
+    // are visited in — only on having visited every region enough times
+    // for its cap to stop changing. That means a worklist (process a
+    // region only when *its own* cap has just grown, propagate to its
+    // same-owner neighbors, and re-enqueue any of them whose cap grows in
+    // turn) reaches the exact same fixed point as the old fixed `0..n`
+    // sweep, but without re-scanning every region on every round — at 47
+    // regions this is the single biggest per-tick cost (docs/phase6-spec.md
+    // §0's O(n²)-ish risk). Every region starts in the queue once (its own
+    // `supply_source`/blockade contribution is itself a "change" from the
+    // implicit zero the relaxation begins from); a contested region is
+    // never enqueued or re-enqueued, matching the old loop's `if
+    // contested[i] { continue }` — it still receives whatever a
+    // non-contested neighbor relays into it, it just never relays onward.
+    let mut in_queue = vec![false; n];
+    let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
+    for i in 0..n {
+        if !contested[i] {
+            queue.push_back(i);
+            in_queue[i] = true;
+        }
+    }
+
+    while let Some(i) = queue.pop_front() {
+        in_queue[i] = false;
+        let owner_i = world.regions[i].owner;
+        let cap_i = cap[i];
+        for link in &world.regions[i].links {
+            let j = link.to.index();
+            if world.regions[j].owner != owner_i {
                 continue;
             }
-            let owner_i = world.regions[i].owner;
-            let cap_i = cap[i];
-            for link in world.regions[i].links.clone() {
-                let j = link.to.index();
-                if world.regions[j].owner != owner_i {
-                    continue;
-                }
-                // Stage 2D (docs/phase2-spec.md "1. 海峡リンクの遮断"): a
-                // `Strait` link's throughput is throttled by the highest
-                // sea control any other faction holds in the zone it
-                // crosses — `None` (every non-Strait link, and the 中国—
-                // 九州 `Tunnel` deliberately) is unaffected.
-                let strait = match link.strait_zone {
-                    Some(zone) => naval::strait_factor(world, zone, owner_i),
-                    None => 1.0,
-                };
-                let infra_j = world.regions[j].effective_infrastructure();
-                let v = (cap_i * link.kind.retention() * (0.55 + 0.45 * infra_j))
-                    .min(link.kind.max_throughput() * strait)
-                    .min(node_throughput[j]);
-                if v > cap[j] {
-                    cap[j] = v;
-                    changed = true;
+            // Stage 2D (docs/phase2-spec.md "1. 海峡リンクの遮断"): a
+            // `Strait` link's throughput is throttled by the highest
+            // sea control any other faction holds in the zone it
+            // crosses — `None` (every non-Strait link, and the 中国—
+            // 九州 `Tunnel` deliberately) is unaffected.
+            let strait = match link.strait_zone {
+                Some(zone) => naval::strait_factor(world, zone, owner_i),
+                None => 1.0,
+            };
+            let infra_j = world.regions[j].effective_infrastructure();
+            let v = (cap_i * link.kind.retention() * (0.55 + 0.45 * infra_j))
+                .min(link.kind.max_throughput() * strait)
+                .min(node_throughput[j]);
+            if v > cap[j] {
+                cap[j] = v;
+                if !contested[j] && !in_queue[j] {
+                    queue.push_back(j);
+                    in_queue[j] = true;
                 }
             }
-        }
-        if !changed {
-            break;
         }
     }
 
