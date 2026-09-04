@@ -325,3 +325,156 @@ impl<'a> Observation<'a> {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::UnitId;
+
+    /// Regression guard for exactly the defect class that used to be caught
+    /// only by hashing a whole `--seed 1 --days 720` run
+    /// (docs/conventions.md §5's now-removed "mvp のハッシュ"): `power_tables`
+    /// (the batched per-region/per-zone precompute `encode()` uses) and the
+    /// `enemy_power_from_table` fold it feeds must stay bit-for-bit
+    /// identical to calling `World::region_power`/`zone_power` and
+    /// `Observation::enemy_power`/`enemy_zone_power` directly -
+    /// `power_tables`'s own doc above spells out why: `enemy_power_from_table`
+    /// must fold over the other factions' precomputed subtotals in the same
+    /// ascending order `enemy_power`'s own fold does, never derive itself as
+    /// `total - own`, because that reassociates the underlying `f32` sum
+    /// into a different (if mathematically equivalent) result.
+    ///
+    /// This is not a hypothetical: rewriting `enemy_power` that way is the
+    /// actual defect this repository hit - correct in isolation, silently
+    /// different bit-for-bit, and only visible as an AI threshold
+    /// comparison flipping hundreds of simulated days later, past where any
+    /// named acceptance test was looking. A whole-run hash caught it by
+    /// accident; this test names the property directly and catches it at
+    /// the source.
+    ///
+    /// Builds a world with several factions' units sharing one contested
+    /// region *and* one contested sea zone (mixed stations, so both halves
+    /// of `power_tables` are exercised), then checks every table cell
+    /// against the direct computation with `==` - not an epsilon
+    /// comparison, since reassociation is specifically a bit-exactness
+    /// defect an epsilon check would hide.
+    ///
+    /// One faction in each cell is deliberately given a `combat_power`
+    /// several orders of magnitude larger than the other two (real
+    /// gameplay never produces stats this lopsided; this test isn't
+    /// simulating gameplay, it's stressing the arithmetic). This is not
+    /// decoration: a same-order-of-magnitude reassociation bug (`total -
+    /// own` where every addend is a similar size) frequently rounds back to
+    /// the *same* bits by coincidence - confirmed while writing this test,
+    /// where several same-magnitude fixtures failed to expose the swap
+    /// below at all. A wide magnitude gap forces real precision loss under
+    /// `total - own` (the small factions' contribution gets partially or
+    /// wholly absorbed into the large one before the subtraction ever
+    /// happens) that folding over the small subtotals directly never
+    /// incurs, so this fixture actually exercises the failure mode instead
+    /// of passing either way.
+    ///
+    /// Confirmed this fails on the actual defect: temporarily changed
+    /// `enemy_power_from_table` (this file, above) to `let total: f32 =
+    /// self.world.factions.iter().fold(0.0, |acc, f| acc +
+    /// cell_row[f.id.index()]); total - cell_row[self.faction.index()]` -
+    /// algebraically the same fold this function already does, just
+    /// re-associated - and re-ran: this test failed immediately with a
+    /// bitwise mismatch at the magnitude-dominant faction's cell. Reverted
+    /// before committing.
+    #[test]
+    fn power_table_matches_direct_computation_bit_for_bit() {
+        let mut world = crate::scenario::build_world();
+        assert!(
+            world.factions.len() >= 3,
+            "this test wants several factions with units to actually collide in one cell"
+        );
+
+        // scenarios/mvp.json (`UNITS_PER_FACTION == 3`) assigns unit ids in
+        // faction order: 0,1,2 to faction 0, 3,4,5 to faction 1, 6,7,8 to
+        // faction 2 (`Scenario::build_world`'s unit-construction loop).
+        // One unit per faction goes to the contested land region, one per
+        // faction to the contested sea zone, the third stays wherever the
+        // scenario put it - so every table cell this test checks has real
+        // multi-faction content to disagree about if the optimisation ever
+        // diverges from the direct computation. Faction 0 dominates the
+        // region, faction 1 dominates the zone - see this test's own doc
+        // for why the magnitude gap matters.
+        let contested_region = RegionId(3);
+        let contested_zone = SeaZoneId(0);
+        let land_manpower = [8_000_000.0_f32, 4.37, 6.91];
+        let sea_manpower = [3.14_f32, 6_500_000.0, 5.62];
+        for faction_idx in 0u32..3 {
+            let land_unit = UnitId(faction_idx * 3);
+            let sea_unit = UnitId(faction_idx * 3 + 1);
+            let i = faction_idx as usize;
+
+            let land = world.unit_mut(land_unit);
+            land.station = Station::Region(contested_region);
+            land.movement = None;
+            land.manpower = land_manpower[i];
+            land.equipment = 0.6 + faction_idx as f32 * 0.11;
+            land.organization = 41.0 + faction_idx as f32 * 6.7;
+            land.morale = 0.7 + faction_idx as f32 * 0.07;
+            land.supply = 0.8 + faction_idx as f32 * 0.05;
+
+            let sea = world.unit_mut(sea_unit);
+            sea.station = Station::Sea(contested_zone);
+            sea.movement = None;
+            sea.manpower = sea_manpower[i];
+            sea.equipment = 0.5 + faction_idx as f32 * 0.13;
+            sea.organization = 37.0 + faction_idx as f32 * 5.3;
+            sea.morale = 0.6 + faction_idx as f32 * 0.09;
+            sea.supply = 0.75 + faction_idx as f32 * 0.04;
+        }
+
+        let obs = Observation { faction: FactionId(0), world: &world };
+        let (region_power, zone_power) = obs.power_tables();
+
+        for region in &world.regions {
+            let cell_row = &region_power[region.id.index()];
+            for faction in &world.factions {
+                assert_eq!(
+                    cell_row[faction.id.index()],
+                    world.region_power(region.id, faction.id),
+                    "power_tables()'s region cell (region {}, faction {}) must match \
+                     World::region_power bit for bit",
+                    region.id.0,
+                    faction.id.0,
+                );
+                let obs_f = Observation { faction: faction.id, world: &world };
+                assert_eq!(
+                    obs_f.enemy_power_from_table(cell_row),
+                    obs_f.enemy_power(region.id),
+                    "enemy_power_from_table (region {}, faction {}) must match \
+                     Observation::enemy_power bit for bit",
+                    region.id.0,
+                    faction.id.0,
+                );
+            }
+        }
+
+        for zone in &world.sea_zones {
+            let cell_row = &zone_power[zone.id.index()];
+            for faction in &world.factions {
+                assert_eq!(
+                    cell_row[faction.id.index()],
+                    world.zone_power(zone.id, faction.id),
+                    "power_tables()'s zone cell (zone {}, faction {}) must match \
+                     World::zone_power bit for bit",
+                    zone.id.0,
+                    faction.id.0,
+                );
+                let obs_f = Observation { faction: faction.id, world: &world };
+                assert_eq!(
+                    obs_f.enemy_power_from_table(cell_row),
+                    obs_f.enemy_zone_power(zone.id),
+                    "enemy_power_from_table (zone {}, faction {}) must match \
+                     Observation::enemy_zone_power bit for bit",
+                    zone.id.0,
+                    faction.id.0,
+                );
+            }
+        }
+    }
+}

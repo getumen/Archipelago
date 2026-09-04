@@ -281,16 +281,6 @@ mod tests {
     /// would then be reacting to tomorrow's board with today's date) and
     /// re-ran this test - it failed immediately with a `World` `Debug`
     /// mismatch. Reverted before committing.
-    ///
-    /// Independently cross-checked against the actual `archipelago-headless`
-    /// binary outside this test (not shelled out to here, to keep this test
-    /// hermetic): `cargo run --release -p archipelago-headless -- --seed 1
-    /// --days 720 --json --agent heuristic | sha256sum` reproduces
-    /// docs/phase7-spec.md's documented
-    /// `0138bf5d537417128e737d3fb68ff55591b8c5dc96e7f382cedaec3b63ffb714`
-    /// unchanged by every edit this stage made (the `position` field
-    /// included), which is exactly the state this test's `reference` loop
-    /// below is built from the same public API to reproduce in-process.
     #[test]
     fn client_run_matches_headless() {
         const SEED: u64 = 1;
