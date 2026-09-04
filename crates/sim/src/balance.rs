@@ -126,24 +126,30 @@ pub const FOOD_EFFICIENCY_DAMPENING: f32 = 0.3;
 ///   hard as it always was; what changes is that a faction can no longer be
 ///   *additionally* crushed by its own national stability cratering on top
 ///   of that.
-/// - **Magnitude.** `0.7`, not `FOOD_EFFICIENCY_FLOOR`'s `0.6`-of-the-
-///   combined-product: still a genuine floor (raises the compound worst
-///   case from `0.12` to `0.2 * 0.7 = 0.14`x capacity, `stability` at rock
-///   bottom instead of `stability_output_mult`'s own unmodified `0.6`), but
-///   deliberately far short of Food's protection - `scenarios/mvp.json`
-///   seed 1's own 720-day run never drives any faction's
-///   `stability_output_mult` below `~0.796` (confirmed directly against its
-///   `docs/conventions.md` §5 hash: this floor is a no-op for every faction
-///   mvp's `HeuristicAgent`s ever produce, so it changes nothing about
-///   mvp's behaviour), so raising it any further into the range that would
-///   still leave `stability_output_mult` more disorder-sensitive than
-///   Food's own combined floor is not something this specific 720-day run
-///   can confirm safe. A faction driven to genuine political collapse
-///   (`stability == 0`, not merely a rough war) still gains real headroom
-///   from `0.6` to `0.7`; a merely-strained one (`stability_output_mult`
-///   already `> 0.7`, every faction `mvp`/`japan_hex.json` actually reach)
-///   sees no change at all.
-pub const INDUSTRIAL_STABILITY_FLOOR: f32 = 0.7;
+/// - **Magnitude.** `0.8`, not `FOOD_EFFICIENCY_FLOOR`'s `0.6`-of-the-
+///   combined-product: still deliberately short of Food's protection (Food
+///   floors the *combined* signal and still lands near `0.81`x at the
+///   realistic worst case, per `food_output_survives_political_collapse`;
+///   this term leaves `efficiency`'s own independent 0.2 floor completely
+///   exposed, so the compound worst case here is `0.2 * 0.8 = 0.16`x
+///   capacity even after the floor applies), but anchored to
+///   `stability_output_mult`'s own formula rather than to any particular
+///   scenario's observed range: `stability_output_mult(50.0) == 0.8`, so a
+///   faction whose *national* government has collapsed completely
+///   (`stability == 0`) is, for the industrial half of the loop, never
+///   treated worse than one whose government still commands half its usual
+///   support - genuine collapse gets real headroom to climb back
+///   (conventions.md §6), while a merely-strained faction (`stability >
+///   50`, i.e. `stability_output_mult` already above this floor on its
+///   own) sees no change. `scenarios/mvp.json` seed 1's 720-day run drives
+///   a faction as low as `stability ≈ 49` (`stability_output_mult ≈
+///   0.796`), just inside this floor's range, so this value does change
+///   mvp's `--json` hash - `docs/conventions.md` §5 is explicit that a
+///   genuine balance change is allowed to do that; the previous `0.7` was
+///   chosen specifically to stay below mvp's observed minimum instead of
+///   from this reasoning, which made the floor a no-op for every faction
+///   any `HeuristicAgent` in this repository has ever actually produced.
+pub const INDUSTRIAL_STABILITY_FLOOR: f32 = 0.8;
 
 /// Civilian demand, per capita (population is tracked in 万人/"ten
 /// thousands"), for the three commodities civilians draw on directly.
