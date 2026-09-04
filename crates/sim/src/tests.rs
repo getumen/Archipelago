@@ -24,9 +24,9 @@ use crate::observation::{Observation, ENCODING_LEN};
 use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
-use crate::sim::Simulation;
+use crate::sim::{Outcome, Simulation};
 use crate::trade;
-use crate::world::{Domain, Station, World};
+use crate::world::{Domain, DominationShare, Station, VictoryCondition, VictoryDeclaration, World};
 
 /// Stage 6C (docs/phase6-spec.md "Stage 6C" item 1): this test used to
 /// "cut" the corridor by reassigning `RegionId(2)`'s `owner` to another
@@ -3994,7 +3994,9 @@ const MINI_VALID_SCENARIO: &str = r#"
   "factions": [
     { "id": "f1", "name": "F1", "capital": "a", "regions": ["a", "b"] },
     { "id": "f2", "name": "F2", "capital": "c", "regions": ["c"] }
-  ]
+  ],
+  "diplomacy": { "blocs": [] },
+  "victory": [ { "type": "conquest" } ]
 }
 "#;
 
@@ -4057,6 +4059,166 @@ fn invalid_scenario_is_rejected() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scenario-scoped starting diplomacy (docs/future-work.md "japan47 が 720 日
+// で決着しない"): every scenario must declare its own starting `diplomacy`
+// state (a required `{ "blocs": [...] }` field - see `scenario::DiplomacyDef`'s
+// doc), rather than an implied "all factions start at war" default no
+// scenario could opt out of. `scenarios/mvp.json`'s `"blocs": []` spells out
+// exactly that same all-war baseline explicitly, which is why its `--json`
+// hash is unchanged (`client_run_matches_headless`, `scenario_flag_matches_
+// builtin_scenario`).
+// ---------------------------------------------------------------------------
+
+/// A `diplomacy` field naming no bloc other than an empty `[]` - required by
+/// every one of the tests above via `MINI_VALID_SCENARIO` - is not the same
+/// thing as the field being *absent*: a scenario that omits `diplomacy`
+/// entirely must be rejected outright, naming exactly what's missing, per
+/// docs/conventions.md §3 "壊れたデータで暗黙に既定値へ落ちないこと" applied
+/// to this field like every other required one (`missing_scenario_position_
+/// is_rejected`'s doc makes the same point for `position`).
+///
+/// Confirmed this can fail: temporarily changed `Scenario::parse` to treat a
+/// missing `diplomacy` field as `DiplomacyDef { blocs: Vec::new() }` instead
+/// of propagating `require_object_field`'s error, and re-ran - `load_str`
+/// stopped returning `Err` at all for this input. Reverted before
+/// committing.
+#[test]
+fn missing_diplomacy_declaration_is_rejected() {
+    let no_diplomacy = MINI_VALID_SCENARIO.replacen(
+        "  ],\n  \"diplomacy\": { \"blocs\": [] },\n  \"victory\"",
+        "  ],\n  \"victory\"",
+        1,
+    );
+    match scenario::load_str(&no_diplomacy) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("diplomacy"), "expected the error to name `diplomacy`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a missing `diplomacy` field, got {other:?}"),
+    }
+}
+
+/// The `victory` sibling of `missing_diplomacy_declaration_is_rejected`:
+/// a scenario that omits the required `victory` declaration entirely must
+/// be rejected outright, naming exactly what's missing - per
+/// docs/conventions.md §3 applied to this field the same way it already
+/// applies to `diplomacy`/`position`. There is no implied default (e.g.
+/// "fall back to `Conquest`") a scenario could rely on by leaving this out.
+///
+/// Confirmed this can fail: temporarily changed `Scenario::parse` to treat
+/// a missing `victory` field as `Vec::new()` instead of propagating
+/// `require_object_field`'s error, and re-ran - `load_str` stopped
+/// returning `Err` at all for this input (and produced a scenario that can
+/// never end in `Outcome::Victory` at all, silently). Reverted before
+/// committing.
+#[test]
+fn missing_victory_declaration_is_rejected() {
+    let no_victory = MINI_VALID_SCENARIO.replacen(
+        "  \"diplomacy\": { \"blocs\": [] },\n  \"victory\": [ { \"type\": \"conquest\" } ]\n}",
+        "  \"diplomacy\": { \"blocs\": [] }\n}",
+        1,
+    );
+    match scenario::load_str(&no_victory) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("victory"), "expected the error to name `victory`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a missing `victory` field, got {other:?}"),
+    }
+}
+
+/// A minimal 3-faction scenario naming one starting bloc (`f1`+`f2`) - `f3`
+/// is in no bloc, so it stays at war with both by `Diplomacy::new_with_
+/// blocs`'s default. Reused by `scenario_declared_alliance_behaves_like_
+/// signed_treaty` below.
+const BLOC_SCENARIO: &str = r#"
+{
+  "regions": [
+    { "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],
+      "links": [ { "to": "b", "kind": "rail" } ] },
+    { "id": "b", "name": "B", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [1.0, 0.0],
+      "links": [ { "to": "a", "kind": "rail" }, { "to": "c", "kind": "rail" } ] },
+    { "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
+      "links": [ { "to": "b", "kind": "rail" } ] }
+  ],
+  "sea_zones": [],
+  "factions": [
+    { "id": "f1", "name": "F1", "capital": "a", "regions": ["a"] },
+    { "id": "f2", "name": "F2", "capital": "b", "regions": ["b"] },
+    { "id": "f3", "name": "F3", "capital": "c", "regions": ["c"] }
+  ],
+  "diplomacy": {
+    "blocs": [
+      { "id": "bloc1", "name": "Bloc1", "factions": ["f1", "f2"] }
+    ]
+  },
+  "victory": [ { "type": "conquest" }, { "type": "coalition" } ]
+}
+"#;
+
+/// A bloc declared in the scenario file must produce a `Stance::Alliance`
+/// indistinguishable from one signed in play - same alliance-drag-in
+/// behaviour and all, not a separate, parallel notion of "starting ally"
+/// (the task this fixes: reuse the Stage 3B `Stance`/`Diplomacy` model,
+/// don't invent a second one). Deliberately mirrors `alliance_drags_into_
+/// war` step for step; the only difference is *how* f1 and f2 became
+/// allied - declared in `BLOC_SCENARIO`'s `diplomacy` field here, versus
+/// `ProposeTreaty`/`AcceptTreaty` there - which is exactly what proves the
+/// two paths converge on the same state.
+///
+/// Confirmed this can fail: temporarily made `Scenario::build_world` call
+/// `Diplomacy::new` instead of `Diplomacy::new_with_blocs` (silently
+/// dropping the declared bloc) and re-ran - the first assertion below
+/// failed immediately (f1/f2 stayed at `Stance::War`). Reverted before
+/// committing.
+#[test]
+fn scenario_declared_alliance_behaves_like_signed_treaty() {
+    let mut world = scenario::load_str(BLOC_SCENARIO).expect("BLOC_SCENARIO must be a valid scenario");
+    let f1 = FactionId(0);
+    let f2 = FactionId(1);
+    let f3 = FactionId(2);
+
+    assert_eq!(
+        world.diplomacy.stance(f1, f2),
+        diplomacy::Stance::Alliance,
+        "the scenario's declared bloc must produce Stance::Alliance without any in-play treaty"
+    );
+    assert!(world.diplomacy.is_at_war(f1, f3), "f3 is in no bloc, so it must still start at war with f1");
+    assert!(world.diplomacy.is_at_war(f2, f3), "f3 is in no bloc, so it must still start at war with f2");
+
+    // Same setup `alliance_drags_into_war` uses for an in-play alliance:
+    // both allies sign a Ceasefire with the common rival first, so
+    // `Action::DeclareWar` (only ever usable to break an active Ceasefire)
+    // has something to break.
+    for (x, y) in [(f1, f3), (f2, f3)] {
+        action::apply_action(&mut world, x, Action::ProposeTreaty { to: y, treaty: Treaty::Ceasefire }).unwrap();
+        action::apply_action(&mut world, y, Action::AcceptTreaty { from: x, treaty: Treaty::Ceasefire }).unwrap();
+    }
+    assert!(!world.diplomacy.is_at_war(f2, f3), "sanity: f2 and f3 now hold a Ceasefire, not War");
+
+    action::apply_action(&mut world, f1, Action::DeclareWar { to: f3 }).unwrap();
+
+    assert!(world.diplomacy.is_at_war(f1, f3), "f1 declared war on f3 directly");
+    assert!(
+        world.diplomacy.is_at_war(f2, f3),
+        "f2, allied with f1 purely through the scenario's declared bloc, must be dragged into f1's war \
+         with f3 exactly like an in-play alliance would - even though f2 and f3 were at Ceasefire"
+    );
+    assert!(
+        world
+            .diplomacy
+            .log
+            .iter()
+            .any(|e| matches!(e, Event::AllianceDragIn { faction, into_war_with } if *faction == f2 && *into_war_with == f3)),
+        "expected an Event::AllianceDragIn naming f2's forced entry into the war with f3"
+    );
+}
+
 /// External code review fix (Stage 6A, P2 #1): an empty `regions` or
 /// `factions` array makes every validation loop below a no-op, so the file
 /// used to "pass" `validate()` and only blow up later - a `--bench` run on
@@ -4079,7 +4241,14 @@ fn empty_scenario_is_rejected() {
     let empty_factions = {
         let start = MINI_VALID_SCENARIO.find(r#""factions": ["#).expect("factions array present");
         let faction_array_start = start + r#""factions": ["#.len();
-        let faction_array_end = MINI_VALID_SCENARIO[faction_array_start..].find("]\n}").expect("end of factions array") + faction_array_start;
+        // The factions array's own closing `]` sits on its own line ("  ],"),
+        // immediately before the `"diplomacy"` field - find that line and
+        // step past its 2-space indent to land on the `]` itself.
+        let marker_pos = MINI_VALID_SCENARIO[faction_array_start..]
+            .find("  ],\n  \"diplomacy\"")
+            .expect("end of factions array")
+            + faction_array_start;
+        let faction_array_end = marker_pos + 2;
         format!("{}{}{}", &MINI_VALID_SCENARIO[..faction_array_start], "", &MINI_VALID_SCENARIO[faction_array_end..])
     };
     match scenario::load_str(&empty_factions) {
@@ -4309,6 +4478,61 @@ fn japan47_is_valid() {
     );
 }
 
+/// docs/future-work.md "japan47 が 720 日で決着しない": japan47's own fix -
+/// two regional blocs (東日本/西日本) rather than a six-way free-for-all.
+/// This is the acceptance test for what actually *loads*: every faction
+/// inside a bloc must start allied with its bloc-mates, and every faction
+/// must still start at war with every faction outside its own bloc - the
+/// exact shape `scenarios/japan47.json`'s `diplomacy.blocs` declares.
+///
+/// Confirmed this can fail: temporarily edited a local copy of
+/// `scenarios/japan47.json` to declare `"blocs": []` (mvp's all-war
+/// baseline) instead of the two real blocs and pointed this test at it -
+/// every cross-bloc `is_at_war` assertion below still passed (everyone is
+/// at war with everyone under an empty declaration too), but every
+/// within-bloc `Stance::Alliance` assertion failed. Reverted before
+/// committing.
+#[test]
+fn japan47_declares_two_blocs() {
+    let world = scenario::load_str(&load_japan47_str()).expect("scenarios/japan47.json must build a valid World");
+    let scenario = scenario::Scenario::parse(&load_japan47_str()).unwrap();
+    let faction_ids: Vec<String> = scenario.factions.iter().map(|f| f.id.clone()).collect();
+    let index_of = |id: &str| {
+        FactionId(faction_ids.iter().position(|x| x == id).expect("faction id must exist in scenarios/japan47.json") as u32)
+    };
+
+    let east = ["hokuto_rengou", "kanto_fu", "chubu_domei"].map(index_of);
+    let west = ["kinki_fu", "seinihon_domei", "shikoku_rengou"].map(index_of);
+
+    for &a in &east {
+        for &b in &east {
+            if a != b {
+                assert_eq!(
+                    world.diplomacy.stance(a, b),
+                    diplomacy::Stance::Alliance,
+                    "every pair inside the declared 東日本 bloc must start allied"
+                );
+            }
+        }
+    }
+    for &a in &west {
+        for &b in &west {
+            if a != b {
+                assert_eq!(
+                    world.diplomacy.stance(a, b),
+                    diplomacy::Stance::Alliance,
+                    "every pair inside the declared 西日本 bloc must start allied"
+                );
+            }
+        }
+    }
+    for &a in &east {
+        for &b in &west {
+            assert!(world.diplomacy.is_at_war(a, b), "factions in different blocs must still start at war");
+        }
+    }
+}
+
 /// Stage 6B acceptance test: 720 simulated days must run to completion on
 /// the 47-region map without panicking - the same bare `Simulation::step`
 /// loop `determinism` above already exercises on the embedded 10-region
@@ -4407,9 +4631,21 @@ fn japan47_chokepoints_still_bind() {
     // which is exactly the "corridor besieged, not captured" case this test
     // wants for Kanmon/central-highlands (as opposed to Seikan, where the
     // real mechanism under test is sea control, not land contest).
+    //
+    // `enemy` must genuinely be at war with `owner` - `has_enemy_units` (and
+    // therefore `contested[i]`) is gated on `Diplomacy::is_at_war`, not mere
+    // faction identity. `(owner.0 + 1) % n` used to always be a safe pick
+    // back when every faction started at war with every other
+    // (`Diplomacy::new`'s old unconditional default); now that
+    // scenarios/japan47.json declares its own starting blocs, that neighbor
+    // may instead be an ally, so search for a faction actually at war
+    // instead of assuming one.
     fn contest_with_enemy(world: &mut World, region: RegionId) {
         let owner = world.region(region).owner;
-        let enemy = FactionId((owner.0 + 1) % world.factions.len() as u32);
+        let enemy = (0..world.factions.len())
+            .map(|i| FactionId(i as u32))
+            .find(|&candidate| world.diplomacy.is_at_war(owner, candidate))
+            .expect("test setup requires at least one faction actually at war with the region's owner");
         let id = crate::ids::UnitId(world.units.len() as u32);
         world.units.push(military::Unit {
             id,
@@ -4752,4 +4988,245 @@ fn blockaded_port_is_flagged() {
         blockades.iter().all(|b| b.region != hokuriku),
         "an unblockaded port must not appear in naval::blockaded_ports"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario-declared victory conditions (design.md §5: "勝利条件は一つに限定
+// しない"; docs/future-work.md "japan47 が 720 日で決着しない"). Every
+// scenario must declare which of `VictoryCondition::{Conquest, Coalition,
+// Domination}` are active - `Simulation::outcome` checks only what
+// `world.victory` names, in that order. These tests build on the embedded
+// `scenarios/mvp.json` world (`Simulation::new`, 3 factions / 10 regions,
+// declaring `Conquest` alone) and override `world.victory` directly to
+// exercise each condition in isolation, the same way other tests here
+// override `world.diplomacy`/`world.regions` directly rather than needing a
+// bespoke scenario file per case.
+// ---------------------------------------------------------------------------
+
+/// `missing_victory_declaration_is_rejected` (above, alongside
+/// `missing_diplomacy_declaration_is_rejected`) already covers an absent
+/// `victory` field. This covers the other half of "malformed": a present
+/// field naming an unrecognised condition `type`, or a `domination` entry
+/// whose `share` falls outside `DominationShare`'s guaranteed `(0.0, 1.0]`
+/// range - both must be rejected at load time, never silently coerced or
+/// defaulted.
+///
+/// Confirmed this can fail: temporarily made `parse_victory_condition`'s
+/// `"domination"` arm skip the `DominationShare::new` validation and store
+/// the raw `f32` via a hypothetical unchecked constructor instead, and
+/// re-ran - the out-of-range-share case below stopped returning `Err` at
+/// all. Reverted before committing.
+#[test]
+fn malformed_victory_declaration_is_rejected() {
+    let unknown_type = MINI_VALID_SCENARIO.replacen(
+        r#""victory": [ { "type": "conquest" } ]"#,
+        r#""victory": [ { "type": "world_domination" } ]"#,
+        1,
+    );
+    match scenario::load_str(&unknown_type) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("world_domination"), "expected the error to name the unknown type, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for an unknown victory condition type, got {other:?}"),
+    }
+
+    for bad_share in ["0.0", "-0.5", "1.5"] {
+        let bad_domination = MINI_VALID_SCENARIO.replacen(
+            r#""victory": [ { "type": "conquest" } ]"#,
+            &format!(r#""victory": [ {{ "type": "domination", "share": {bad_share} }} ]"#),
+            1,
+        );
+        match scenario::load_str(&bad_domination) {
+            Err(scenario::ScenarioError::Schema(msg)) => {
+                assert!(msg.contains("share"), "expected the error to name `share` for share={bad_share}, got {msg:?}");
+            }
+            other => panic!("expected a distinct Schema error for domination share={bad_share}, got {other:?}"),
+        }
+    }
+}
+
+/// An empty `"victory": []` is not the same failure as an unrecognised
+/// condition `type` (`malformed_victory_declaration_is_rejected`, above) -
+/// it's syntactically a valid array of zero elements, so it must be caught
+/// on its own. Left unrejected, it would parse and validate successfully
+/// while leaving `Simulation::outcome`'s `evaluate_victory` nothing to ever
+/// check - the exact permanently-unreachable-victory state a required
+/// `victory` declaration exists to prevent, reachable even with a single
+/// faction left `alive`. `world::VictoryDeclaration::new` makes this state
+/// unrepresentable at all (`VictoryDeclaration`'s doc): there is no way to
+/// build one from an empty `Vec`, so `parse_victory` must fail here rather
+/// than at a `world.victory.is_empty()` check some caller could forget.
+///
+/// Confirmed this can fail: temporarily changed `parse_victory` to return
+/// `Ok(VictoryDeclaration(Vec::new()))` directly (bypassing `new`'s check)
+/// for an empty array instead of propagating an error, and re-ran - `load_str`
+/// stopped returning `Err` at all for this input. Reverted before committing.
+#[test]
+fn empty_victory_declaration_is_rejected() {
+    let empty_victory = MINI_VALID_SCENARIO.replacen(r#""victory": [ { "type": "conquest" } ]"#, r#""victory": []"#, 1);
+    match scenario::load_str(&empty_victory) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("victory"), "expected the error to name `victory`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for an empty `victory` array, got {other:?}"),
+    }
+}
+
+/// `VictoryCondition::Conquest` fires exactly as `Outcome::Victory` always
+/// did before scenario-declared conditions existed: the instant only one
+/// faction remains `alive`, naming that faction and no one else.
+/// `scenarios/mvp.json` declares only this condition, which is exactly what
+/// keeps its `--json` hash for seed 1 / 720 days unchanged.
+///
+/// Confirmed this can fail: temporarily changed the `Conquest` arm of
+/// `victory_winners` to `alive.len() == 0` (an impossible bar, since an
+/// empty `alive` is Stalemate's business per `outcome`'s own check that
+/// runs after `evaluate_victory`) and re-ran - the assertion below failed
+/// with `Ongoing` instead of `Victory`. Reverted before committing.
+#[test]
+fn conquest_victory_fires_when_one_faction_survives() {
+    let mut sim = Simulation::new(1);
+    assert_eq!(
+        sim.world.victory,
+        VictoryDeclaration::new(vec![VictoryCondition::Conquest]).unwrap(),
+        "sanity: mvp.json must declare Conquest alone"
+    );
+
+    let survivor = FactionId(0);
+    sim.world.factions[1].alive = false;
+    sim.world.factions[2].alive = false;
+
+    match sim.outcome(1_000) {
+        Outcome::Victory { condition: VictoryCondition::Conquest, winners } => {
+            assert_eq!(winners, vec![survivor], "Conquest must name exactly the one surviving faction");
+        }
+        other => panic!("expected a Conquest victory for the lone survivor, got {other:?}"),
+    }
+}
+
+/// `VictoryCondition::Coalition`: fires once every surviving faction
+/// belongs to one mutually-allied group, naming every member of that group
+/// - not just while a lone survivor remains outside it.
+///
+/// Confirmed this can fail: temporarily changed the `Coalition` arm of
+/// `victory_winners` to compare `group.len() >= 1` instead of `group.len()
+/// == alive.len()` and re-ran - the negative assertion below (f2 still
+/// outside the pair) failed, firing a spurious victory the instant f0/f1
+/// signed their alliance while f2 was still alive and at war. Reverted
+/// before committing.
+#[test]
+fn coalition_victory_requires_every_survivor_in_the_group() {
+    let mut sim = Simulation::new(1);
+    sim.world.victory = VictoryDeclaration::new(vec![VictoryCondition::Coalition]).unwrap();
+    let f0 = FactionId(0);
+    let f1 = FactionId(1);
+    let f2 = FactionId(2);
+
+    action::apply_action(&mut sim.world, f0, Action::ProposeTreaty { to: f1, treaty: Treaty::Alliance }).unwrap();
+    action::apply_action(&mut sim.world, f1, Action::AcceptTreaty { from: f0, treaty: Treaty::Alliance }).unwrap();
+    assert_eq!(
+        sim.world.diplomacy.stance(f0, f1),
+        diplomacy::Stance::Alliance,
+        "sanity: f0/f1 must actually be allied now"
+    );
+
+    assert_eq!(
+        sim.outcome(1_000),
+        Outcome::Ongoing,
+        "f2 is alive and outside the f0/f1 alliance, so Coalition must not fire yet"
+    );
+
+    // f2 is eliminated; the remaining survivors (f0, f1) are now one
+    // mutually-allied group covering every survivor.
+    sim.world.factions[f2.index()].alive = false;
+    match sim.outcome(1_000) {
+        Outcome::Victory { condition: VictoryCondition::Coalition, winners } => {
+            assert_eq!(winners, vec![f0, f1], "Coalition must name every member of the winning group");
+        }
+        other => panic!("expected a Coalition victory once every survivor is mutually allied, got {other:?}"),
+    }
+}
+
+/// `VictoryCondition::Domination`: fires the instant a faction's holdings
+/// clear the declared `DominationShare` of the map's regions, and not
+/// before - `scenarios/mvp.json`'s embedded world has exactly 10 regions,
+/// so a 0.6 threshold is a clean 6/10 boundary.
+///
+/// Confirmed this can fail: temporarily changed the `Domination` arm of
+/// `victory_winners` to compare `held as f32 > share.get() * total_regions`
+/// (strictly greater) instead of `>=` and re-ran - the exact-boundary
+/// assertion below (6/10 == 0.6) failed, staying `Ongoing` instead of
+/// firing. Reverted before committing.
+#[test]
+fn domination_victory_fires_at_threshold_not_below() {
+    let mut sim = Simulation::new(1);
+    let share = DominationShare::new(0.6).expect("0.6 is a valid domination share");
+    sim.world.victory = VictoryDeclaration::new(vec![VictoryCondition::Domination(share)]).unwrap();
+    let f0 = FactionId(0);
+    let f1 = FactionId(1);
+    assert_eq!(sim.world.regions.len(), 10, "sanity: mvp.json's embedded world has 10 regions");
+
+    for (i, region) in sim.world.regions.iter_mut().enumerate() {
+        region.owner = if i < 5 { f0 } else { f1 };
+    }
+    assert_eq!(
+        sim.outcome(1_000),
+        Outcome::Ongoing,
+        "5/10 regions (50%) must not clear a 60% domination threshold"
+    );
+
+    sim.world.regions[5].owner = f0;
+    match sim.outcome(1_000) {
+        Outcome::Victory { condition: VictoryCondition::Domination(fired_share), winners } => {
+            assert_eq!(winners, vec![f0]);
+            assert_eq!(fired_share, share);
+        }
+        other => panic!("expected a Domination victory at exactly the 60% threshold (6/10 regions), got {other:?}"),
+    }
+}
+
+/// `VictoryCondition::Domination` reads the same "allied group" `Coalition`
+/// uses: an allied group's *combined* holdings count toward the threshold,
+/// so a bloc can dominate the map together even though no single member
+/// holds the share alone.
+///
+/// Confirmed this can fail: temporarily changed the `Domination` arm of
+/// `victory_winners` to compute `held` from `world.region_count(f)` alone
+/// (the lone faction being checked, ignoring `group`) instead of summing
+/// over the whole `group`, and re-ran - the final assertion below failed,
+/// staying `Ongoing` forever since no single faction here ever holds 60%
+/// alone. Reverted before committing.
+#[test]
+fn allied_groups_combined_holdings_count_toward_domination() {
+    let mut sim = Simulation::new(1);
+    let share = DominationShare::new(0.6).expect("0.6 is a valid domination share");
+    sim.world.victory = VictoryDeclaration::new(vec![VictoryCondition::Domination(share)]).unwrap();
+    let f0 = FactionId(0);
+    let f1 = FactionId(1);
+    let f2 = FactionId(2);
+    assert_eq!(sim.world.regions.len(), 10, "sanity: mvp.json's embedded world has 10 regions");
+
+    // f0: 3 regions, f1: 3 regions, f2: 4 regions - no single faction
+    // reaches 6/10 (60%) alone.
+    for (i, region) in sim.world.regions.iter_mut().enumerate() {
+        region.owner = if i < 3 {
+            f0
+        } else if i < 6 {
+            f1
+        } else {
+            f2
+        };
+    }
+    assert_eq!(sim.outcome(1_000), Outcome::Ongoing, "no single faction holds 60% of the map alone");
+
+    // f0 and f1 ally; their combined 6/10 regions now clears the threshold.
+    action::apply_action(&mut sim.world, f0, Action::ProposeTreaty { to: f1, treaty: Treaty::Alliance }).unwrap();
+    action::apply_action(&mut sim.world, f1, Action::AcceptTreaty { from: f0, treaty: Treaty::Alliance }).unwrap();
+
+    match sim.outcome(1_000) {
+        Outcome::Victory { condition: VictoryCondition::Domination(_), winners } => {
+            assert_eq!(winners, vec![f0, f1], "the allied group's combined holdings must be named together");
+        }
+        other => panic!("expected the allied group's combined 6/10 regions to trigger Domination, got {other:?}"),
+    }
 }

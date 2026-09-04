@@ -10,7 +10,7 @@ use archipelago_sim::focus;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::sim::Outcome;
-use archipelago_sim::world::{Domain, Station, World};
+use archipelago_sim::world::{Domain, Station, VictoryCondition, World};
 
 /// Japanese label for a `Treaty`, used by `print_event`'s Stage 3B lines.
 fn treaty_label(treaty: Treaty) -> &'static str {
@@ -357,11 +357,30 @@ pub fn print_newspaper_issue(world: &World, issue: &[NewspaperArticle]) {
     }
 }
 
-pub fn print_outcome(world: &World, outcome: Outcome) {
+/// Japanese label for the `VictoryCondition` that decided a `Victory`
+/// outcome, so the console line says *how* a run ended, not just *who* won.
+fn victory_condition_label(condition: VictoryCondition) -> &'static str {
+    match condition {
+        VictoryCondition::Conquest => "制覇",
+        VictoryCondition::Coalition => "連合",
+        VictoryCondition::Domination(_) => "制圧",
+    }
+}
+
+/// A `Victory` names every winner (`Outcome::Victory`'s doc) - a
+/// `Coalition`/`Domination` win prints every winning faction's name, joined
+/// by "・", rather than picking one and silently dropping the rest.
+pub fn print_outcome(world: &World, outcome: &Outcome) {
     println!();
     match outcome {
-        Outcome::Victory(faction) => {
-            println!("結果: {} の勝利 (day {})", world.faction(faction).name, world.day);
+        Outcome::Victory { condition, winners } => {
+            let names: Vec<&str> = winners.iter().map(|&f| world.faction(f).name.as_str()).collect();
+            println!(
+                "結果: {} の勝利（{}） (day {})",
+                names.join("・"),
+                victory_condition_label(*condition),
+                world.day
+            );
         }
         Outcome::Stalemate => {
             println!("結果: 膠着 (day {} で終了)", world.day);

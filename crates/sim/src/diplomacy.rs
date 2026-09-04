@@ -290,6 +290,37 @@ impl Diplomacy {
         }
     }
 
+    /// Builds initial diplomatic state from a scenario's declared starting
+    /// blocs (`scenario::DiplomacyDef` - see that type's doc for the file
+    /// format). Every pair of factions sharing a bloc starts at
+    /// `Stance::Alliance`; every other pair - two different blocs, or any
+    /// faction named in no bloc at all - starts at `Stance::War`, exactly
+    /// `Diplomacy::new`'s own unconditional default (an empty `blocs` list
+    /// reproduces `Diplomacy::new(n)` exactly, which is how
+    /// `scenarios/mvp.json`'s `"blocs": []` keeps its hash unchanged).
+    ///
+    /// Setting `Stance::Alliance` directly, through the same private
+    /// `set_stance` an in-play `Action::AcceptTreaty` uses, rather than
+    /// inventing a separate "scenario-declared alliance" flag, is what makes
+    /// a declared alliance behave identically to one signed during play from
+    /// day one: `start_war`/`drag_into_war`'s alliance-drag-in only ever
+    /// reads `stance(x, y) == Stance::Alliance`, never how the pair got
+    /// there, so a war breaking out between two blocs drags in every ally on
+    /// both sides the same way it would for an alliance formed mid-game.
+    pub(crate) fn new_with_blocs(n: usize, blocs: &[Vec<FactionId>]) -> Self {
+        let mut d = Diplomacy::new(n);
+        for bloc in blocs {
+            for &a in bloc {
+                for &b in bloc {
+                    if a != b {
+                        d.set_stance(a, b, Stance::Alliance);
+                    }
+                }
+            }
+        }
+        d
+    }
+
     fn idx(&self, a: FactionId, b: FactionId) -> usize {
         a.index() * self.n + b.index()
     }

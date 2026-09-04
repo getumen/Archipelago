@@ -197,10 +197,10 @@ fn main() {
 
     if show_summary {
         report::print_final_board(&sim.world);
-        report::print_outcome(&sim.world, outcome);
+        report::print_outcome(&sim.world, &outcome);
     }
 
     if args.json {
-        println!("{}", json::serialize_state(&sim.world, args.seed, outcome));
+        println!("{}", json::serialize_state(&sim.world, args.seed, &outcome));
     }
 }

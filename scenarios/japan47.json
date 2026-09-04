@@ -1959,5 +1959,26 @@
         "kochi"
       ]
     }
+  ],
+
+  "diplomacy": {
+    "blocs": [
+      {
+        "id": "touhou_bloc",
+        "name": "東日本ブロック",
+        "factions": ["hokuto_rengou", "kanto_fu", "chubu_domei"]
+      },
+      {
+        "id": "seinihon_bloc",
+        "name": "西日本ブロック",
+        "factions": ["kinki_fu", "seinihon_domei", "shikoku_rengou"]
+      }
+    ]
+  },
+
+  "victory": [
+    { "type": "conquest" },
+    { "type": "coalition" },
+    { "type": "domination", "share": 0.75 }
   ]
 }

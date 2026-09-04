@@ -355,6 +355,107 @@ impl SeaZone {
     }
 }
 
+/// A fraction in `(0.0, 1.0]` - the map-share threshold
+/// `VictoryCondition::Domination` requires. Per docs/conventions.md §1
+/// ("政策値は素の `f32` ではなく 0〜1 を保証する型で持ち、不正な値をそもそも
+/// 構築できなくする"): only ever constructed through `new`, so a threshold
+/// of `0.0` (every scenario would "dominate" from the very first tick, since
+/// every faction always holds at least one region) or anything above `1.0`
+/// (unsatisfiable - no group can ever hold more than the whole map) can
+/// never exist as a `DominationShare` at all, and every call site that has
+/// one in hand never needs to re-check its range.
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
+pub struct DominationShare(f32);
+
+impl DominationShare {
+    pub fn new(share: f32) -> Option<Self> {
+        if share.is_finite() && share > 0.0 && share <= 1.0 {
+            Some(DominationShare(share))
+        } else {
+            None
+        }
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+/// One victory condition a scenario can declare active
+/// (design.md §5: "勝利条件は一つに限定しない"). A scenario's required
+/// `victory` array (`scenario::parse_victory`) names the ones in play, in
+/// the order `Simulation::outcome` checks them - see that method's doc.
+/// `Domination`'s threshold lives in the type itself (`DominationShare`)
+/// rather than as a bare `f32` checked at each use site, per
+/// docs/conventions.md §1.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum VictoryCondition {
+    /// Exactly one faction still alive - the only rule this project
+    /// implemented before scenario-declared victory conditions existed.
+    /// `scenarios/mvp.json` declares only this, which is why its behaviour
+    /// (and `--json` hash) is unchanged.
+    Conquest,
+    /// Every surviving faction belongs to one mutually-allied group (a
+    /// chain of `Stance::Alliance` edges) - reachable the instant a bloc
+    /// has destroyed every faction outside it, without that bloc ever
+    /// having to turn on its own allies (docs/future-work.md "japan47 が
+    /// 720 日で決着しない": `HeuristicAgent` never issues `DeclareWar` or
+    /// `BreakTreaty` against an ally, so `Conquest` alone could freeze
+    /// forever above `alive.len() == 1` once the map settles into rival
+    /// blocs).
+    Coalition,
+    /// A faction, or its allied group's *combined* holdings, control at
+    /// least `DominationShare` of the map's regions - the same "allied
+    /// group" `Coalition` uses, so a bloc's territory counts together
+    /// rather than needing one member to hold the whole share alone.
+    Domination(DominationShare),
+}
+
+/// A scenario's required, **non-empty** set of declared `VictoryCondition`s,
+/// in the order `Simulation::outcome`'s `evaluate_victory` checks them - see
+/// `VictoryCondition`'s doc. Per docs/conventions.md §1 ("実行時の検証よりも、
+/// 不正な状態を表現できなくすることを優先する"): an empty declaration would
+/// leave `evaluate_victory` with nothing to ever check, so no game reaching
+/// even `alive.len() == 1` could ever end - exactly the permanently-
+/// unreachable-victory state requiring a `victory` declaration was
+/// introduced to prevent in the first place. Rather than let that state be
+/// constructed and check for it (`world.victory.is_empty()`) at every use
+/// site, `new` is the only way to build one and refuses an empty `Vec`
+/// outright, so a `VictoryDeclaration` that exists is proof it names at
+/// least one condition - see `scenario::parse_victory`'s doc and
+/// `empty_victory_declaration_is_rejected`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VictoryDeclaration(Vec<VictoryCondition>);
+
+impl VictoryDeclaration {
+    /// `None` iff `conditions` is empty - the only way construction can
+    /// fail.
+    pub fn new(conditions: Vec<VictoryCondition>) -> Option<Self> {
+        if conditions.is_empty() {
+            None
+        } else {
+            Some(VictoryDeclaration(conditions))
+        }
+    }
+
+    pub fn as_slice(&self) -> &[VictoryCondition] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, VictoryCondition> {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a VictoryDeclaration {
+    type Item = &'a VictoryCondition;
+    type IntoIter = std::slice::Iter<'a, VictoryCondition>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Faction {
     pub id: FactionId,
@@ -482,6 +583,12 @@ pub struct World {
     /// pair's `Stance`/`opinion`/treaty grants and the pending-proposal
     /// queue.
     pub diplomacy: Diplomacy,
+    /// This scenario's required, declared victory conditions
+    /// (`scenario::parse_victory`), checked by `Simulation::outcome` in
+    /// this order - see `VictoryCondition`'s doc. Always non-empty
+    /// (`VictoryDeclaration`'s doc): a scenario can never leave this
+    /// permanently unable to end the game.
+    pub victory: VictoryDeclaration,
 }
 
 impl World {

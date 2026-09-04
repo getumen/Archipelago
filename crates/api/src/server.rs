@@ -12,6 +12,7 @@ use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::{DIPLOMACY_FIELD_COUNT, FACTION_FIELD_COUNT, REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT};
 use archipelago_sim::sim::{Outcome, Simulation};
+use archipelago_sim::world::VictoryCondition;
 
 use crate::action_codec::{self, MAX_ACTIONS_PER_REQUEST};
 use crate::http::{self, ReadError, Request, Response};
@@ -314,9 +315,25 @@ fn observations_value(session: &Session) -> Value {
     )
 }
 
-fn outcome_value(outcome: Outcome, session: &Session) -> Value {
+fn victory_condition_key(condition: VictoryCondition) -> &'static str {
+    match condition {
+        VictoryCondition::Conquest => "conquest",
+        VictoryCondition::Coalition => "coalition",
+        VictoryCondition::Domination(_) => "domination",
+    }
+}
+
+/// A `Victory` outcome names every winner honestly (`Outcome::Victory`'s
+/// doc) - `"winners"` lists every faction that actually won, never a single
+/// `"faction"` field that would silently pick one out of a `Coalition`/
+/// `Domination` group and drop the rest.
+fn outcome_value(outcome: &Outcome, session: &Session) -> Value {
     match outcome {
-        Outcome::Victory(f) => Value::obj(vec![("type", Value::str("victory")), ("faction", Value::num(f.0 as f64))]),
+        Outcome::Victory { condition, winners } => Value::obj(vec![
+            ("type", Value::str("victory")),
+            ("condition", Value::str(victory_condition_key(*condition))),
+            ("winners", Value::arr(winners.iter().map(|f| Value::num(f.0 as f64)).collect())),
+        ]),
         Outcome::Stalemate => Value::obj(vec![("type", Value::str("stalemate"))]),
         Outcome::Ongoing => {
             let _ = session;
@@ -349,7 +366,7 @@ fn handle_state(request: &Request, manager: &SessionManager) -> Response {
     };
 
     let result = manager.with_session(session_id, |session| {
-        let mut body = state::state_value(&session.sim.world, session.seed, session.outcome());
+        let mut body = state::state_value(&session.sim.world, session.seed, &session.outcome());
         if let Some(faction) = faction_param
             && let Value::Object(map) = &mut body
         {
@@ -464,7 +481,7 @@ fn handle_step(request: &Request, manager: &SessionManager) -> Response {
                 ("terminated", Value::Bool(terminated)),
                 (
                     "info",
-                    Value::obj(vec![("outcome", outcome_value(outcome, session)), ("events", Value::arr(per_day_events))]),
+                    Value::obj(vec![("outcome", outcome_value(&outcome, session)), ("events", Value::arr(per_day_events))]),
                 ),
             ]),
         )
@@ -486,10 +503,12 @@ fn handle_sessions(manager: &SessionManager) -> Response {
                 ("idle_secs", Value::num(s.idle_secs)),
                 (
                     "outcome",
-                    match s.outcome {
-                        Outcome::Victory(f) => {
-                            Value::obj(vec![("type", Value::str("victory")), ("faction", Value::num(f.0 as f64))])
-                        }
+                    match &s.outcome {
+                        Outcome::Victory { condition, winners } => Value::obj(vec![
+                            ("type", Value::str("victory")),
+                            ("condition", Value::str(victory_condition_key(*condition))),
+                            ("winners", Value::arr(winners.iter().map(|f| Value::num(f.0 as f64)).collect())),
+                        ]),
                         Outcome::Stalemate => Value::obj(vec![("type", Value::str("stalemate"))]),
                         Outcome::Ongoing => Value::obj(vec![("type", Value::str("ongoing"))]),
                     },

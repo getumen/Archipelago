@@ -13,7 +13,7 @@ use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::Outcome;
-use archipelago_sim::world::{Domain, Station, World};
+use archipelago_sim::world::{Domain, Station, VictoryCondition, World};
 
 use crate::json::Value;
 
@@ -45,12 +45,41 @@ fn construction_value(construction: &Option<Construction>) -> Value {
     }
 }
 
-fn outcome_value(world: &World, outcome: Outcome) -> Value {
+/// The declared-condition key `scenario::parse_victory_condition` reads
+/// from `"type"` - reused verbatim so a client can trace a `Victory`
+/// outcome back to the exact clause in the scenario's `victory` array.
+fn victory_condition_key(condition: VictoryCondition) -> &'static str {
+    match condition {
+        VictoryCondition::Conquest => "conquest",
+        VictoryCondition::Coalition => "coalition",
+        VictoryCondition::Domination(_) => "domination",
+    }
+}
+
+/// A `Victory` outcome names every winner honestly (`Outcome::Victory`'s
+/// doc): `"winners"` is always a non-empty array, one entry per faction
+/// that actually won - never a single `"faction"` field that would pick an
+/// arbitrary representative out of a `Coalition`/`Domination` group and
+/// silently drop the rest.
+fn outcome_value(world: &World, outcome: &Outcome) -> Value {
     match outcome {
-        Outcome::Victory(faction) => Value::obj(vec![
+        Outcome::Victory { condition, winners } => Value::obj(vec![
             ("type", Value::str("victory")),
-            ("faction", Value::num(faction.0 as f64)),
-            ("faction_name", Value::str(world.faction(faction).name.clone())),
+            ("condition", Value::str(victory_condition_key(*condition))),
+            (
+                "winners",
+                Value::arr(
+                    winners
+                        .iter()
+                        .map(|&f| {
+                            Value::obj(vec![
+                                ("faction", Value::num(f.0 as f64)),
+                                ("faction_name", Value::str(world.faction(f).name.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
         ]),
         Outcome::Stalemate => Value::obj(vec![("type", Value::str("stalemate"))]),
         Outcome::Ongoing => Value::obj(vec![("type", Value::str("ongoing"))]),
@@ -224,7 +253,7 @@ fn units_value(world: &World) -> Value {
 /// one faction's point of view - every field the simulation tracks is
 /// already visible to every player in this game (no fog of war), so unlike
 /// `observation_value` below this doesn't take a `faction` at all.
-pub fn state_value(world: &World, seed: u64, outcome: Outcome) -> Value {
+pub fn state_value(world: &World, seed: u64, outcome: &Outcome) -> Value {
     Value::obj(vec![
         ("seed", Value::num(seed as f64)),
         ("day", Value::num(world.day as f64)),

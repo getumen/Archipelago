@@ -198,5 +198,11 @@
       "capital": "kyushu",
       "regions": ["chugoku", "shikoku", "kyushu"]
     }
+  ],
+
+  "diplomacy": { "blocs": [] },
+
+  "victory": [
+    { "type": "conquest" }
   ]
 }

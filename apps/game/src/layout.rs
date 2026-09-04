@@ -115,7 +115,9 @@ mod tests {
       "sea_zones": [],
       "factions": [
         { "id": "f1", "name": "F1", "capital": "a", "regions": ["a", "b", "c", "d", "e"] }
-      ]
+      ],
+      "diplomacy": { "blocs": [] },
+      "victory": [ { "type": "conquest" } ]
     }
     "#;
 

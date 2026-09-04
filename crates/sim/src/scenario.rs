@@ -26,7 +26,7 @@ use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::json::{self, Value};
 use crate::military::Unit;
-use crate::world::{Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, World};
+use crate::world::{DominationShare, Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, VictoryCondition, VictoryDeclaration, World};
 
 /// The embedded default scenario (docs/phase6-spec.md "ファイルは
 /// `scenarios/` に置く。既定は現行の 10 地域（`mvp.json`）"). Baked into the
@@ -144,6 +144,14 @@ pub enum ScenarioError {
     RegionClaimedTwice { region: String, first: String, second: String },
     /// A faction's `regions` list is empty.
     FactionWithoutTerritory { faction: String },
+    /// A `diplomacy.blocs` entry names fewer than 2 factions - an alliance
+    /// of one is meaningless: a faction absent from every bloc is already,
+    /// implicitly, at war with everyone (`DiplomacyDef`'s doc).
+    BlocTooSmall { bloc: String, size: usize },
+    /// The same faction is named in two different `diplomacy.blocs`
+    /// entries, or twice within the same one - every faction may start in
+    /// at most one bloc.
+    FactionInMultipleBlocs { faction: String, first_bloc: String, second_bloc: String },
     /// The region graph (built from every region's `links`) isn't
     /// connected - these regions can't reach the rest by any link at all,
     /// so supply could never reach them (docs/phase6-spec.md "グラフが連結
@@ -186,6 +194,12 @@ impl fmt::Display for ScenarioError {
             }
             ScenarioError::FactionWithoutTerritory { faction } => {
                 write!(f, "faction `{faction}` owns no regions")
+            }
+            ScenarioError::BlocTooSmall { bloc, size } => {
+                write!(f, "diplomacy bloc `{bloc}` names {size} faction(s); an alliance needs at least 2")
+            }
+            ScenarioError::FactionInMultipleBlocs { faction, first_bloc, second_bloc } => {
+                write!(f, "faction `{faction}` is named in both diplomacy bloc `{first_bloc}` and `{second_bloc}`")
             }
             ScenarioError::Disconnected { unreachable } => {
                 write!(f, "region graph is not connected: unreachable from the rest of the map: {}", unreachable.join(", "))
@@ -248,6 +262,42 @@ pub struct FactionDef {
     pub regions: Vec<String>,
 }
 
+/// One starting alliance bloc (`DiplomacyDef`'s doc). Every faction listed
+/// here starts allied (`Stance::Alliance`) with every other faction in the
+/// same bloc - `id`/`name` exist purely for readability (error messages,
+/// `to_json` round-tripping) and are never looked up by `build_world`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlocDef {
+    pub id: String,
+    pub name: String,
+    pub factions: Vec<String>,
+}
+
+/// A scenario's required starting-diplomacy declaration
+/// (docs/conventions.md §3 "壊れたデータで暗黙に既定値へ落ちないこと",
+/// applied here to a state Stage 3B previously hard-coded rather than to a
+/// malformed field: "初期状態は全勢力が相互に War" - docs/phase3-spec.md's
+/// Stage 3B baseline - was always true for `Diplomacy::new`, but nothing in
+/// a scenario file ever *said* so, which made it an implied default no
+/// scenario could opt out of. Every scenario must now spell out its own
+/// starting diplomatic state; `scenarios/mvp.json`'s `"blocs": []` is that
+/// same all-at-war baseline written down explicitly, which is exactly why
+/// its `--json` hash is unchanged by this field existing.
+///
+/// `blocs` partitions *some* factions into alliance groups; any faction
+/// named in no bloc is (implicitly) a bloc of one - it starts at war with
+/// everyone, exactly as `Diplomacy::new` always made every faction start.
+/// Grouping by bloc (a named roster of members) rather than a flat list of
+/// allied pairs is deliberate: a reader has to hold `blocs.len()` rosters in
+/// their head to see the whole starting alignment, not
+/// `sum(bloc.len() choose 2)` individual pairs - see
+/// `scenarios/japan47.json`'s two 3-faction blocs, 2 rosters but 6 implied
+/// alliance pairs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiplomacyDef {
+    pub blocs: Vec<BlocDef>,
+}
+
 /// The parsed (but not necessarily valid) contents of a scenario file - the
 /// data `docs/phase6-spec.md`'s "シナリオの外部化" moves out of Rust source.
 /// `RegionDef` order fixes `RegionId` assignment (first region in the file
@@ -258,6 +308,13 @@ pub struct Scenario {
     pub regions: Vec<RegionDef>,
     pub sea_zones: Vec<SeaZoneDef>,
     pub factions: Vec<FactionDef>,
+    pub diplomacy: DiplomacyDef,
+    /// This scenario's required, declared victory conditions
+    /// (design.md §5: "勝利条件は一つに限定しない"), checked by
+    /// `Simulation::outcome` in this same order - see `parse_victory`'s doc
+    /// for the file format and why this has no default. Always non-empty -
+    /// `VictoryDeclaration`'s doc.
+    pub victory: VictoryDeclaration,
 }
 
 fn schema_err(msg: impl Into<String>) -> ScenarioError {
@@ -381,6 +438,70 @@ fn parse_faction(v: &Value, path: &str) -> Result<FactionDef, ScenarioError> {
     Ok(FactionDef { id, name, capital, regions })
 }
 
+fn parse_bloc(v: &Value, path: &str) -> Result<BlocDef, ScenarioError> {
+    let id = require_str(v, path, "id")?;
+    let name = require_str(v, path, "name")?;
+    let factions = string_array(require_object_field(v, path, "factions")?, &format!("{path}.factions"))?;
+    Ok(BlocDef { id, name, factions })
+}
+
+fn parse_diplomacy(v: &Value, path: &str) -> Result<DiplomacyDef, ScenarioError> {
+    let blocs_value = require_object_field(v, path, "blocs")?;
+    let blocs_path = format!("{path}.blocs");
+    let blocs = require_array(blocs_value, &blocs_path)?
+        .iter()
+        .enumerate()
+        .map(|(i, b)| parse_bloc(b, &format!("{blocs_path}[{i}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DiplomacyDef { blocs })
+}
+
+/// Parses one entry of the required `victory` array (`Scenario::victory`'s
+/// doc) into the `sim::world::VictoryCondition` `Simulation::outcome` reads
+/// directly - there is no separate scenario-level "definition" type to keep
+/// in sync with it, since (unlike `diplomacy.blocs`) nothing here names a
+/// region/faction id that needs resolving first.
+fn parse_victory_condition(v: &Value, path: &str) -> Result<VictoryCondition, ScenarioError> {
+    let kind = require_str(v, path, "type")?;
+    match kind.as_str() {
+        "conquest" => Ok(VictoryCondition::Conquest),
+        "coalition" => Ok(VictoryCondition::Coalition),
+        "domination" => {
+            let share = require_f32(v, path, "share")?;
+            let share = DominationShare::new(share).ok_or_else(|| {
+                schema_err(format!("`{path}.share` must be greater than 0.0 and at most 1.0, got {share}"))
+            })?;
+            Ok(VictoryCondition::Domination(share))
+        }
+        other => Err(schema_err(format!("`{path}.type` names unknown victory condition `{other}`"))),
+    }
+}
+
+/// Parses the scenario's required `victory` field - the array of
+/// `VictoryCondition`s `Simulation::outcome` checks, in this same order,
+/// every tick (docs/conventions.md §3: absent or malformed is a load
+/// error, never an implied default - see `missing_victory_declaration_is_
+/// rejected`). `scenarios/mvp.json`'s `"victory": [{"type":"conquest"}]`
+/// spells out exactly the one rule this project ever implemented before
+/// scenario-declared victory conditions existed, which is why its
+/// behaviour (and `--json` hash) is unchanged by this field existing.
+///
+/// Rejected here, not just at `validate` time, if the array is empty: an
+/// empty declaration would leave `Simulation::outcome` with no condition
+/// ever able to fire, so a scenario could walk straight into the same
+/// permanently-unreachable-victory state a required `victory` field exists
+/// to prevent (see `VictoryDeclaration`'s doc and
+/// `empty_victory_declaration_is_rejected`).
+fn parse_victory(v: &Value, path: &str) -> Result<VictoryDeclaration, ScenarioError> {
+    let conditions = require_array(v, path)?
+        .iter()
+        .enumerate()
+        .map(|(i, c)| parse_victory_condition(c, &format!("{path}[{i}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    VictoryDeclaration::new(conditions)
+        .ok_or_else(|| schema_err(format!("`{path}` must declare at least one victory condition, got an empty array")))
+}
+
 impl Scenario {
     /// Parses (but does not validate) a scenario document. Call `validate`
     /// before `build_world` - `load_str`/`load_file` do both for you.
@@ -407,7 +528,13 @@ impl Scenario {
             .map(|(i, f)| parse_faction(f, &format!("factions[{i}]")))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Scenario { regions, sea_zones, factions })
+        let diplomacy_value = require_object_field(&root, "$", "diplomacy")?;
+        let diplomacy = parse_diplomacy(diplomacy_value, "diplomacy")?;
+
+        let victory_value = require_object_field(&root, "$", "victory")?;
+        let victory = parse_victory(victory_value, "victory")?;
+
+        Ok(Scenario { regions, sea_zones, factions, diplomacy, victory })
     }
 
     /// Every check from docs/phase6-spec.md's "検証": non-empty, ids exist,
@@ -556,6 +683,40 @@ impl Scenario {
             }
         }
 
+        // Diplomacy blocs: bloc ids unique, every named faction exists, every
+        // bloc names at least 2 members (`BlocTooSmall`), and every faction
+        // belongs to at most one bloc (`FactionInMultipleBlocs`) - checked
+        // before connectivity since starting diplomacy doesn't depend on the
+        // region graph at all.
+        let mut bloc_ids = std::collections::BTreeSet::new();
+        for bloc in &self.diplomacy.blocs {
+            if !bloc_ids.insert(bloc.id.as_str()) {
+                return Err(ScenarioError::DuplicateId { kind: "diplomacy bloc", id: bloc.id.clone() });
+            }
+        }
+        let mut bloc_member_of: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+        for bloc in &self.diplomacy.blocs {
+            if bloc.factions.len() < 2 {
+                return Err(ScenarioError::BlocTooSmall { bloc: bloc.id.clone(), size: bloc.factions.len() });
+            }
+            for faction in &bloc.factions {
+                if !faction_ids.contains(faction.as_str()) {
+                    return Err(ScenarioError::UnknownId {
+                        context: format!("diplomacy bloc `{}`", bloc.id),
+                        id: faction.clone(),
+                    });
+                }
+                if let Some(&first) = bloc_member_of.get(faction.as_str()) {
+                    return Err(ScenarioError::FactionInMultipleBlocs {
+                        faction: faction.clone(),
+                        first_bloc: first.to_string(),
+                        second_bloc: bloc.id.clone(),
+                    });
+                }
+                bloc_member_of.insert(faction.as_str(), bloc.id.as_str());
+            }
+        }
+
         // Connectivity: an isolated region can never receive supply
         // (docs/phase6-spec.md "グラフが連結か").
         if !self.regions.is_empty() {
@@ -591,6 +752,8 @@ impl Scenario {
             self.regions.iter().enumerate().map(|(i, r)| (r.id.as_str(), i as u32)).collect();
         let zone_index_of: std::collections::HashMap<&str, u32> =
             self.sea_zones.iter().enumerate().map(|(i, z)| (z.id.as_str(), i as u32)).collect();
+        let faction_index_of: std::collections::HashMap<&str, u32> =
+            self.factions.iter().enumerate().map(|(i, f)| (f.id.as_str(), i as u32)).collect();
 
         let mut owner_of: Vec<FactionId> = vec![FactionId(0); self.regions.len()];
         for (f_idx, fac) in self.factions.iter().enumerate() {
@@ -723,13 +886,21 @@ impl Scenario {
 
         let supply: Vec<f32> = regions.iter().map(Region::supply_source).collect();
 
-        // Stage 3B (docs/phase3-spec.md "Stage 3B": "初期状態は全勢力が相互に
-        // War"): `Diplomacy::new` starts every pair at `Stance::War`, exactly
-        // reproducing the pre-Stage-3B assumption every earlier
-        // scenario/test already relies on.
-        let diplomacy = Diplomacy::new(self.factions.len());
+        // Scenario-scoped starting diplomacy (this type's own doc): every
+        // pair inside a declared bloc starts at `Stance::Alliance`, every
+        // other pair starts at `Stance::War` - `Diplomacy::new_with_blocs`
+        // with an empty `blocs` list (`scenarios/mvp.json`'s declaration)
+        // reproduces `Diplomacy::new`'s old unconditional "初期状態は全勢力
+        // が相互に War" (docs/phase3-spec.md Stage 3B) exactly.
+        let blocs: Vec<Vec<FactionId>> = self
+            .diplomacy
+            .blocs
+            .iter()
+            .map(|b| b.factions.iter().map(|f| FactionId(faction_index_of[f.as_str()])).collect())
+            .collect();
+        let diplomacy = Diplomacy::new_with_blocs(self.factions.len(), &blocs);
 
-        World { regions, factions, units, supply, sea_zones, day: 0, diplomacy }
+        World { regions, factions, units, supply, sea_zones, day: 0, diplomacy, victory: self.victory.clone() }
     }
 
     /// The inverse of `parse`: renders this scenario back to the same JSON
@@ -797,7 +968,42 @@ impl Scenario {
                 })
                 .collect(),
         );
-        Value::obj(vec![("regions", regions), ("sea_zones", sea_zones), ("factions", factions)]).to_json()
+        let diplomacy = Value::obj(vec![(
+            "blocs",
+            Value::arr(
+                self.diplomacy
+                    .blocs
+                    .iter()
+                    .map(|b| {
+                        Value::obj(vec![
+                            ("id", Value::str(b.id.clone())),
+                            ("name", Value::str(b.name.clone())),
+                            ("factions", Value::arr(b.factions.iter().map(|f| Value::str(f.clone())).collect())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        )]);
+        let victory = Value::arr(
+            self.victory
+                .iter()
+                .map(|v| match v {
+                    VictoryCondition::Conquest => Value::obj(vec![("type", Value::str("conquest"))]),
+                    VictoryCondition::Coalition => Value::obj(vec![("type", Value::str("coalition"))]),
+                    VictoryCondition::Domination(share) => {
+                        Value::obj(vec![("type", Value::str("domination")), ("share", Value::f32num(share.get()))])
+                    }
+                })
+                .collect(),
+        );
+        Value::obj(vec![
+            ("regions", regions),
+            ("sea_zones", sea_zones),
+            ("factions", factions),
+            ("diplomacy", diplomacy),
+            ("victory", victory),
+        ])
+        .to_json()
     }
 }
 

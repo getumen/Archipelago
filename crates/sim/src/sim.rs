@@ -17,12 +17,20 @@ use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
 use crate::trade;
-use crate::world::World;
+use crate::world::{VictoryCondition, World};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// How a run ended, or that it hasn't. `Victory` names every winner
+/// honestly - a `Coalition`/`Domination` win can name more than one faction,
+/// so this can never collapse a multi-faction win down to one arbitrary
+/// representative the way a single `FactionId` would (see `outcome`'s doc
+/// and `evaluate_victory`). `winners` is never empty when this variant is
+/// constructed, and is always sorted by `FactionId` so every consumer
+/// (headless `--json`, the API, the Bevy client, the Gymnasium env) reports
+/// the same winner list in the same order for the same game.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Outcome {
     Ongoing,
-    Victory(FactionId),
+    Victory { condition: VictoryCondition, winners: Vec<FactionId> },
     Stalemate,
 }
 
@@ -217,9 +225,20 @@ impl Simulation {
         (events, timings)
     }
 
-    /// `Outcome::Victory` once only one faction survives, `Outcome::Stalemate`
-    /// once the day limit is reached (or nobody survives), `Outcome::Ongoing`
-    /// otherwise.
+    /// `Outcome::Victory` the instant any of `self.world.victory`'s declared
+    /// conditions is satisfied (checked in declaration order - the first to
+    /// fire wins), `Outcome::Stalemate` once the day limit is reached (or
+    /// nobody survives), `Outcome::Ongoing` otherwise.
+    ///
+    /// design.md §5 ("勝利条件は一つに限定しない"): which conditions are
+    /// active, and any thresholds, are declared per scenario
+    /// (`scenario::parse_victory`) rather than fixed here - `scenarios/
+    /// mvp.json` declares only `VictoryCondition::Conquest`, reproducing
+    /// this method's entire old behaviour (and its unchanged `--json`
+    /// hash), while `scenarios/japan47.json` also declares `Coalition`/
+    /// `Domination` so a starting bloc's victory isn't stuck forever above
+    /// `alive.len() == 1` (docs/future-work.md "japan47 が 720 日で決着
+    /// しない").
     pub fn outcome(&self, max_days: u32) -> Outcome {
         let alive: Vec<FactionId> = self
             .world
@@ -228,12 +247,92 @@ impl Simulation {
             .filter(|f| f.alive)
             .map(|f| f.id)
             .collect();
-        if alive.len() == 1 {
-            return Outcome::Victory(alive[0]);
+        if let Some((condition, winners)) = evaluate_victory(&self.world, &alive) {
+            return Outcome::Victory { condition, winners };
         }
         if alive.is_empty() || self.world.day >= max_days {
             return Outcome::Stalemate;
         }
         Outcome::Ongoing
     }
+}
+
+/// Checks `world.victory`'s declared conditions, in order, against the
+/// current `alive` roster - the first one satisfied wins, naming every
+/// member of the winning group (sorted by `FactionId`), never an arbitrary
+/// single representative.
+fn evaluate_victory(world: &World, alive: &[FactionId]) -> Option<(VictoryCondition, Vec<FactionId>)> {
+    for &condition in &world.victory {
+        if let Some(winners) = victory_winners(world, alive, condition) {
+            return Some((condition, winners));
+        }
+    }
+    None
+}
+
+/// Whether `condition` is currently satisfied, and if so, every winning
+/// faction (sorted by `FactionId`) - see `VictoryCondition`'s own doc for
+/// what each variant means.
+fn victory_winners(world: &World, alive: &[FactionId], condition: VictoryCondition) -> Option<Vec<FactionId>> {
+    match condition {
+        VictoryCondition::Conquest => {
+            if alive.len() == 1 {
+                Some(alive.to_vec())
+            } else {
+                None
+            }
+        }
+        VictoryCondition::Coalition => {
+            // An empty `alive` is Stalemate's business, never a win -
+            // `allied_group` below assumes at least one member to seed from.
+            let &first = alive.first()?;
+            let group = allied_group(world, alive, first);
+            if group.len() == alive.len() {
+                let mut winners = group;
+                winners.sort();
+                Some(winners)
+            } else {
+                None
+            }
+        }
+        VictoryCondition::Domination(share) => {
+            let total_regions = world.regions.len() as f32;
+            let mut visited: Vec<FactionId> = Vec::new();
+            for &f in alive {
+                if visited.contains(&f) {
+                    continue;
+                }
+                let group = allied_group(world, alive, f);
+                let held: usize = group.iter().map(|&g| world.region_count(g)).sum();
+                if held as f32 >= share.get() * total_regions {
+                    let mut winners = group;
+                    winners.sort();
+                    return Some(winners);
+                }
+                visited.extend(&group);
+            }
+            None
+        }
+    }
+}
+
+/// `faction` plus every other member of `alive` reachable through a chain
+/// of `Stance::Alliance` edges - the one notion of "one allied group" both
+/// `VictoryCondition::Coalition` (does this group cover every survivor?)
+/// and `VictoryCondition::Domination` (does this group's *combined*
+/// territory clear the threshold?) are built from, so a chain of alliances
+/// counts as one group exactly like a scenario-declared bloc (a complete
+/// graph among its members, `Diplomacy::new_with_blocs`) does.
+fn allied_group(world: &World, alive: &[FactionId], faction: FactionId) -> Vec<FactionId> {
+    let mut group = vec![faction];
+    let mut frontier = vec![faction];
+    while let Some(f) = frontier.pop() {
+        for &g in alive {
+            if !group.contains(&g) && world.diplomacy.stance(f, g) == diplomacy::Stance::Alliance {
+                group.push(g);
+                frontier.push(g);
+            }
+        }
+    }
+    group
 }

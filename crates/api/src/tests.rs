@@ -120,7 +120,7 @@ fn api_run_matches_headless() {
     // the numbers - and the JSON text - are identical; round-tripping the
     // reference the same way normalizes both sides to what actually matters
     // here: the same bytes on the wire.
-    let reference_json = crate::state::state_value(&sim.world, SEED, sim.outcome(crate::session::DEFAULT_MAX_DAYS)).to_json();
+    let reference_json = crate::state::state_value(&sim.world, SEED, &sim.outcome(crate::session::DEFAULT_MAX_DAYS)).to_json();
     let reference_state = json::parse(&reference_json, 64).unwrap();
 
     assert_eq!(api_state.get("day"), reference_state.get("day"));

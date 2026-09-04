@@ -938,23 +938,45 @@ pub struct HeuristicAgent {
 /// well past day 720 - re-run to day 6000, the same seed reaches 4 of 6
 /// factions actually eliminated). The elimination bar itself (`Outcome::
 /// Victory` needs `alive.len() == 1`, i.e. every *other* faction's
-/// `region_count` at zero) is what won't fit in 720 days here: japan47
-/// starts 6 factions in `Diplomacy::new`'s unconditional mutual War (same
-/// as mvp), so a leader has to grind down five separate rivals instead of
-/// mvp's two, and the pace that finishes territory conquest is set by
-/// `unit_cap`'s industry-driven army growth and `balance.rs`'s combat/
-/// occupation constants - both shared with mvp and therefore off limits
-/// for this fix (retuning either changes mvp's byte-identical `--json`
-/// hash too). Confirmed empirically, not by inspection alone: `COMBAT_DAMAGE`
-/// at up to 10x, `OCCUPATION_RATE`/`OCCUPATION_DECAY` at 3x/5x, `unit_cap`'s
-/// divisor from 1/3 to 5x, and this caution spread pushed to even more
-/// extreme values, were each tried in isolation against 20-50 seeds; none
-/// changed the day-720 outcome type. A genuine fix needs either a longer
-/// day budget scaled to region count, or a scenario-scoped mechanism (e.g.
-/// letting a scenario specify non-`War` starting `Stance` pairs, forming
-/// blocs so a leader only has to eliminate one rival bloc rather than five
-/// separate factions) - out of scope for this pass since either changes
-/// shared code paths mvp also runs through.
+/// `region_count` at zero) is what won't fit in 720 days here: at the time
+/// this was measured, japan47 started all 6 factions in `Diplomacy::new`'s
+/// unconditional mutual War (same as mvp), so a leader had to grind down
+/// five separate rivals instead of mvp's two, and the pace that finishes
+/// territory conquest is set by `unit_cap`'s industry-driven army growth
+/// and `balance.rs`'s combat/occupation constants - both shared with mvp
+/// and therefore off limits for this fix (retuning either changes mvp's
+/// byte-identical `--json` hash too). Confirmed empirically, not by
+/// inspection alone: `COMBAT_DAMAGE` at up to 10x, `OCCUPATION_RATE`/
+/// `OCCUPATION_DECAY` at 3x/5x, `unit_cap`'s divisor from 1/3 to 5x, and
+/// this caution spread pushed to even more extreme values, were each tried
+/// in isolation against 20-50 seeds; none changed the day-720 outcome
+/// type.
+///
+/// `scenarios/japan47.json` now declares its own starting blocs
+/// (`archipelago_sim::scenario::DiplomacyDef`, docs/future-work.md "japan47
+/// が 720 日で決着しない") - two 3-faction alliances (東日本/西日本) instead
+/// of a six-way free-for-all - which was the scenario-scoped mechanism this
+/// note used to describe as out of scope. Re-measured with the blocs in
+/// place: seeds 1-5 *still* end in `Outcome::Stalemate` at day 720, and
+/// territory barely moves at all in that window (a single contested
+/// border between the two blocs, instead of six-way chaos, is a much
+/// narrower front). Worse, this alone can never reach `Outcome::Victory` no
+/// matter how long a run goes: `HeuristicAgent` never issues `Action::
+/// DeclareWar` or `Action::BreakTreaty` against anyone, so two factions
+/// that start (or end up) allied never fight each other, and `alive.len()`
+/// can never drop to `1` while an allied pair both still hold territory.
+/// Blocs shorten *whom* a leader has to eliminate, not whether the last
+/// step (turning on one's own ally) can ever happen under default play -
+/// that gap was a victory-condition question. It's since been closed from
+/// the other direction, not this one: `archipelago_sim::world::
+/// VictoryCondition::Coalition` makes victory reachable the instant every
+/// survivor belongs to one mutually-allied group, without requiring a bloc
+/// to ever turn on itself - see `scenarios/japan47.json`'s `victory`
+/// declaration and `Simulation::outcome`'s doc. `HeuristicAgent` still never
+/// issues `DeclareWar`/`BreakTreaty` against an ally, so the mechanism this
+/// paragraph describes (a bloc eliminating its own members) remains
+/// unimplemented - it just no longer needs to be, now that `Coalition`/
+/// `Domination` give a bloc a way to win without it.
 pub const DEFAULT_CAUTION: [f32; 8] = [1.15, 1.30, 1.45, 0.80, 1.90, 0.95, 1.70, 2.10];
 
 /// Default per-faction diplomatic disposition spread, paired with
