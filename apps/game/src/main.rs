@@ -18,6 +18,7 @@ fn print_usage_and_exit(msg: &str) -> ! {
          debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames>] \
          [--debug-supply-overlay] [--debug-open-diplomacy] [--debug-open-newspaper] \
+         [--debug-open-policy] [--debug-select-region <region index or name>] [--debug-select-units] \
          [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]"
     );
     std::process::exit(1);
@@ -39,6 +40,9 @@ struct Args {
     debug_supply_overlay: bool,
     debug_open_diplomacy: bool,
     debug_open_newspaper: bool,
+    debug_open_policy: bool,
+    debug_select_region: Option<String>,
+    debug_select_units: bool,
     debug_camera_region: Option<String>,
     debug_camera_zoom: f32,
     /// `--cjk-font <path>`: overrides `apps/game/src/app/fonts.rs`'s
@@ -71,6 +75,9 @@ fn parse_args() -> Args {
     let mut debug_supply_overlay = false;
     let mut debug_open_diplomacy = false;
     let mut debug_open_newspaper = false;
+    let mut debug_open_policy = false;
+    let mut debug_select_region = None;
+    let mut debug_select_units = false;
     let mut debug_camera_region = None;
     let mut debug_camera_zoom = DEFAULT_DEBUG_CAMERA_ZOOM;
     let mut cjk_font = None;
@@ -107,6 +114,11 @@ fn parse_args() -> Args {
             "--debug-supply-overlay" => debug_supply_overlay = true,
             "--debug-open-diplomacy" => debug_open_diplomacy = true,
             "--debug-open-newspaper" => debug_open_newspaper = true,
+            "--debug-open-policy" => debug_open_policy = true,
+            "--debug-select-region" => {
+                debug_select_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-select-region expects a region index or name")));
+            }
+            "--debug-select-units" => debug_select_units = true,
             "--debug-camera-region" => {
                 debug_camera_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-region expects a region index or name")));
             }
@@ -154,6 +166,9 @@ fn parse_args() -> Args {
         debug_supply_overlay,
         debug_open_diplomacy,
         debug_open_newspaper,
+        debug_open_policy,
+        debug_select_region,
+        debug_select_units,
         debug_camera_region,
         debug_camera_zoom,
         cjk_font,
@@ -236,12 +251,16 @@ fn main() {
     let play_config = play.map(|player| PlayConfig { player, record: args.record.clone(), replay: replay_days });
 
     let debug_camera_region = args.debug_camera_region.as_deref().map(|v| resolve_region(&world, v));
+    let debug_select_region = args.debug_select_region.as_deref().map(|v| resolve_region(&world, v));
     let screenshot = args.screenshot.map(|path| ScreenshotConfig {
         path,
         after_frames: args.screenshot_after,
         open_diplomacy: args.debug_open_diplomacy,
         open_newspaper: args.debug_open_newspaper,
+        open_policy: args.debug_open_policy,
         supply_overlay: args.debug_supply_overlay,
+        select_region: debug_select_region,
+        select_units: args.debug_select_units,
         camera_focus_region: debug_camera_region,
         camera_zoom: args.debug_camera_zoom,
     });

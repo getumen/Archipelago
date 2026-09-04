@@ -88,14 +88,25 @@ pub struct SimDriver {
     /// tick to grow the `--record` buffer with exactly what was actually
     /// applied that day, never a UI-side guess at it.
     last_human_actions: Vec<Action>,
-    /// `Simulation::apply`'s rejections for the human/replay faction's
-    /// actions on the most recent `tick()` - the UI reads this to surface
-    /// *why* an order didn't happen (docs/phase7-spec.md "命令の可否を隠さ
-    /// ない"). Not index-aligned with `last_human_actions` (`Simulation::
-    /// apply` itself only ever returns the list of errors, not a per-action
-    /// `Result`) - in practice the player almost always queues one action
-    /// per paused day, so this is unambiguous where it matters.
-    last_human_errors: Vec<ActionError>,
+    /// The human/replay faction's own rejected actions from the most recent
+    /// `tick()`, each paired with *which* `Action` it was - the panel UI
+    /// (Stage 8B, owner ask "パネルUI") reads this to attach a rejection's
+    /// reason to the specific panel the order was issued from (region/unit/
+    /// policy/diplomacy), not only a single undifferentiated corner
+    /// (docs/phase7-spec.md "命令の可否を隠さない"). Built by replaying this
+    /// faction's actions one at a time through `action::apply_action`
+    /// directly (`tick`'s own doc) instead of the single batched
+    /// `Simulation::apply(faction, &actions)` every other faction still
+    /// uses - `Simulation::apply` itself only ever returns the flat list of
+    /// errors with no per-action correlation, and `crates/sim` stays
+    /// untouched (docs/conventions.md's constraint for this task), so the
+    /// pairing has to happen here instead. Calling `action::apply_action` in
+    /// the same order for the same faction produces bit-identical `World`
+    /// mutations to what `Simulation::apply`'s own internal loop would have
+    /// done (it's the same function, called the same number of times in the
+    /// same order) - this changes nothing about *what* happens, only what
+    /// this struct remembers about it afterward.
+    last_human_action_errors: Vec<(Action, ActionError)>,
 }
 
 impl SimDriver {
@@ -134,7 +145,7 @@ impl SimDriver {
             };
             controllers.push(controller);
         }
-        SimDriver { sim, controllers, human_index, last_human_actions: Vec::new(), last_human_errors: Vec::new() }
+        SimDriver { sim, controllers, human_index, last_human_actions: Vec::new(), last_human_action_errors: Vec::new() }
     }
 
     /// The `--play`ed faction, if any.
@@ -160,9 +171,9 @@ impl SimDriver {
         &self.last_human_actions
     }
 
-    /// See this struct's own field doc.
-    pub fn last_human_errors(&self) -> &[ActionError] {
-        &self.last_human_errors
+    /// See `last_human_action_errors`'s own field doc.
+    pub fn last_human_action_errors(&self) -> &[(Action, ActionError)] {
+        &self.last_human_action_errors
     }
 
     /// Advances the simulation by exactly one day - see this module's own
@@ -172,7 +183,7 @@ impl SimDriver {
     /// order, then one `Simulation::step`).
     pub fn tick(&mut self) -> Vec<Event> {
         self.last_human_actions.clear();
-        self.last_human_errors.clear();
+        self.last_human_action_errors.clear();
         for f_idx in 0..self.sim.world.factions.len() {
             let faction = FactionId(f_idx as u32);
             if !self.sim.world.factions[f_idx].alive {
@@ -185,10 +196,21 @@ impl SimDriver {
                 Controller::Replay(agent) => agent.decide(&obs),
             };
             let is_human_slot = Some(f_idx) == self.human_index;
-            let errors = self.sim.apply(faction, &actions);
             if is_human_slot {
+                // Applied one action at a time (via the same `action::
+                // apply_action` `Simulation::apply` calls internally,
+                // `last_human_action_errors`'s own doc) instead of through
+                // `Simulation::apply`'s batch form, purely to capture which
+                // action produced which error - identical `World` mutations
+                // either way.
+                self.last_human_action_errors = actions
+                    .iter()
+                    .cloned()
+                    .filter_map(|act| archipelago_sim::action::apply_action(&mut self.sim.world, faction, act.clone()).err().map(|e| (act, e)))
+                    .collect();
                 self.last_human_actions = actions;
-                self.last_human_errors = errors;
+            } else {
+                self.sim.apply(faction, &actions);
             }
         }
         self.sim.step()

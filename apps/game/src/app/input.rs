@@ -91,6 +91,7 @@ pub(super) fn keyboard_input(
     mut selected_faction: ResMut<SelectedFaction>,
     mut menu: ResMut<MenuRegion>,
     mut diplomacy: ResMut<DiplomacyPanel>,
+    mut policy: ResMut<super::PolicyPanel>,
     mut active_good: ResMut<ActiveGood>,
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
@@ -147,8 +148,15 @@ pub(super) fn keyboard_input(
     }
 
     // The diplomacy panel similarly takes over its own keys while open -
-    // "条約の提案・受諾・拒否は外交パネルから".
+    // "条約の提案・受諾・拒否は外交パネルから". `P` still switches straight to
+    // the policy panel from here (mirrors `panels::handle_policy_toggle`'s
+    // mouse path, which isn't gated on `diplomacy.open` at all).
     if diplomacy.open {
+        if keys.just_pressed(KeyCode::KeyP) {
+            diplomacy.open = false;
+            policy.0 = true;
+            return;
+        }
         handle_diplomacy_keys(&keys, &mut diplomacy, &player, &mut sim, &mut nl_compose);
         return;
     }
@@ -192,10 +200,35 @@ pub(super) fn keyboard_input(
     // observing-only run (`player.0 == None`) never reaches here.
     if keys.just_pressed(KeyCode::KeyD) {
         diplomacy.open = true;
+        policy.0 = false;
         if diplomacy.target.is_none() {
             diplomacy.target = sim.0.world().factions.iter().find(|f| f.id != player_faction && f.alive).map(|f| f.id);
         }
         return;
+    }
+    // Stage 8B's policy panel (`panels::PolicyPanelRoot`) - toggled the same
+    // way `D` toggles diplomacy.
+    if keys.just_pressed(KeyCode::KeyP) {
+        policy.0 = !policy.0;
+        if policy.0 {
+            diplomacy.open = false;
+        }
+        return;
+    }
+    // Stage 8B: hold/reinforce every currently selected unit - previously
+    // reachable through no input path at all in this client (only
+    // `MoveUnit`, via a map click, existed before). `panels::UnitPanelRoot`'s
+    // per-unit buttons do the same, one unit at a time; these two keys act
+    // on the whole current selection at once.
+    if keys.just_pressed(KeyCode::KeyH) {
+        for &unit in &selected_units.0 {
+            sim.0.push_human_action(Action::HoldUnit { unit: archipelago_sim::ids::UnitId(unit) });
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyJ) {
+        for &unit in &selected_units.0 {
+            sim.0.push_human_action(Action::ReinforceUnit { unit: archipelago_sim::ids::UnitId(unit) });
+        }
     }
     if keys.just_pressed(KeyCode::KeyG) {
         let cur = active_good.0.index();
@@ -616,9 +649,15 @@ pub(super) fn map_click_select(
     mut selected_region: ResMut<SelectedRegion>,
     mut selected_sea_zone: ResMut<SelectedSeaZone>,
     mut selected_units: ResMut<SelectedUnits>,
+    pointer_over_ui: Res<super::panels::PointerOverUi>,
     mut drag_start: Local<Option<Vec2>>,
 ) {
     let Some(world_pos) = click_world_pos(MouseButton::Left, &mouse_buttons, &windows, &camera, &mut drag_start) else { return };
+    // `panels`'s own module doc, "Click-vs-map-click": a click released over
+    // any visible panel button must not also register as a map click.
+    if pointer_over_ui.0 {
+        return;
+    }
 
     // 1. Unit hit test - only the player's own living units are selectable.
     if let Some(player_faction) = player.0 {
@@ -719,10 +758,14 @@ pub(super) fn map_right_click_menu(
     player: Res<PlayerFaction>,
     sim: Res<SimRes>,
     mut menu: ResMut<MenuRegion>,
+    pointer_over_ui: Res<super::panels::PointerOverUi>,
     mut drag_start: Local<Option<Vec2>>,
 ) {
     let Some(player_faction) = player.0 else { return };
     let Some(world_pos) = click_world_pos(MouseButton::Right, &mouse_buttons, &windows, &camera, &mut drag_start) else { return };
+    if pointer_over_ui.0 {
+        return;
+    }
 
     let mut hit: Option<(RegionId, f32)> = None;
     for region in &sim.0.world().regions {

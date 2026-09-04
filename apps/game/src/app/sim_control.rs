@@ -13,15 +13,17 @@ use bevy::prelude::*;
 use archipelago_agents::newspaper::NEWSPAPER_INTERVAL_DAYS;
 use archipelago_sim::sim::Outcome;
 
-use super::{event_text, EventLog, LastRejection, NewspaperState, RecordConfig, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
+use super::{event_text, rejection_target_of, EventLog, LastRejection, NewspaperState, RecordConfig, Rejection, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
 
 /// Also where Stage 7B's `--record`/rejection-surfacing hooks in
 /// (docs/phase7-spec.md "決定論" / "命令の可否を隠さない"): after every
 /// `SimDriver::tick()`, this is the one place that knows exactly what the
 /// human/replay faction's `decide()` returned and what `Simulation::apply`
 /// did with it, so it's also the one place that appends to `RecordConfig`
-/// and refreshes `LastRejection` - `SimDriver::last_human_actions`/
-/// `last_human_errors` never leave `SimRes` any other way.
+/// and refreshes `LastRejection` (Stage 8B: each rejection tagged with the
+/// panel that issued it, via `rejection_target_of`) - `SimDriver::
+/// last_human_actions`/`last_human_action_errors` never leave `SimRes` any
+/// other way.
 pub(super) fn advance_simulation(
     mut sim: ResMut<SimRes>,
     speed: Res<SpeedRes>,
@@ -56,7 +58,12 @@ pub(super) fn advance_simulation(
         }
 
         if sim.0.human_faction().is_some() {
-            rejection.0 = sim.0.last_human_errors().iter().copied().map(crate::action_codec::action_error_ja).collect();
+            rejection.0 = sim
+                .0
+                .last_human_action_errors()
+                .iter()
+                .map(|(action, error)| Rejection { target: rejection_target_of(action), reason: crate::action_codec::action_error_ja(*error) })
+                .collect();
             if let Some(record) = &mut record {
                 record.days.push(sim.0.last_human_actions().to_vec());
                 // Rewritten in full after every tick that grows it, not

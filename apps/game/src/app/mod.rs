@@ -10,6 +10,7 @@ mod input;
 mod newspaper;
 mod overlay;
 mod palette;
+mod panels;
 mod screenshot;
 mod setup;
 mod sim_control;
@@ -106,6 +107,15 @@ pub(crate) struct DiplomacyPanel {
     pub target: Option<FactionId>,
 }
 
+/// Stage 8B's policy panel (`P` to toggle, or the top bar's own button,
+/// `panels::PolicyToggleButton`) - conscription/civilian ration/industry
+/// priority per good/logistics priority per good/import plan/national focus
+/// as clickable controls (owner ask: "操作方法が全然わからないよ" - these
+/// used to be keyboard-only). Never shown without a `--play`ed faction, same
+/// as `DiplomacyPanel`.
+#[derive(Resource, Default)]
+pub(crate) struct PolicyPanel(pub bool);
+
 /// Stage 7C (docs/phase7-spec.md "1. 補給網の可視化"): `L` toggles the
 /// supply-network overlay - "常時表示だと地図が読みにくい" (always-on would
 /// make the map unreadable), so this starts `false` and every overlay-only
@@ -196,13 +206,60 @@ pub(crate) struct RecordConfig {
     pub days: Vec<Vec<Action>>,
 }
 
-/// The human/replay faction's most recent rejected orders, translated to
-/// Japanese (docs/phase7-spec.md "命令の可否を隠さない") - cleared and
-/// refilled every tick by `sim_control::advance_simulation`, so this always
-/// reflects the *last* day actions were actually applied, not a
-/// accumulating log.
+/// Which panel issued a rejected order - lets each panel show only the
+/// rejections it's responsible for (Stage 8B, owner ask: "今出した命令が却
+/// 下された理由を、その命令を出したパネルに出す"), computed once per
+/// rejection by `sim_control::advance_simulation` from the `Action` variant
+/// `SimDriver::last_human_action_errors` paired it with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RejectionTarget {
+    Region(RegionId),
+    Unit,
+    Policy,
+    Diplomacy,
+}
+
+/// One rejected order, already translated to Japanese and tagged with which
+/// panel issued it.
+pub(crate) struct Rejection {
+    pub target: RejectionTarget,
+    pub reason: &'static str,
+}
+
+/// Classifies an `Action` by which panel can issue it - the inverse of each
+/// panel's own click handlers in `panels.rs` (a `RegionActionKind` always
+/// builds a `RecruitUnit`/`Build`/`CancelBuild` for the region it was
+/// clicked in; the diplomacy panel only ever builds the treaty/NL actions;
+/// etc.) - kept as one function so the mapping can't drift between the two
+/// directions.
+pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
+    match action {
+        Action::MoveUnit { .. } | Action::HoldUnit { .. } | Action::ReinforceUnit { .. } => RejectionTarget::Unit,
+        Action::RecruitUnit { region, .. } | Action::Build { region, .. } | Action::CancelBuild { region } => RejectionTarget::Region(*region),
+        Action::SetConscription(_)
+        | Action::SetIndustryPriority { .. }
+        | Action::SetCivilianRation(_)
+        | Action::SetImportPlan { .. }
+        | Action::SetLogisticsPriority { .. }
+        | Action::SetNationalFocus(_) => RejectionTarget::Policy,
+        Action::ProposeTreaty { .. }
+        | Action::AcceptTreaty { .. }
+        | Action::RejectTreaty { .. }
+        | Action::DeclareWar { .. }
+        | Action::BreakTreaty { .. }
+        | Action::ProposeInNaturalLanguage { .. }
+        | Action::RespondToNaturalLanguageProposal { .. } => RejectionTarget::Diplomacy,
+    }
+}
+
+/// The human/replay faction's most recent rejected orders, each tagged with
+/// which panel issued it (docs/phase7-spec.md "命令の可否を隠さない",
+/// extended per Stage 8B to attach the reason to the issuing panel, not only
+/// a single corner) - cleared and refilled every tick by
+/// `sim_control::advance_simulation`, so this always reflects the *last* day
+/// actions were actually applied, not an accumulating log.
 #[derive(Resource, Default)]
-pub(crate) struct LastRejection(pub Vec<&'static str>);
+pub(crate) struct LastRejection(pub Vec<Rejection>);
 
 /// Most-recent-first ring of formatted event lines - "直近のものから流れる"
 /// (docs/phase7-spec.md "UI"): the bottom log panel.
@@ -294,6 +351,13 @@ pub(crate) struct MainCamera;
 
 #[derive(Component)]
 pub(crate) struct TopBarText;
+
+/// Stage 8B: the player faction's own key figures, shown unconditionally at
+/// a glance (docs/design.md §16 owner ask) rather than only via the
+/// Tab-switchable faction browser (`FactionPanelText`) - see `ui::
+/// update_top_bar_player_stats`.
+#[derive(Component)]
+pub(crate) struct TopBarPlayerStatsText;
 
 #[derive(Component)]
 pub(crate) struct FactionPanelText;
@@ -389,6 +453,7 @@ pub fn run(
     // startup state.
     let debug_open_diplomacy = screenshot.as_ref().is_some_and(|c| c.open_diplomacy);
     let debug_open_newspaper = screenshot.as_ref().is_some_and(|c| c.open_newspaper);
+    let debug_open_policy = screenshot.as_ref().is_some_and(|c| c.open_policy);
     let debug_supply_overlay = screenshot.as_ref().is_some_and(|c| c.supply_overlay);
     // Computed from `world` here, before it moves into `SimDriver::new_with_player`
     // below - same "lowest-id other living faction" default `input::
@@ -398,11 +463,23 @@ pub fn run(
     } else {
         None
     };
+    let debug_select_region = screenshot.as_ref().and_then(|c| c.select_region);
+    // `--debug-select-units` (`ScreenshotConfig::select_units`'s own doc):
+    // every living unit the `--play`ed faction owns, computed from `world`
+    // here for the same reason `debug_diplomacy_target` is - `world` moves
+    // into `SimDriver::new_with_player` right below.
+    let debug_selected_units: BTreeSet<u32> = if screenshot.as_ref().is_some_and(|c| c.select_units) {
+        player_faction
+            .map(|p| world.units.iter().filter(|u| u.alive && u.owner == p).map(|u| u.id.0).collect())
+            .unwrap_or_default()
+    } else {
+        BTreeSet::new()
+    };
 
     app.insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.10)))
         .insert_resource(SimRes(SimDriver::new_with_player(world, seed, player_faction, replay_days)))
         .insert_resource(SpeedRes { last_active: Speed::X1, paused: start_paused })
-        .insert_resource(SelectedRegion::default())
+        .insert_resource(SelectedRegion(debug_select_region))
         .insert_resource(SelectedSeaZone::default())
         .insert_resource(SelectedFaction(FactionId(0)))
         .insert_resource(EventLog::default())
@@ -410,18 +487,22 @@ pub fn run(
         .insert_resource(RegionLayout(positions))
         .insert_resource(SeaZoneCenters(sea_centers))
         .insert_resource(PlayerFaction(player_faction))
-        .insert_resource(SelectedUnits::default())
+        .insert_resource(SelectedUnits(debug_selected_units))
         .insert_resource(MenuRegion::default())
         .insert_resource(DiplomacyPanel { open: debug_open_diplomacy, target: debug_diplomacy_target })
+        .insert_resource(PolicyPanel(debug_open_policy))
         .insert_resource(ActiveGood::default())
         .insert_resource(LastRejection::default())
         .insert_resource(SupplyOverlay(debug_supply_overlay))
         .insert_resource(NlCompose::default())
+        .insert_resource(panels::PointerOverUi::default())
+        .insert_resource(panels::UnitPanelSlots::default())
         .insert_resource(NewspaperState { period_start: start_day, open: debug_open_newspaper, ..Default::default() })
         .add_systems(Startup, setup::setup)
         .add_systems(
             Update,
             (
+                panels::mark_pointer_over_ui,
                 camera_fit::fit_camera_to_map,
                 screenshot::apply_debug_camera,
                 input::keyboard_input,
@@ -430,6 +511,18 @@ pub fn run(
                 input::keyboard_pan,
                 input::map_click_select,
                 input::map_right_click_menu,
+                // Every panel button click just enqueues an `Action` through
+                // the exact same `SimRes::push_human_action` door the
+                // keyboard bindings above use (this module's own doc, "no
+                // privileged path") - ordered here, before `advance_
+                // simulation`, so a click lands in this frame's tick exactly
+                // like a keypress does.
+                panels::handle_speed_button_clicks,
+                panels::handle_region_action_clicks,
+                panels::handle_unit_action_clicks,
+                panels::handle_policy_toggle,
+                panels::handle_policy_button_clicks,
+                panels::handle_diplomacy_button_clicks,
                 sim_control::advance_simulation,
             )
                 .chain(),
@@ -445,6 +538,7 @@ pub fn run(
                 overlay::sync_blockade_visuals,
                 overlay::sync_legend_visibility,
                 ui::update_top_bar,
+                ui::update_top_bar_player_stats,
                 ui::update_faction_panel,
                 ui::update_event_log,
                 ui::update_inspect_panel,
@@ -455,8 +549,26 @@ pub fn run(
                 .after(sim_control::advance_simulation),
         )
         .add_systems(
+            // Split from the block above - Bevy's `.chain()` tuple impl has
+            // a fixed maximum arity, and the two together (14 + 5) exceed
+            // it. Both blocks read post-tick `SimRes` state read-only and
+            // write disjoint UI entities, so the only ordering that
+            // matters - after `advance_simulation` - is preserved by
+            // chaining this block after the first block's own last system.
             Update,
-            screenshot::maybe_capture_screenshot.after(ui::update_player_panel),
+            (
+                panels::sync_speed_buttons,
+                panels::sync_region_action_buttons,
+                panels::sync_unit_panel,
+                panels::sync_policy_panel,
+                panels::sync_diplomacy_panel,
+            )
+                .chain()
+                .after(ui::update_newspaper_panel),
+        )
+        .add_systems(
+            Update,
+            screenshot::maybe_capture_screenshot.after(panels::sync_diplomacy_panel),
         );
 
     if let Some(path) = record_path {

@@ -6,16 +6,14 @@
 
 use bevy::prelude::*;
 
-use archipelago_sim::diplomacy::{Treaty, ALL_TREATIES};
 use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::naval::is_port_blockaded;
 use archipelago_sim::world::Station;
 
 use super::input::MENU_ITEMS;
 use super::{
-    ActiveGood, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperPanelText,
-    NewspaperState, NlCompose, PlayerFaction, PlayerPanelText, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
-    TopBarText,
+    EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperPanelText, NewspaperState, PlayerFaction,
+    PlayerPanelText, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, TopBarPlayerStatsText, TopBarText,
 };
 
 pub(super) fn update_top_bar(sim: Res<SimRes>, speed: Res<SpeedRes>, meta: Res<ScenarioMeta>, mut query: Query<&mut Text, With<TopBarText>>) {
@@ -23,6 +21,31 @@ pub(super) fn update_top_bar(sim: Res<SimRes>, speed: Res<SpeedRes>, meta: Res<S
     let world = sim.0.world();
     let status = if speed.paused { "paused".to_string() } else { format!("running ({})", speed.last_active.label()) };
     text.0 = format!("{}  —  day {} / {}  —  {status}", meta.name, world.day, meta.max_days);
+}
+
+/// Stage 8B: the player faction's own key figures, always visible in the top
+/// bar (docs/design.md §16 owner ask - stockpiles/manpower/stability/war
+/// support/shortage at a glance) rather than only reachable by Tab-cycling
+/// `FactionPanelText` to land on the player's own faction. Empty text
+/// whenever no faction was `--play`ed.
+pub(super) fn update_top_bar_player_stats(sim: Res<SimRes>, player: Res<PlayerFaction>, mut query: Query<&mut Text, With<TopBarPlayerStatsText>>) {
+    let Ok(mut text) = query.single_mut() else { return };
+    let Some(player_faction) = player.0 else {
+        text.0 = String::new();
+        return;
+    };
+    let world = sim.0.world();
+    let faction = world.faction(player_faction);
+    let stock: Vec<String> = ALL_GOODS.iter().map(|g| format!("{}={:.0}", g.key(), faction.stock[g.index()])).collect();
+    text.0 = format!(
+        "{}  |  在庫: {}  |  人的資源{:.1}  安定度{:.0}  戦争支持{:.0}  不足{:.2}",
+        faction.name,
+        stock.join(" "),
+        faction.manpower,
+        faction.stability,
+        faction.war_support,
+        faction.shortage,
+    );
 }
 
 pub(super) fn update_faction_panel(sim: Res<SimRes>, selected: Res<SelectedFaction>, mut query: Query<&mut Text, With<FactionPanelText>>) {
@@ -126,35 +149,26 @@ pub(super) fn update_inspect_panel(sim: Res<SimRes>, selected: Res<SelectedRegio
     );
 }
 
-fn treaty_label_ja(t: Treaty) -> &'static str {
-    match t {
-        Treaty::Ceasefire => "停戦",
-        Treaty::NonAggression => "不可侵条約",
-        Treaty::Alliance => "同盟",
-        Treaty::MilitaryAccess => "通行権",
-        Treaty::PortAccess => "港湾利用",
-        Treaty::TradeAgreement => "貿易協定",
-    }
-}
-
-/// Stage 7B's player-facing panel (docs/phase7-spec.md "Stage 7B — 遊ぶ"):
-/// selection state and the units at the inspected region, the recruit/
-/// build menu, the diplomacy panel, current policy values, and the most
-/// recent rejection reasons - see `super::input` for what drives each
-/// resource this reads. Empty text whenever no faction was `--play`ed
-/// (Stage 7A observing-only mode).
-#[allow(clippy::too_many_arguments)]
+/// Stage 7B's player-facing panel (docs/phase7-spec.md "Stage 7B — 遊ぶ"),
+/// now (Stage 8B) a lighter-weight corner summary now that the diplomacy/
+/// policy content it used to hold text-only lives in `panels::
+/// DiplomacyPanelRoot`/`PolicyPanelRoot` as real buttons: selection state,
+/// the units at the inspected region, the right-click recruit/build menu's
+/// own key legend (`MenuRegion` - unchanged, still keyboard-only; the region
+/// panel's own buttons are `panels::RegionActionPanelRoot`), and every
+/// rejected order's reason regardless of which panel issued it (docs/
+/// phase7-spec.md "命令の可否を隠さない" - Stage 8B additionally attaches
+/// each one to its own issuing panel, but this corner still shows the full
+/// list too, so a rejection is never missed just because its panel happens
+/// to be closed). Empty text whenever no faction was `--play`ed (Stage 7A
+/// observing-only mode).
 pub(super) fn update_player_panel(
     sim: Res<SimRes>,
     player: Res<PlayerFaction>,
     selected_region: Res<SelectedRegion>,
     selected_units: Res<SelectedUnits>,
     menu: Res<MenuRegion>,
-    diplomacy: Res<DiplomacyPanel>,
-    active_good: Res<ActiveGood>,
     rejection: Res<LastRejection>,
-    nl_compose: Res<NlCompose>,
-    event_log: Res<EventLog>,
     mut query: Query<&mut Text, With<PlayerPanelText>>,
 ) {
     let Ok(mut text) = query.single_mut() else { return };
@@ -196,79 +210,14 @@ pub(super) fn update_player_panel(
         }
     }
 
-    if diplomacy.open {
-        out.push_str("-- 外交パネル (D/Esc で閉じる, V で対象切替) --\n");
-        if let Some(target) = diplomacy.target {
-            let tf = world.faction(target);
-            out.push_str(&format!(
-                "対象: {}   関係: {:?}   感情: {:.0}\n",
-                tf.name,
-                world.diplomacy.stance(player_faction, target),
-                world.diplomacy.opinion(player_faction, target)
-            ));
-            for (i, &treaty) in ALL_TREATIES.iter().enumerate() {
-                out.push_str(&format!("{}:{} ", i + 1, treaty_label_ja(treaty)));
-            }
-            out.push_str("\nA:受諾 R:拒否 W:宣戦 B:破棄 T:自然言語で提案\n");
-            let incoming: Vec<_> = world.diplomacy.pending.iter().filter(|p| p.from == target && p.to == player_faction).collect();
-            if incoming.is_empty() {
-                out.push_str("相手からの提案: なし\n");
-            } else {
-                for p in incoming {
-                    out.push_str(&format!("相手からの提案: {}\n", treaty_label_ja(p.treaty)));
-                }
-            }
-
-            // Stage 7C (docs/phase7-spec.md "4."): this faction's own
-            // outstanding natural-language proposal to `target`, if any -
-            // the compose box below is disabled while one is still pending
-            // (`action::apply_propose_nl` would reject a second one anyway;
-            // showing it here is the honest reason why, not a silent no-op).
-            if let Some(pending) = world.diplomacy.pending_nl.iter().find(|p| p.from == player_faction && p.to == target) {
-                out.push_str(&format!("自国からの自然言語提案（返答待ち）: 「{}」\n", pending.text));
-            }
-
-            if nl_compose.active {
-                out.push_str(&format!("自然言語提案を入力中> {}_\n(Enter で送信, Esc でキャンセル)\n", nl_compose.buffer));
-            }
-
-            // The interpreted `TreatyTerm`s and accept/reject verdict for
-            // any natural-language proposal that has resolved recently -
-            // `event_text::format_event` already spells both out
-            // (`Event::NaturalLanguage{Accepted,Rejected,TermsInvalid}::terms`),
-            // so this reads straight off the same event log the bottom
-            // panel shows rather than keeping a second copy of the same
-            // data.
-            let nl_history: Vec<&String> = event_log.0.iter().filter(|line| line.contains("自然言語外交")).take(3).collect();
-            if !nl_history.is_empty() {
-                out.push_str("-- 自然言語外交の履歴 --\n");
-                for line in nl_history {
-                    out.push_str(&format!("{line}\n"));
-                }
-            }
-        } else {
-            out.push_str("対象となる勢力がいない\n");
-        }
-    }
-
-    out.push_str(&format!(
-        "-- 政策 (対象品目 [G で切替]: {}) --\n\
-         徴兵率[-/=]: {:.2}   配給率[\u{5b}/\u{5d}]: {:.2}\n\
-         生産優先度[;/']: {:.2}   物流優先度[,/.]: {:.2}   輸入計画[8/9]: {:.1}\n\
-         国家方針[F]: {}\n",
-        active_good.0.label(),
-        faction.conscription,
-        faction.civilian_ration,
-        faction.industry_priority[active_good.0.index()],
-        faction.logistics_priority[active_good.0.index()],
-        faction.import_plan[active_good.0.index()],
-        faction.national_focus.label(),
-    ));
+    // Diplomacy/policy content moved to `panels::DiplomacyPanelRoot`/
+    // `PolicyPanelRoot` (Stage 8B, real buttons) - `D`/`P`, or their top-bar
+    // buttons, open those instead of anything printed here.
 
     if !rejection.0.is_empty() {
-        out.push_str("!! 却下された命令 !!\n");
-        for reason in &rejection.0 {
-            out.push_str(&format!("  - {reason}\n"));
+        out.push_str("!! 却下された命令（全パネル）!!\n");
+        for r in &rejection.0 {
+            out.push_str(&format!("  - {}\n", r.reason));
         }
     }
 

@@ -140,6 +140,7 @@ pub(super) fn setup(
     layout: Res<RegionLayout>,
     sea_centers: Res<SeaZoneCenters>,
     font: Res<AppFont>,
+    player: Res<super::PlayerFaction>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
@@ -297,7 +298,19 @@ pub(super) fn setup(
         ));
     }
 
-    spawn_ui(&mut commands, &font.0);
+    spawn_ui(&mut commands, &font.0, player.0.is_some());
+
+    // Stage 8B's panel UI (owner ask - see `panels`'s own module doc):
+    // spawned once here, alongside every other static UI node above - see
+    // each spawn function's own doc for why it's safe to pre-spawn
+    // (region/policy/diplomacy actions are a fixed set; the unit panel is a
+    // fixed-size pool).
+    super::panels::spawn_region_action_panel(&mut commands, &font.0);
+    super::panels::spawn_unit_panel(&mut commands, &font.0);
+    super::panels::spawn_policy_panel(&mut commands, &font.0);
+    if let Some(player_faction) = player.0 {
+        super::panels::spawn_diplomacy_panel(&mut commands, &font.0, world, player_faction);
+    }
 }
 
 pub(super) fn station_position(station: Station, region_pos: &[[f32; 2]], sea_pos: &[[f32; 2]]) -> [f32; 2] {
@@ -375,7 +388,7 @@ fn spawn_link(
     }
 }
 
-fn text_font(size: f32, font: &Handle<Font>) -> TextFont {
+pub(super) fn text_font(size: f32, font: &Handle<Font>) -> TextFont {
     TextFont { font: font.clone().into(), font_size: size.into(), ..default() }
 }
 
@@ -446,7 +459,7 @@ fn japanese_label_layout() -> TextLayout {
     TextLayout::linebreak(LineBreak::NoWrap)
 }
 
-fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
+fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
     // Top bar: date / scenario / speed.
     commands.spawn((
         Node {
@@ -461,6 +474,63 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>) {
         TextColor(Color::WHITE),
         TopBarText,
     ));
+
+    // Stage 8B: the player's own key figures, on a second top-bar line -
+    // docs/design.md §16 owner ask ("stockpiles per commodity, manpower,
+    // stability, war support, shortage" at a glance, not buried in the
+    // faction browser). Empty (no text) whenever no faction was `--play`ed -
+    // `ui::update_top_bar_player_stats`.
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(26.0),
+            left: Val::Px(10.0),
+            width: Val::Px(900.0),
+            ..default()
+        },
+        Text::new(String::new()),
+        text_font(13.0, font),
+        TextColor(Color::srgb(1.0, 0.82, 0.45)),
+        super::TopBarPlayerStatsText,
+    ));
+
+    // Stage 8B: clickable speed controls + the policy/diplomacy panel
+    // toggles, next to the existing status line - `panels::sync_speed_buttons`/
+    // `handle_speed_button_clicks` and `panels::handle_policy_toggle`/
+    // `handle_diplomacy_button_clicks`'s own `DiplomacyToggleButton` branch.
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(4.0),
+            left: Val::Px(600.0),
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(10.0),
+            ..default()
+        })
+        .with_children(|row| {
+            super::panels::spawn_speed_buttons(row, font);
+            // Observer mode (no `--play`ed faction, `has_player == false`)
+            // has no policy/diplomacy to control - `input::keyboard_input`'s
+            // own `D`/policy bindings likewise only fire once a player
+            // exists (`let Some(player_faction) = player.0 else { return }`),
+            // so these buttons simply aren't offered rather than sitting
+            // there as a no-op.
+            if has_player {
+                row.spawn((Button, Node { padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)), ..default() }, BackgroundColor(Color::srgb(0.22, 0.30, 0.24)), super::panels::PolicyToggleButton))
+                    .with_children(|b| {
+                        b.spawn((Text::new("政策 [P]"), text_font(13.0, font), TextColor(Color::WHITE)));
+                    });
+                row.spawn((
+                    Button,
+                    Node { padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)), ..default() },
+                    BackgroundColor(Color::srgb(0.22, 0.30, 0.24)),
+                    super::panels::DiplomacyToggleButton,
+                ))
+                .with_children(|b| {
+                    b.spawn((Text::new("外交 [D]"), text_font(13.0, font), TextColor(Color::WHITE)));
+                });
+            }
+        });
 
     // Left panel: faction summary.
     commands.spawn((
@@ -593,6 +663,9 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             row("zoom: ctrl+scroll / pinch", label_color, false);
             row("select/order: left click", label_color, false);
             row("region menu: right click", label_color, false);
+            row("policy panel: P button/key", label_color, false);
+            row("diplomacy panel: D button/key", label_color, false);
+            row("unit hold/reinforce: buttons or H/J", label_color, false);
 
             row("legend", label_color, false);
             row("■ port blockaded", overlay::BLOCKADE_MARKER_COLOR, false);

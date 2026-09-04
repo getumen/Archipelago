@@ -38,7 +38,19 @@ pub struct ScreenshotConfig {
     pub after_frames: u32,
     pub open_diplomacy: bool,
     pub open_newspaper: bool,
+    /// `--debug-open-policy`: Stage 8B's policy panel, same rationale as
+    /// `open_diplomacy`/`open_newspaper` - no keyboard at a screenshot run
+    /// to press `P` first.
+    pub open_policy: bool,
     pub supply_overlay: bool,
+    /// `--debug-select-region <region>`: pre-selects a region so Stage 8B's
+    /// region panel (action buttons included) renders in a `--screenshot`
+    /// run with nothing to click it open.
+    pub select_region: Option<RegionId>,
+    /// `--debug-select-units`: pre-selects every living unit the `--play`ed
+    /// faction owns, so Stage 8B's unit panel renders in a `--screenshot`
+    /// run with nothing to click a unit marker. No effect without `--play`.
+    pub select_units: bool,
     /// `--debug-camera-region <index>`: center the camera on this region
     /// instead of the whole-map fit `camera_fit::fit_camera_to_map` computes
     /// by default - a dense map (japan47's 47 prefectures) can render a
