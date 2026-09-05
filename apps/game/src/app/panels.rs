@@ -68,6 +68,7 @@ use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
 use super::input::MENU_ITEMS;
+use super::map_mode::MapModeRes;
 use super::setup::text_font;
 use super::{
     ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
@@ -176,6 +177,46 @@ pub(super) fn handle_speed_button_clicks(mut speed: ResMut<SpeedRes>, query: Que
             other => {
                 speed.last_active = other;
                 speed.paused = false;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Top bar: map-mode button (`map_mode`'s own module doc has the full list
+// of modes and rationale) - the discoverable, clickable half of that
+// mechanism; `input::keyboard_input`'s `M` binding is the other. Available
+// in observer mode too (spawned unconditionally in `setup::spawn_ui`,
+// unlike the policy/diplomacy toggles), since seeing terrain/population/
+// industry/unrest never requires a `--play`ed faction.
+// ---------------------------------------------------------------------
+
+#[derive(Component)]
+pub(super) struct MapModeButton;
+
+/// Spawned with empty text - `sync_map_mode_button` fills it in on the very
+/// first `Update` tick, the same "spawn empty, let the sync system fill it"
+/// pattern every other dynamic panel in this crate uses, so this never needs
+/// to know the mode `app::run` actually started in (`--debug-map-mode`).
+pub(super) fn spawn_map_mode_button(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
+    parent.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), MapModeButton)).with_children(|b| {
+        b.spawn((Text::new(String::new()), text_font(13.0, font), TextColor(TEXT_ENABLED)));
+    });
+}
+
+pub(super) fn handle_map_mode_button_clicks(mut mode: ResMut<MapModeRes>, query: Query<&Interaction, (Changed<Interaction>, With<MapModeButton>)>) {
+    for interaction in &query {
+        if *interaction == Interaction::Pressed {
+            mode.0 = mode.0.next();
+        }
+    }
+}
+
+pub(super) fn sync_map_mode_button(mode: Res<MapModeRes>, query: Query<&Children, With<MapModeButton>>, mut text: Query<&mut Text>) {
+    for children in &query {
+        for &child in children {
+            if let Ok(mut t) = text.get_mut(child) {
+                t.0 = format!("地図: {} [M]", mode.0.label());
             }
         }
     }
@@ -1414,6 +1455,49 @@ mod tests {
         let speed = world.resource::<SpeedRes>();
         assert!(speed.paused, "clicking the pause button must pause");
         assert_eq!(speed.last_active, Speed::X5, "pausing must not change the remembered active speed");
+    }
+
+    /// Regression guard for the map-mode button's click handler
+    /// (`handle_map_mode_button_clicks`) - the clickable, discoverable half
+    /// of `map_mode`'s cycling mechanism (`input::keyboard_input`'s `M`
+    /// binding is the other, tested in `input`'s own test module). Checked
+    /// this fails when broken: temporarily changed the handler to compare
+    /// `Interaction::Hovered` instead of `Pressed` - this test then fails
+    /// (the mode never advances from a `Pressed` interaction).
+    #[test]
+    fn map_mode_button_click_advances_to_the_next_mode() {
+        use super::super::map_mode::MapMode;
+
+        let mut world = World::new();
+        world.insert_resource(MapModeRes(MapMode::Political));
+        world.spawn((Interaction::Pressed, MapModeButton));
+
+        run(&mut world, handle_map_mode_button_clicks);
+
+        assert_eq!(world.resource::<MapModeRes>().0, MapMode::Terrain, "a click must advance from Political to Terrain");
+    }
+
+    /// `sync_map_mode_button` must actually update the button's own visible
+    /// label text to name the current mode - otherwise the button exists but
+    /// doesn't satisfy "the current mode must be named on screen".
+    #[test]
+    fn map_mode_button_label_names_the_active_mode() {
+        use super::super::map_mode::MapMode;
+
+        let mut world = World::new();
+        world.insert_resource(MapModeRes(MapMode::Population));
+        world
+            .spawn((MapModeButton,))
+            .with_children(|b| {
+                b.spawn(Text::new(String::new()));
+            });
+
+        run(&mut world, sync_map_mode_button);
+
+        let mut q = world.query_filtered::<&Text, Without<MapModeButton>>();
+        let label = q.iter(&world).next().expect("sync_map_mode_button must update the button's child Text").0.clone();
+        assert!(label.contains("人口"), "the button label must name the active mode, got: {label}");
+        assert!(label.contains('M'), "the button label must keep the M hotkey hint visible, got: {label}");
     }
 
     /// Regression guard for the region panel's recruit/build/cancel buttons

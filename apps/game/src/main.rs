@@ -30,7 +30,7 @@
 //! `Layer::Military` to the AI, so the flag would either restate what the
 //! file already says or, if the two disagreed, be silently unable to do
 //! anything at all (see the rejection below).
-use archipelago_game::app::{PlayConfig, ScreenshotConfig, ScreenshotTrigger};
+use archipelago_game::app::{MapMode, PlayConfig, ScreenshotConfig, ScreenshotTrigger};
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::world::World;
 
@@ -52,7 +52,8 @@ fn print_usage_and_exit(msg: &str) -> ! {
          \n\
          debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames> | --screenshot-at-day <day>] \
-         [--debug-supply-overlay] [--debug-open-diplomacy] [--debug-open-newspaper] \
+         [--debug-map-mode <political|terrain|population|industry|unrest|supply>] \
+         [--debug-open-diplomacy] [--debug-open-newspaper] \
          [--debug-open-policy] [--debug-select-region <region index or name>] [--debug-select-units] \
          [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]"
     );
@@ -78,10 +79,10 @@ struct Args {
     /// trigger exactly as it always was.
     screenshot_at_day: Option<u32>,
     // Verification-only conveniences (`ScreenshotConfig`'s own doc): start
-    // the supply overlay / diplomacy panel / newspaper panel already open,
-    // for `--screenshot` runs where nothing is at the keyboard to press
-    // `L`/`D`/`N` first. No effect without `--screenshot`.
-    debug_supply_overlay: bool,
+    // in a particular map mode / with the diplomacy panel / newspaper panel
+    // already open, for `--screenshot` runs where nothing is at the
+    // keyboard to press `M`/`D`/`N` first. No effect without `--screenshot`.
+    debug_map_mode: Option<MapMode>,
     debug_open_diplomacy: bool,
     debug_open_newspaper: bool,
     debug_open_policy: bool,
@@ -118,7 +119,7 @@ fn parse_args() -> Args {
     let mut screenshot = None;
     let mut screenshot_after = DEFAULT_SCREENSHOT_AFTER_FRAMES;
     let mut screenshot_at_day = None;
-    let mut debug_supply_overlay = false;
+    let mut debug_map_mode = None;
     let mut debug_open_diplomacy = false;
     let mut debug_open_newspaper = false;
     let mut debug_open_policy = false;
@@ -162,7 +163,10 @@ fn parse_args() -> Args {
                 let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--screenshot-at-day expects a value"));
                 screenshot_at_day = Some(v.parse().unwrap_or_else(|_| print_usage_and_exit("--screenshot-at-day expects an integer")));
             }
-            "--debug-supply-overlay" => debug_supply_overlay = true,
+            "--debug-map-mode" => {
+                let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-map-mode expects a value"));
+                debug_map_mode = Some(parse_map_mode(&v));
+            }
             "--debug-open-diplomacy" => debug_open_diplomacy = true,
             "--debug-open-newspaper" => debug_open_newspaper = true,
             "--debug-open-policy" => debug_open_policy = true,
@@ -201,6 +205,8 @@ fn parse_args() -> Args {
                     screenshot_at_day = Some(v.parse().unwrap_or_else(|_| print_usage_and_exit("--screenshot-at-day expects an integer")));
                 } else if let Some(v) = other.strip_prefix("--cjk-font=") {
                     cjk_font = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--debug-map-mode=") {
+                    debug_map_mode = Some(parse_map_mode(v));
                 } else {
                     print_usage_and_exit(&format!("unknown argument: {other}"));
                 }
@@ -218,7 +224,7 @@ fn parse_args() -> Args {
         screenshot,
         screenshot_after,
         screenshot_at_day,
-        debug_supply_overlay,
+        debug_map_mode,
         debug_open_diplomacy,
         debug_open_newspaper,
         debug_open_policy,
@@ -268,6 +274,15 @@ fn resolve_region(world: &World, value: &str) -> archipelago_sim::ids::RegionId 
     }
     eprintln!("error: --debug-camera-region {value}: no region with that index or name");
     std::process::exit(1);
+}
+
+/// Resolves `--debug-map-mode <value>` against `MapMode::from_key` - a hard
+/// error naming every valid key on a miss, following docs/conventions.md's
+/// fail-fast rule the same way every other malformed flag in this file
+/// does, rather than silently falling back to `MapMode::default()`.
+fn parse_map_mode(value: &str) -> MapMode {
+    MapMode::from_key(value)
+        .unwrap_or_else(|| print_usage_and_exit(&format!("--debug-map-mode {value}: unknown mode, expected one of: {}", MapMode::ALL_KEYS.join(", "))))
 }
 
 fn main() {
@@ -347,7 +362,7 @@ fn main() {
         open_diplomacy: args.debug_open_diplomacy,
         open_newspaper: args.debug_open_newspaper,
         open_policy: args.debug_open_policy,
-        supply_overlay: args.debug_supply_overlay,
+        map_mode: args.debug_map_mode,
         select_region: debug_select_region,
         select_units: args.debug_select_units,
         camera_focus_region: debug_camera_region,

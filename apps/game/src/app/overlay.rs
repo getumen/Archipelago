@@ -1,7 +1,11 @@
-//! Stage 7C's map overlays (docs/phase7-spec.md "Stage 7C — 詰める"):
+//! Stage 7C's map overlays (docs/phase7-spec.md "Stage 7C — 詰める"), the
+//! supply-network one now folded into `map_mode::MapMode::Supply` (`M` to
+//! cycle to it, replacing the old standalone `L` toggle - see `map_mode`'s
+//! own module doc for why: "a map-mode mechanism, not a pile of independent
+//! toggles"):
 //!
-//! - the supply-network overlay (`L` to toggle, `SupplyOverlay`) - a ring
-//!   around every region colored by how much of its own structural ceiling
+//! - the supply-network overlay (`MapMode::Supply`) - a ring around every
+//!   region colored by how much of its own structural ceiling
 //!   (`Region::node_throughput`) its actual `world.supply` entry realizes,
 //!   plus every same-owner link recolored by whether it's the region's
 //!   actual supply route, a saturated chokepoint, or merely supply-capable;
@@ -77,12 +81,13 @@ use archipelago_sim::ids::{RegionId, SeaZoneId};
 use archipelago_sim::logistics::{self, LinkThroughput, SupplyRegionRoute, SupplySource};
 use archipelago_sim::naval::{self, PortBlockade};
 
+use super::map_mode::{MapMode, MapModeRes};
 use super::palette::Unit01;
 use super::setup::{link_style, Z_LINK, Z_LINK_CHOKEPOINT, Z_LINK_HIGHLIGHT};
 use super::{
     BlockadeVisual, ChokepointMarker, ConstructionMarker, LinkVisualMarker, MainCamera,
     RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion, SelectedSeaZone, SimRes,
-    SupplyOnlyLegendRow, SupplyOverlay, SupplyRingMarker,
+    SupplyRingMarker,
 };
 
 /// Chokepoint tint - a link whose flow has reached its own `max_throughput`
@@ -197,14 +202,16 @@ type BlockadeVisualState = (Vec<PortBlockade>, (Option<RegionId>, Option<SeaZone
 
 /// Recolors every region's supply ring and every same-owner link's
 /// geometry, shows/hides the rings and the chokepoint markers, and rescales
-/// each chokepoint marker to the camera's current zoom, according to
-/// `SupplyOverlay` - the `L`-toggled layer (docs/phase7-spec.md "1. 補給網
-/// の可視化"). See this module's own doc ("Visual hierarchy") for why the
-/// chokepoint marker's scale is tied to the camera at all.
+/// each chokepoint marker to the camera's current zoom, while
+/// `MapMode::Supply` is the active map mode (docs/phase7-spec.md "1. 補給網
+/// の可視化", now reached via `M` instead of a standalone `L` toggle - see
+/// `map_mode`'s own module doc). See this module's own doc ("Visual
+/// hierarchy") for why the chokepoint marker's scale is tied to the camera
+/// at all.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sync_supply_overlay(
     sim: Res<SimRes>,
-    overlay: Res<SupplyOverlay>,
+    mode: Res<MapModeRes>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut rings: Query<(&SupplyRingMarker, &MeshMaterial2d<ColorMaterial>, &mut Visibility)>,
     mut links: Query<(&LinkVisualMarker, &MeshMaterial2d<ColorMaterial>, &mut Transform)>,
@@ -221,7 +228,7 @@ pub(super) fn sync_supply_overlay(
 ) {
     let world = sim.0.world();
 
-    if !overlay.0 {
+    if mode.0 != MapMode::Supply {
         for (_, _, mut visibility) in &mut rings {
             *visibility = Visibility::Hidden;
         }
@@ -328,7 +335,7 @@ pub(super) fn sync_supply_overlay(
 }
 
 /// Shows/hides and fills each region's in-progress-construction marker -
-/// always on, not gated by `SupplyOverlay` (docs/phase7-spec.md "3. 戦災と
+/// always on, not gated by `MapMode` (docs/phase7-spec.md "3. 戦災と
 /// 復興").
 pub(super) fn sync_construction_markers(
     sim: Res<SimRes>,
@@ -357,7 +364,7 @@ pub(super) fn sync_construction_markers(
 
 /// Despawns and respawns every blockade marker/line for whatever
 /// `naval::blockaded_ports` reports right now - always on, not gated by
-/// `SupplyOverlay` (docs/phase7-spec.md "2. 制海権と封鎖": "封鎖されている港
+/// `MapMode` (docs/phase7-spec.md "2. 制海権と封鎖": "封鎖されている港
 /// を地図上に明示する。どの海域の制海権が原因かを結ぶ"). Which ports are
 /// blockaded changes at runtime, unlike the static region/link graph the
 /// rest of this crate's map geometry pre-spawns once - see `BlockadeVisual`'s
@@ -368,8 +375,8 @@ pub(super) fn sync_construction_markers(
 /// stayed blockaded - continuous ECS/asset/render churn proportional to the
 /// blockade count for the entire rest of a multi-minute session, not just
 /// the frame something actually changed. `last` (a `Local`, so it persists
-/// frame to frame the same way `sync_legend_visibility`'s own `is_changed`
-/// gate does for its simpler case) caches the exact state the current
+/// frame to frame the same way `map_mode::sync_mode_legend`'s own dispatch
+/// on the active `MapModeRes` does for its simpler case) caches the exact state the current
 /// entities were built from - `naval::blockaded_ports`'s own result plus
 /// which region/sea-zone is selected, since selection changes which causal
 /// lines are revealed (see this module's own doc, "Blockade: quiet by
@@ -452,22 +459,6 @@ pub(super) fn sync_blockade_visuals(
                 BlockadeVisual,
             ));
         }
-    }
-}
-
-/// Shows/hides every supply-overlay-only legend row (`setup::spawn_legend`,
-/// `SupplyOnlyLegendRow`) together with `SupplyOverlay` itself - the
-/// legend's always-on rows (blockade/construction) never carry that marker
-/// and are never touched here. Gated on `is_changed()` since this is purely
-/// a one-shot toggle reaction, not a per-frame recoloring like the rest of
-/// this module.
-pub(super) fn sync_legend_visibility(overlay: Res<SupplyOverlay>, mut rows: Query<&mut Visibility, With<SupplyOnlyLegendRow>>) {
-    if !overlay.is_changed() {
-        return;
-    }
-    let visibility = if overlay.0 { Visibility::Visible } else { Visibility::Hidden };
-    for mut row in &mut rows {
-        *row = visibility;
     }
 }
 

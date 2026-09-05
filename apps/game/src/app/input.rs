@@ -44,11 +44,12 @@ use archipelago_sim::good::{ALL_GOODS, GOOD_COUNT};
 use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::{Domain, Station};
 
+use super::map_mode::MapModeRes;
 use super::setup::sea_zone_radius;
 use super::{
     ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose, PlayerFaction,
     RegionLayout, RegionRadii, SeaZoneCenters, SelectedFaction, SelectedRegion, SelectedSeaZone,
-    SelectedUnits, SimRes, Speed, SpeedRes, SupplyOverlay, UnitMarker,
+    SelectedUnits, SimRes, Speed, SpeedRes, UnitMarker,
 };
 
 const MIN_ZOOM: f32 = 0.25;
@@ -100,7 +101,7 @@ pub(super) fn keyboard_input(
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
     mut nl_compose: ResMut<NlCompose>,
-    mut supply_overlay: ResMut<SupplyOverlay>,
+    mut map_mode: ResMut<MapModeRes>,
     mut newspaper: ResMut<NewspaperState>,
 ) {
     // While composing a natural-language proposal, every key here is
@@ -113,11 +114,14 @@ pub(super) fn keyboard_input(
         return;
     }
 
-    // `L` (supply overlay) and `N` (newspaper) work everywhere, observing-only
-    // included, and are never captured by the menu/diplomacy panels below -
-    // docs/phase7-spec.md "補給網の表示は L キーでトグルする".
-    if keys.just_pressed(KeyCode::KeyL) {
-        supply_overlay.0 = !supply_overlay.0;
+    // `M` (map mode, `map_mode`'s own module doc) and `N` (newspaper) work
+    // everywhere, observing-only included, and are never captured by the
+    // menu/diplomacy panels below - the old `L`-toggled supply overlay is
+    // now `MapMode::Supply`, one stop on the same `M` cycle as every other
+    // mode (docs/phase7-spec.md "補給網の表示は L キーでトグルする" describes
+    // the mechanism's Stage 7C predecessor).
+    if keys.just_pressed(KeyCode::KeyM) {
+        map_mode.0 = map_mode.0.next();
     }
     if keys.just_pressed(KeyCode::KeyN) {
         newspaper.open = !newspaper.open;
@@ -819,7 +823,7 @@ pub(super) fn map_right_click_menu(
 /// Owns every keystroke while `NlCompose::active` (docs/phase7-spec.md "4.
 /// 外交画面": "テキスト入力欄から送り") - `keyboard_input` returns
 /// immediately without touching anything while this is true, so no other
-/// binding (menu digits, diplomacy treaty keys, `L`/`N`, ...) can fire
+/// binding (menu digits, diplomacy treaty keys, `M`/`N`, ...) can fire
 /// mid-sentence.
 ///
 /// `Enter` submits (`Action::ProposeInNaturalLanguage` to whichever faction
@@ -905,6 +909,53 @@ mod tests {
     use archipelago_sim::ids::FactionId;
 
     use crate::sim_driver::SimDriver;
+
+    use super::super::map_mode::MapMode;
+
+    /// Builds every resource `keyboard_input` reads, in the same shape
+    /// `app::run`'s own startup resources use - the full system, not a
+    /// smaller helper, since `M` is bound directly inside `keyboard_input`
+    /// itself rather than a standalone function this module already tests
+    /// in isolation elsewhere (unlike `handle_menu_keys`/`handle_diplomacy_keys`).
+    fn keyboard_input_world(key: KeyCode) -> World {
+        let mut world = World::new();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(key);
+        world.insert_resource(keys);
+        world.insert_resource(SpeedRes { last_active: Speed::X1, paused: true });
+        world.insert_resource(SelectedRegion::default());
+        world.insert_resource(SelectedSeaZone::default());
+        world.insert_resource(SelectedUnits::default());
+        world.insert_resource(SelectedFaction(FactionId(0)));
+        world.insert_resource(MenuRegion::default());
+        world.insert_resource(DiplomacyPanel { open: false, target: None });
+        world.insert_resource(super::super::PolicyPanel::default());
+        world.insert_resource(ActiveGood::default());
+        world.insert_resource(PlayerFaction(None));
+        world.insert_resource(SimRes(SimDriver::new(archipelago_sim::scenario::build_world(), 1)));
+        world.insert_resource(NlCompose::default());
+        world.insert_resource(MapModeRes::default());
+        world.insert_resource(NewspaperState::default());
+        world
+    }
+
+    /// Regression guard for `M` cycling the active map mode - the
+    /// discoverable-hotkey half of the map-mode mechanism (the other half,
+    /// `panels::MapModeButton`, is tested in `panels`'s own test module).
+    /// Drives the real `keyboard_input` system against a `bevy::ecs::World`.
+    /// Checked this fails when broken: temporarily changed the `M` binding
+    /// to compare `KeyCode::KeyN` instead - this test then fails with the
+    /// mode still at its default `Political`.
+    #[test]
+    fn m_key_cycles_the_map_mode() {
+        let mut world = keyboard_input_world(KeyCode::KeyM);
+
+        let mut system = IntoSystem::into_system(keyboard_input);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        assert_eq!(world.resource::<MapModeRes>().0, MapMode::Terrain, "M must cycle from the default Political mode to Terrain");
+    }
 
     /// External code review fix A1 (P1): pressing `T` to enter natural-
     /// language compose mode used to run `nl_compose_text_input` later in

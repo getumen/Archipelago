@@ -1,12 +1,16 @@
-//! Per-frame visual sync: region fill color (owner, mixed toward the
+//! Per-frame visual sync: region fill color (`map_mode`'s own module doc has
+//! the full list of what each `MapMode` shows; `Political`/`Supply` share
+//! the original Stage 7C behavior - owner color, mixed toward the
 //! occupier's color as `occupation` progresses - docs/phase7-spec.md "占領
 //! 進行中は所有者色と占領者色の混色にする" - then further toward a scorched-
 //! earth "grime" tone by `Region::devastation`, Stage 7C's docs/phase7-spec.md
 //! "3. 戦災と復興": "地域の devastation を視覚化する（マーカーの荒れ具合、
-//! 色の濁り）"), sea zone tint (whichever faction currently holds the most
-//! `SeaZone::control`), and unit markers (position, visibility, color, plus
-//! spawning a marker for any unit created since the last frame - e.g. a
-//! fresh recruit).
+//! 色の濁り）"), every region's always-on owner-color border ring
+//! (`OwnerBorderMarker`, `sync_owner_border` - see `map_mode`'s own doc,
+//! "Ownership stays visible in every mode"), sea zone tint (whichever
+//! faction currently holds the most `SeaZone::control`), and unit markers
+//! (position, visibility, color, plus spawning a marker for any unit
+//! created since the last frame - e.g. a fresh recruit).
 //!
 //! Every system here only *reads* `SimRes` - never writes it. This is what
 //! keeps rendering incapable of feeding anything back into the simulation
@@ -15,12 +19,14 @@
 use bevy::prelude::*;
 
 use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER};
+use archipelago_sim::world::Region;
 
+use super::map_mode::{self, MapMode, MapModeRes};
 use super::palette::{faction_color, Unit01, NEUTRAL};
 use super::setup::station_position;
 use super::{
-    MainCamera, RegionLabelMarker, RegionLayout, RegionMarker, SeaZoneCenters, SeaZoneMarker,
-    SelectedRegion, SimRes, UnitMarker,
+    MainCamera, OwnerBorderMarker, RegionLabelMarker, RegionLayout, RegionMarker, SeaZoneCenters,
+    SeaZoneMarker, SelectedRegion, SimRes, UnitMarker,
 };
 
 /// Scorched-earth tone `sync_region_visuals` mixes a devastated region's
@@ -50,24 +56,78 @@ const DELEGATED_MARKER_TINT: Color = Color::srgb(0.98, 0.98, 0.95);
 /// devastated region's owner color partly visible.
 const DELEGATED_MARKER_MIX: f32 = 0.65;
 
+/// Owner fill for `MapMode::Political`/`MapMode::Supply` (`map_mode`'s own
+/// doc for why those two modes share this): owner color mixed toward the
+/// occupier's as `occupation` progresses, then further toward
+/// `DEVASTATION_TINT` by `Region::devastation` - unchanged from Stage 7C,
+/// just pulled out of `sync_region_visuals`'s own loop so `MapMode`
+/// dispatch (below) can call it as one arm among several instead of it
+/// being the *only* thing that loop ever computed.
+pub(super) fn political_fill_color(region: &Region) -> Color {
+    let owner_color = faction_color(region.owner.index());
+    let occupation_color = match region.occupier {
+        Some(occupier) if region.occupation > 0.0 => {
+            let occupier_color = faction_color(occupier.index());
+            owner_color.mix(&occupier_color, region.occupation.clamp(0.0, 1.0))
+        }
+        _ => owner_color,
+    };
+    let devastation_mix = Unit01::new(region.devastation * MAX_DEVASTATION_MIX);
+    occupation_color.mix(&DEVASTATION_TINT, devastation_mix.get())
+}
+
+/// Paints every region's fill according to the active `MapMode`
+/// (`map_mode`'s own module doc has the full list and rationale) - the one
+/// system that actually shows the player whichever dimension of the
+/// simulation they've asked to see. `population_cuts`/`industry_cuts` are
+/// computed once per frame, not once per region, since they depend on every
+/// region's own value (`map_mode::population_thresholds`/`industry_thresholds`'s
+/// own "no invented thresholds" doc) rather than the one region being
+/// painted.
 pub(super) fn sync_region_visuals(
     sim: Res<SimRes>,
+    mode: Res<MapModeRes>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     query: Query<(&RegionMarker, &MeshMaterial2d<ColorMaterial>)>,
 ) {
     let world = sim.0.world();
+    let population_cuts = map_mode::population_thresholds(world);
+    let industry_cuts = map_mode::industry_thresholds(world);
     for (marker, material_handle) in &query {
         let region = world.region(marker.0);
-        let owner_color = faction_color(region.owner.index());
-        let occupation_color = match region.occupier {
-            Some(occupier) if region.occupation > 0.0 => {
-                let occupier_color = faction_color(occupier.index());
-                owner_color.mix(&occupier_color, region.occupation.clamp(0.0, 1.0))
-            }
-            _ => owner_color,
+        let color = match mode.0 {
+            MapMode::Political | MapMode::Supply => political_fill_color(region),
+            MapMode::Terrain => map_mode::terrain_fill(region.terrain),
+            MapMode::Population => map_mode::population_fill(region.population, population_cuts),
+            MapMode::Industry => map_mode::industry_fill(region, industry_cuts),
+            MapMode::Unrest => map_mode::unrest_fill(region),
         };
-        let devastation_mix = Unit01::new(region.devastation * MAX_DEVASTATION_MIX);
-        let color = occupation_color.mix(&DEVASTATION_TINT, devastation_mix.get());
+        if let Some(mut mat) = materials.get_mut(&material_handle.0)
+            && mat.color != color
+        {
+            mat.color = color;
+        }
+    }
+}
+
+/// Keeps every region's `OwnerBorderMarker` ring colored by its current
+/// `owner` - the one visual this crate draws unconditionally in every
+/// `MapMode` (`map_mode`'s own module doc, "Ownership stays visible in
+/// every mode"), so a player can always tell whose territory a region
+/// belongs to even while some other mode's fill is showing terrain/
+/// population/industry/instability instead. Deliberately *not* mixed
+/// toward the occupier or devastation tint the way `political_fill_color`'s
+/// own fill is - this ring answers one question only ("who owns this"), not
+/// "how far along is the fight for it" (that nuance stays visible via
+/// `MapMode::Political`/`MapMode::Supply`'s own fill, or the inspect panel).
+pub(super) fn sync_owner_border(
+    sim: Res<SimRes>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    query: Query<(&OwnerBorderMarker, &MeshMaterial2d<ColorMaterial>)>,
+) {
+    let world = sim.0.world();
+    for (marker, material_handle) in &query {
+        let color = faction_color(world.region(marker.0).owner.index());
         if let Some(mut mat) = materials.get_mut(&material_handle.0)
             && mat.color != color
         {
@@ -233,5 +293,101 @@ pub(super) fn sync_region_label_visibility(
         let contested = world.regions.get(marker.region.index()).is_some_and(|r| r.occupier.is_some());
         let show = marker.always_visible || contested || zoomed_in_enough || selected.0 == Some(marker.region);
         *visibility = if show { Visibility::Visible } else { Visibility::Hidden };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use archipelago_sim::ids::RegionId;
+    use archipelago_sim::scenario;
+
+    use crate::sim_driver::SimDriver;
+
+    fn run<M>(world: &mut World, system: impl IntoSystem<(), (), M>) {
+        let mut system = IntoSystem::into_system(system);
+        system.initialize(world);
+        system.run((), world).unwrap();
+    }
+
+    fn material_color(world: &World, handle: &Handle<ColorMaterial>) -> Color {
+        world.resource::<Assets<ColorMaterial>>().get(handle).unwrap().color
+    }
+
+    /// Regression guard for `MapMode` dispatch: every mode must paint the
+    /// exact color its own pure function (`map_mode::terrain_fill`/
+    /// `population_fill`/`industry_fill`/`unrest_fill`, or this file's own
+    /// `political_fill_color`) computes for the region actually on screen -
+    /// not some other mode's color left over, and not a fixed fallback.
+    /// Checked this fails when broken: temporarily hardcoded
+    /// `sync_region_visuals`'s `match mode.0 { ... }` to always take the
+    /// `Political` arm - every non-Political assertion below then fails
+    /// (e.g. `Terrain`'s got color equals the *Political* fill instead of
+    /// `terrain_fill(region.terrain)`).
+    #[test]
+    fn every_map_mode_paints_the_color_its_own_function_computes() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<ColorMaterial>>();
+
+        let sim_world = scenario::build_world();
+        let region = sim_world.regions[0].clone();
+        let region_id = region.id;
+        let population_cuts = map_mode::population_thresholds(&sim_world);
+        let industry_cuts = map_mode::industry_thresholds(&sim_world);
+        world.insert_resource(SimRes(SimDriver::new(sim_world, 1)));
+
+        let handle = world.resource_mut::<Assets<ColorMaterial>>().add(ColorMaterial::from_color(Color::NONE));
+        world.spawn((RegionMarker(region_id), MeshMaterial2d(handle.clone())));
+
+        for &mode in map_mode::ALL_MODES.iter() {
+            world.insert_resource(MapModeRes(mode));
+            run(&mut world, sync_region_visuals);
+            let got = material_color(&world, &handle);
+            let expected = match mode {
+                MapMode::Political | MapMode::Supply => political_fill_color(&region),
+                MapMode::Terrain => map_mode::terrain_fill(region.terrain),
+                MapMode::Population => map_mode::population_fill(region.population, population_cuts),
+                MapMode::Industry => map_mode::industry_fill(&region, industry_cuts),
+                MapMode::Unrest => map_mode::unrest_fill(&region),
+            };
+            assert_eq!(got, expected, "mode {mode:?} did not paint the color its own function computes");
+        }
+
+        // Terrain and Population must actually differ from Political for
+        // this fixture - otherwise the assertions above could pass
+        // vacuously if every arm happened to collapse to the same color.
+        world.insert_resource(MapModeRes(MapMode::Political));
+        run(&mut world, sync_region_visuals);
+        let political = material_color(&world, &handle);
+        world.insert_resource(MapModeRes(MapMode::Terrain));
+        run(&mut world, sync_region_visuals);
+        let terrain = material_color(&world, &handle);
+        assert_ne!(political, terrain, "Political and Terrain must render visibly different colors for the same region");
+    }
+
+    /// `OwnerBorderMarker` must track the region's current owner regardless
+    /// of which `MapMode` is active - it's the one thing this crate now
+    /// draws unconditionally so ownership never goes dark
+    /// (`map_mode`'s own doc, "Ownership stays visible in every mode").
+    /// Checked this fails when broken: temporarily hardcoded
+    /// `sync_owner_border`'s color to `NEUTRAL` - this assertion then fails.
+    #[test]
+    fn owner_border_tracks_the_regions_current_owner() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<ColorMaterial>>();
+
+        let sim_world = scenario::build_world();
+        let region_id: RegionId = sim_world.regions[0].id;
+        let owner = sim_world.regions[0].owner;
+        world.insert_resource(SimRes(SimDriver::new(sim_world, 1)));
+
+        let handle = world.resource_mut::<Assets<ColorMaterial>>().add(ColorMaterial::from_color(Color::NONE));
+        world.spawn((OwnerBorderMarker(region_id), MeshMaterial2d(handle.clone())));
+
+        run(&mut world, sync_owner_border);
+        assert_eq!(material_color(&world, &handle), faction_color(owner.index()), "the border must match the region's current owner color");
     }
 }

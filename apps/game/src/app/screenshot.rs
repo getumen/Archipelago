@@ -18,7 +18,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCapture
 
 use archipelago_sim::ids::RegionId;
 
-use super::{MainCamera, RegionLayout, SimRes};
+use super::{MainCamera, MapMode, RegionLayout, SimRes};
 
 /// `--screenshot-after <frames>` / `--screenshot-at-day <day>` (`main.rs`'s
 /// own doc): when the automated capture fires.
@@ -43,9 +43,9 @@ pub enum ScreenshotTrigger {
 /// `app::run` inserts this conditionally, so `maybe_capture_screenshot`
 /// simply no-ops on every frame when it isn't there.
 ///
-/// `open_*`/`supply_overlay`/`camera_focus_region`/`camera_zoom` are
+/// `open_*`/`map_mode`/`camera_focus_region`/`camera_zoom` are
 /// verification-only conveniences (`--debug-*` flags, `main.rs`'s own doc) -
-/// there is no interactive way to press `L`/`D`/`N` or scroll-zoom before a
+/// there is no interactive way to press `M`/`D`/`N` or scroll-zoom before a
 /// screenshot fires when nothing is at the keyboard, so `app::run` reads
 /// these once at startup to pre-set the corresponding resource/camera
 /// framing instead. They never affect anything but initial UI-panel
@@ -61,7 +61,13 @@ pub struct ScreenshotConfig {
     /// `open_diplomacy`/`open_newspaper` - no keyboard at a screenshot run
     /// to press `P` first.
     pub open_policy: bool,
-    pub supply_overlay: bool,
+    /// `--debug-map-mode <key>`: which `MapMode` to start in (`political`/
+    /// `terrain`/`population`/`industry`/`unrest`/`supply`, `MapMode::key()`),
+    /// so any mode - the old standalone supply overlay included, now
+    /// `MapMode::Supply` - can be captured unattended. `None` keeps the
+    /// ordinary `MapMode::default()` (`Political`) a live run always starts
+    /// in.
+    pub map_mode: Option<MapMode>,
     /// `--debug-select-region <region>`: pre-selects a region so Stage 8B's
     /// region panel (action buttons included) renders in a `--screenshot`
     /// run with nothing to click it open.

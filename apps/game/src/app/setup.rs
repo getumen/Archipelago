@@ -10,12 +10,13 @@ use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::{LinkKind, Station, World as SimWorld};
 
 use super::fonts::AppFont;
+use super::map_mode::{ModeLegendHeader, ModeLegendRow, MODE_LEGEND_ROWS};
 use super::overlay;
 use super::palette::faction_color;
 use super::{
-    EventLogText, FactionPanelText, InspectText, MainCamera, PlayerPanelText, RegionLabelMarker,
-    RegionLayout, RegionMarker, RegionRadii, SeaZoneCenters, SeaZoneMarker, SimRes,
-    SupplyOnlyLegendRow, TopBarText, UnitMarker,
+    EventLogText, FactionPanelText, InspectText, MainCamera, OwnerBorderMarker, PlayerPanelText,
+    RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii, SeaZoneCenters, SeaZoneMarker,
+    SimRes, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -176,6 +177,11 @@ pub(super) const Z_LINK_HIGHLIGHT: f32 = 0.25;
 /// dominant mark this overlay ever draws.
 pub(super) const Z_LINK_CHOKEPOINT: f32 = 0.35;
 const Z_REGION: f32 = 0.0;
+/// `OwnerBorderMarker`'s own layer - just behind every region's own fill
+/// (`Z_REGION`) so only the ring sticking out past the fill's own edge ever
+/// shows, above every link/sea-zone layer so it's never itself hidden by
+/// either. See `owner_border_radius`'s own doc for the geometry this paints.
+const Z_OWNER_BORDER: f32 = -0.05;
 /// Stage 7C's supply-overlay ring (`overlay::sync_supply_overlay`) - just
 /// above the region's own fill, below its label and any construction
 /// marker, so it always reads as "around this region" rather than
@@ -225,6 +231,35 @@ pub(super) fn region_radius(population: f32) -> f32 {
 /// token next to the coast rather than a wash over the map.
 pub(super) fn sea_zone_radius(coastal_region_count: usize) -> f32 {
     (MIN_SEA_ZONE_RADIUS + 3.0 * coastal_region_count as f32).clamp(MIN_SEA_ZONE_RADIUS, MAX_SEA_ZONE_RADIUS)
+}
+
+/// How far outside a region's own fill radius its always-on owner-color
+/// border ring (`OwnerBorderMarker`, `visuals::sync_owner_border`) extends -
+/// see `map_mode`'s own module doc, "Ownership stays visible in every
+/// mode", for why every region needs one at all regardless of the active
+/// `MapMode`.
+///
+/// Dense hex map (`is_dense`): grows the fill's own hex radius back out to
+/// the *exact* tiling circumradius `compute_region_radii` deliberately
+/// shrank it from (`DENSE_HEX_FILL_RATIO`'s own doc - "leaves a thin gap of
+/// background... so individual cells still read as separate") - so a
+/// same-owner neighbor's border reaches that identical boundary and the two
+/// meet edge to edge with neither a gap nor an overlap, and two different
+/// owners' borders still meet cleanly at that shared edge instead of either
+/// fusing into one blob or leaving a visible seam of bare background
+/// between them.
+///
+/// Sparse map (population-scaled circles): there's no equivalent tiling
+/// pitch to reuse, so this instead grows the radius by a fixed fraction of
+/// itself, clamped into a range that stays a thin, readable ring across the
+/// whole `MIN_REGION_RADIUS..=MAX_REGION_RADIUS` span `region_radius` can
+/// produce.
+pub(super) fn owner_border_radius(radius: f32, is_dense: bool) -> f32 {
+    if is_dense {
+        radius / DENSE_HEX_FILL_RATIO
+    } else {
+        radius + (radius * 0.18).clamp(2.0, 5.0)
+    }
 }
 
 pub(super) fn setup(
@@ -340,6 +375,21 @@ pub(super) fn setup(
     for region in &world.regions {
         let [x, y] = layout.0[region.id.index()];
         let radius = radii.0[region.id.index()];
+
+        // The always-on owner-color border (`map_mode`'s own module doc,
+        // "Ownership stays visible in every mode"): a slightly larger mesh
+        // in the same shape as the fill below it, spawned first so it sits
+        // behind (`Z_OWNER_BORDER < Z_REGION`) - only the ring sticking out
+        // past the fill's own edge ever actually shows.
+        let border_radius = owner_border_radius(radius, is_dense);
+        let border_mesh = if is_dense { meshes.add(RegularPolygon::new(border_radius, 6)) } else { meshes.add(Circle::new(border_radius)) };
+        commands.spawn((
+            Mesh2d(border_mesh),
+            MeshMaterial2d(materials.add(ColorMaterial::from_color(faction_color(region.owner.index())))),
+            Transform::from_xyz(x, y, Z_OWNER_BORDER),
+            OwnerBorderMarker(region.id),
+        ));
+
         let mesh = if is_dense { meshes.add(RegularPolygon::new(radius, 6)) } else { meshes.add(Circle::new(radius)) };
         commands.spawn((
             Mesh2d(mesh),
@@ -350,8 +400,8 @@ pub(super) fn setup(
 
         // Stage 7C's supply-network overlay ring (docs/phase7-spec.md "1."):
         // pre-spawned hidden (`Visibility::Hidden`), toggled visible and
-        // recolored every frame by `overlay::sync_supply_overlay` while `L`
-        // has the overlay on.
+        // recolored every frame by `overlay::sync_supply_overlay` while
+        // `MapMode::Supply` is the active map mode.
         commands.spawn((
             Mesh2d(meshes.add(Annulus::new(radius + SUPPLY_RING_GAP, radius + SUPPLY_RING_GAP + SUPPLY_RING_THICKNESS))),
             MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::NONE))),
@@ -618,6 +668,12 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
         })
         .with_children(|row| {
             super::panels::spawn_speed_buttons(row, font);
+            // The map-mode button (`map_mode`'s own module doc, "Cycling
+            // modes must be obvious and discoverable") - available in
+            // observer mode too, unlike the policy/diplomacy toggles below,
+            // since seeing terrain/population/industry/unrest never
+            // requires a `--play`ed faction.
+            super::panels::spawn_map_mode_button(row, font);
             // Observer mode (no `--play`ed faction, `has_player == false`)
             // has no policy/diplomacy to control - `input::keyboard_input`'s
             // own `D`/policy bindings likewise only fire once a player
@@ -724,21 +780,30 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
     spawn_legend(commands, font);
 }
 
-/// A small, always-present key to every mark Stage 7C's overlays can put on
-/// the map (`overlay`'s own module doc has the full visual-hierarchy
-/// rationale) - so a viewer never has to read this crate's source to know
-/// what a color means - plus, at the top, the camera/order controls
-/// themselves (`input`'s own module doc for the full binding list): without
-/// this, nothing on screen ever told a player panning existed at all, let
-/// alone how to do it on a device with no right-drag-capable mouse. Three
-/// groups: the controls list and two always-on-legend rows
-/// (blockade/construction), both shown unconditionally, and the supply-
-/// overlay-specific rows, shown only while `SupplyOverlay` (`L`) is on -
-/// `overlay::sync_legend_visibility` toggles those together with the
-/// overlay itself. Sits in the one gap the rest of this crate's UI layout
-/// leaves free at the bottom of the window, between the event log
-/// (`left: 10, width: 760`, ending at `770`) and the player panel
-/// (`right: 10, width: 320`, starting at `950`).
+/// A small, always-present key to every mark Stage 7C's overlays and
+/// `map_mode`'s map modes can put on the map (`overlay`'s own module doc has
+/// the full visual-hierarchy rationale) - so a viewer never has to read this
+/// crate's source to know what a color means - plus, at the top, the
+/// camera/order controls themselves (`input`'s own module doc for the full
+/// binding list): without this, nothing on screen ever told a player
+/// panning existed at all, let alone how to do it on a device with no
+/// right-drag-capable mouse. Three groups: the controls list, two always-on
+/// legend rows plus the owner-border explanation (blockade/construction/
+/// border), all shown unconditionally, and the active `MapMode`'s own
+/// header + swatch rows (`ModeLegendHeader`/`ModeLegendRow`), filled in and
+/// shown/hidden every frame by `map_mode::sync_mode_legend` according to
+/// whichever mode is current - including the supply overlay's own rows,
+/// now one mode among the rest rather than a separately-toggled block. Sits
+/// in the one gap the rest of this crate's UI layout leaves free at the
+/// bottom of the window, between the event log (`left: 10, width: 760`,
+/// ending at `770`) and the player panel (`right: 10, width: 320`, starting
+/// at `950`) - a 180px budget. `LEGEND_PANEL_WIDTH` uses as much of it as
+/// fits with a 2px margin on each side (`left: 772`, ending at `948`), wide
+/// enough that `map_mode::header_description`'s longest line no longer wraps
+/// (it used to, at this panel's old 170px width, into a ragged 2-3 line
+/// block that visually collided with the `controls:` rows above it).
+const LEGEND_PANEL_WIDTH: f32 = 176.0;
+
 fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
     let label_color = Color::srgba(0.85, 0.87, 0.90, 0.95);
     let header_color = Color::srgba(0.6, 0.63, 0.67, 0.9);
@@ -747,18 +812,15 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
         .spawn(Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(6.0),
-            left: Val::Px(775.0),
-            width: Val::Px(170.0),
+            left: Val::Px(772.0),
+            width: Val::Px(LEGEND_PANEL_WIDTH),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(1.0),
             ..default()
         })
         .with_children(|parent| {
-            let mut row = |label: &str, color: Color, supply_only: bool| {
-                let mut e = parent.spawn((Text::new(label.to_string()), text_font(10.0, font), TextColor(color)));
-                if supply_only {
-                    e.insert((Visibility::Hidden, SupplyOnlyLegendRow));
-                }
+            let mut row = |label: &str, color: Color| {
+                parent.spawn((Text::new(label.to_string()), text_font(10.0, font), TextColor(color)));
             };
 
             // Camera/order controls (`input::mouse_pan_zoom`/`keyboard_pan`/
@@ -766,25 +828,31 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             // own docs for exactly what each binding does and why. Kept to
             // one line per binding, matched to the same `<=31`-char width
             // the longest existing legend row below already proves fits.
-            row("controls:", header_color, false);
-            row("pan: scroll or middle-drag", label_color, false);
-            row("pan: arrow keys (always)", label_color, false);
-            row("zoom: ctrl+scroll / pinch", label_color, false);
-            row("select/order: left click", label_color, false);
-            row("region menu: right click", label_color, false);
-            row("policy panel: P button/key", label_color, false);
-            row("diplomacy panel: D button/key", label_color, false);
-            row("unit hold/reinforce: buttons or H/J", label_color, false);
+            row("controls:", header_color);
+            row("pan: scroll or middle-drag", label_color);
+            row("pan: arrow keys (always)", label_color);
+            row("zoom: ctrl+scroll / pinch", label_color);
+            row("select/order: left click", label_color);
+            row("region menu: right click", label_color);
+            row("map mode: M button/key", label_color);
+            row("policy panel: P button/key", label_color);
+            row("diplomacy panel: D button/key", label_color);
+            row("unit hold/reinforce: buttons or H/J", label_color);
 
-            row("legend", label_color, false);
-            row("■ port blockaded", overlay::BLOCKADE_MARKER_COLOR, false);
-            row("■ under construction", overlay::CONSTRUCTION_TINT, false);
-            row("supply overlay (L):", header_color, true);
-            row("■ chokepoint (saturated)", overlay::COLOR_CHOKEPOINT, true);
-            row("■ active supply route", overlay::COLOR_ACTIVE_ROUTE, true);
-            row("■ relay route (spare capacity)", overlay::COLOR_RELAY_FULL, true);
-            row("● ring: region starved", overlay::RING_STARVED, true);
-            row("● ring: region full", overlay::RING_FULL, true);
-            row("● ring: contested", overlay::RING_CONTESTED, true);
+            row("凡例", label_color);
+            row("■ 港湾封鎖中", overlay::BLOCKADE_MARKER_COLOR);
+            row("■ 建設中", overlay::CONSTRUCTION_TINT);
+            row("外側の輪 = 所属勢力", label_color);
+
+            // The active `MapMode`'s own header + up to `MODE_LEGEND_ROWS`
+            // swatch rows (`map_mode::sync_mode_legend` fills these in every
+            // frame from `map_mode::legend_header`/`legend_entries` -
+            // replaces what used to be a fixed, supply-only block here,
+            // folding that overlay's own legend into the same mechanism
+            // every other mode now shares).
+            parent.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(header_color), ModeLegendHeader));
+            for i in 0..MODE_LEGEND_ROWS {
+                parent.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(label_color), Visibility::Hidden, ModeLegendRow(i)));
+            }
         });
 }

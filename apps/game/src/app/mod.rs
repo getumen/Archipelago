@@ -7,6 +7,7 @@ mod camera_fit;
 mod event_text;
 mod fonts;
 mod input;
+mod map_mode;
 mod newspaper;
 mod overlay;
 mod palette;
@@ -21,6 +22,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use bevy::prelude::*;
 
+pub use map_mode::MapMode;
 pub use screenshot::{ScreenshotConfig, ScreenshotTrigger};
 
 use archipelago_agents::newspaper::NewspaperArticle;
@@ -137,16 +139,6 @@ pub(crate) struct DiplomacyPanel {
 /// as `DiplomacyPanel`.
 #[derive(Resource, Default)]
 pub(crate) struct PolicyPanel(pub bool);
-
-/// Stage 7C (docs/phase7-spec.md "1. 補給網の可視化"): `L` toggles the
-/// supply-network overlay - "常時表示だと地図が読みにくい" (always-on would
-/// make the map unreadable), so this starts `false` and every overlay-only
-/// visual (`overlay::sync_supply_overlay`) gates on it. Sea control,
-/// blockade, devastation, and construction markers are *not* gated by
-/// this - only the supply-route/chokepoint layer is (docs/phase7-spec.md
-/// "Stage 7C" items 1 vs. 2/3, which name no toggle for the others).
-#[derive(Resource, Default)]
-pub(crate) struct SupplyOverlay(pub bool);
 
 /// Stage 7C's natural-language proposal compose box (docs/phase7-spec.md
 /// "4. 外交画面": "テキスト入力欄から送り"). Only ever active while the
@@ -429,13 +421,13 @@ pub(crate) struct PlayerPanelText;
 #[derive(Component)]
 pub(crate) struct NewspaperPanelText;
 
-/// Stage 7C visual-hierarchy follow-up: marks a legend row (`setup::spawn_legend`)
-/// that only means something while the supply overlay itself is on - shown/
-/// hidden together with `SupplyOverlay` by `overlay::sync_legend_visibility`.
-/// The legend's other rows (blockade/construction - both always-on features)
-/// never carry this and stay permanently visible.
+/// The always-on owner-color border ring drawn just behind every region's
+/// own fill (`map_mode`'s own module doc, "Ownership stays visible in every
+/// mode") - pre-spawned once per region in `setup::setup`, alongside
+/// `RegionMarker` itself, and recolored (never spawned/despawned) every
+/// frame by `visuals::sync_owner_border`.
 #[derive(Component)]
-pub(crate) struct SupplyOnlyLegendRow;
+pub(crate) struct OwnerBorderMarker(pub RegionId);
 
 /// Builds and runs the Bevy `App`. `world` must already be validated
 /// (`archipelago_sim::scenario::build_world`/`load_str`/`load_file`) -
@@ -526,7 +518,11 @@ pub fn run(
     let debug_open_diplomacy = screenshot.as_ref().is_some_and(|c| c.open_diplomacy);
     let debug_open_newspaper = screenshot.as_ref().is_some_and(|c| c.open_newspaper);
     let debug_open_policy = screenshot.as_ref().is_some_and(|c| c.open_policy);
-    let debug_supply_overlay = screenshot.as_ref().is_some_and(|c| c.supply_overlay);
+    // `--debug-map-mode <key>`: which `MapMode` a `--screenshot` run starts
+    // in, so every mode can be captured unattended (no keyboard at the
+    // wheel to press `M` first) - defaults to `MapMode::Political`, exactly
+    // as a live run always has, when not given at all.
+    let debug_map_mode = screenshot.as_ref().and_then(|c| c.map_mode).unwrap_or_default();
     // Computed from `world` here, before it moves into `SimDriver::new_with_player`
     // below - same "lowest-id other living faction" default `input::
     // keyboard_input`'s own `D` binding picks.
@@ -592,7 +588,7 @@ pub fn run(
         .insert_resource(PolicyPanel(debug_open_policy))
         .insert_resource(ActiveGood::default())
         .insert_resource(LastRejection::default())
-        .insert_resource(SupplyOverlay(debug_supply_overlay))
+        .insert_resource(map_mode::MapModeRes(debug_map_mode))
         .insert_resource(NlCompose::default())
         .insert_resource(panels::PointerOverUi::default())
         .insert_resource(panels::UnitPanelSlots::default())
@@ -617,6 +613,7 @@ pub fn run(
                 // simulation`, so a click lands in this frame's tick exactly
                 // like a keypress does.
                 panels::handle_speed_button_clicks,
+                panels::handle_map_mode_button_clicks,
                 panels::handle_region_action_clicks,
                 panels::handle_unit_action_clicks,
                 panels::handle_unit_delegate_clicks,
@@ -636,7 +633,6 @@ pub fn run(
                 overlay::sync_supply_overlay,
                 overlay::sync_construction_markers,
                 overlay::sync_blockade_visuals,
-                overlay::sync_legend_visibility,
                 ui::update_top_bar,
                 ui::update_top_bar_player_stats,
                 ui::update_faction_panel,
@@ -649,21 +645,25 @@ pub fn run(
                 .after(sim_control::advance_simulation),
         )
         .add_systems(
-            // A standalone call rather than folded into the 14-system chain
+            // A standalone call rather than folded into the 13-system chain
             // above - that tuple is already at the practical size this
             // crate's own `.chain()` calls have been kept under elsewhere
-            // (see the next block's own doc), so a 15th system goes here
-            // instead. Ordering only needs `SimRes`/`SelectedRegion` to be
-            // this frame's own post-tick state, same as every system in the
-            // chain above - `.after(...)` alone (no `.chain()`, nothing else
-            // in this call to chain against) gets that without needing to
-            // grow that tuple at all.
+            // (see the next block's own doc), so these go here instead.
+            // Ordering only needs `SimRes`/`SelectedRegion`/`MapModeRes` to
+            // be this frame's own post-tick state, same as every system in
+            // the chain above - `.after(...)` alone (no `.chain()`, nothing
+            // else in this call to chain against) gets that without needing
+            // to grow that tuple at all. The three are independent of each
+            // other (disjoint entities: labels, `OwnerBorderMarker`
+            // materials, and legend UI text), so no relative order between
+            // them is needed either.
             Update,
-            visuals::sync_region_label_visibility.after(sim_control::advance_simulation),
+            (visuals::sync_region_label_visibility, visuals::sync_owner_border, map_mode::sync_mode_legend)
+                .after(sim_control::advance_simulation),
         )
         .add_systems(
             // Split from the block above - Bevy's `.chain()` tuple impl has
-            // a fixed maximum arity, and the two together (14 + 5) exceed
+            // a fixed maximum arity, and the two together (13 + 6) exceed
             // it. Both blocks read post-tick `SimRes` state read-only and
             // write disjoint UI entities, so the only ordering that
             // matters - after `advance_simulation` - is preserved by
@@ -671,6 +671,7 @@ pub fn run(
             Update,
             (
                 panels::sync_speed_buttons,
+                panels::sync_map_mode_button,
                 panels::sync_region_action_buttons,
                 panels::sync_unit_panel,
                 panels::sync_policy_panel,
