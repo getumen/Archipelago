@@ -433,6 +433,27 @@ pub(super) struct UnitActionButton {
     kind: UnitActionKind,
 }
 
+/// Military delegation's own button (docs/design.md §14): toggles slot
+/// N's unit between player-controlled and delegated to
+/// `archipelago_agents::HumanAgent`'s wrapped `HeuristicAgent`. Kept
+/// separate from `UnitActionButton` rather than added as a fourth
+/// `UnitActionKind` variant - unlike `Hold`/`Reinforce`/`Disband`, this
+/// never produces an `Action` at all (`SimDriver::delegate_unit`/
+/// `undelegate_unit`'s own doc: delegation is `HumanAgent` state, not a
+/// `Simulation` mutation), so `handle_unit_action_clicks`'s `Action`-only
+/// match would have needed a dead arm for it.
+#[derive(Component, Clone, Copy)]
+pub(super) struct UnitDelegateButton(usize);
+
+/// The delegate button's own label text, re-synced every frame by
+/// `sync_unit_panel` between "AI委任 [U]" (currently player-controlled) and
+/// "操作を戻す [U]" (currently delegated), so the button always reads as an
+/// action ("hand this over" / "take this back") rather than a static state
+/// readout - the row text's own "[AI操作中]" marker (`sync_unit_panel`)
+/// already covers the state readout itself.
+#[derive(Component)]
+pub(super) struct UnitDelegateLabel(usize);
+
 #[derive(Component)]
 pub(super) struct UnitReinforceReason(usize);
 
@@ -493,6 +514,11 @@ pub(super) fn spawn_unit_panel(commands: &mut Commands, font: &Handle<Font>) {
                             .with_children(|b| {
                                 b.spawn((Text::new("解散 [K]"), text_font(11.0, font), TextColor(TEXT_ENABLED)));
                             });
+                        buttons
+                            .spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), UnitDelegateButton(slot)))
+                            .with_children(|b| {
+                                b.spawn((Text::new("AI委任 [U]"), text_font(11.0, font), TextColor(TEXT_ENABLED), UnitDelegateLabel(slot)));
+                            });
                     });
                     row.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(TEXT_REASON), UnitReinforceReason(slot)));
                 });
@@ -515,7 +541,9 @@ pub(super) fn sync_unit_panel(
     mut root: Query<&mut Visibility, With<UnitPanelRoot>>,
     mut row_containers: Query<(&UnitRowContainer, &mut Visibility), Without<UnitPanelRoot>>,
     mut row_texts: Query<(&UnitRowText, &mut Text), (Without<UnitReinforceReason>, Without<UnitPanelOverflowText>)>,
-    mut action_buttons: Query<(&UnitActionButton, &mut BackgroundColor)>,
+    mut action_buttons: Query<(&UnitActionButton, &mut BackgroundColor), Without<UnitDelegateButton>>,
+    mut delegate_buttons: Query<(&UnitDelegateButton, &mut BackgroundColor), Without<UnitActionButton>>,
+    mut delegate_labels: Query<(&UnitDelegateLabel, &mut Text), (Without<UnitRowText>, Without<UnitReinforceReason>, Without<UnitPanelOverflowText>)>,
     mut reasons: Query<(&UnitReinforceReason, &mut Text), Without<UnitRowText>>,
     mut overflow: Query<&mut Text, (With<UnitPanelOverflowText>, Without<UnitRowText>, Without<UnitReinforceReason>)>,
 ) {
@@ -543,11 +571,25 @@ pub(super) fn sync_unit_panel(
                 *vis = if unit.is_some() { Visibility::Visible } else { Visibility::Hidden };
             }
         }
+        // Military delegation's own indicator (docs/design.md §14): "does
+        // the AI currently order this unit" is read straight off `SimRes`
+        // (`SimDriver::is_delegated`), never guessed at from `World` alone -
+        // delegation is `HumanAgent` state, not something `World` records.
+        let delegated = unit.is_some_and(|u| sim.0.is_delegated(u.id));
         let (row_line, reinforce_reason) = match unit {
             Some(u) => (
                 format!(
-                    "#{} {}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}",
-                    u.id.0, u.name, u.manpower, u.equipment, u.organization, u.morale, u.supply, supply_attrition_marker(u.supply), u.experience
+                    "#{} {}{}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}",
+                    u.id.0,
+                    u.name,
+                    if delegated { " [AI操作中]" } else { "" },
+                    u.manpower,
+                    u.equipment,
+                    u.organization,
+                    u.morale,
+                    u.supply,
+                    supply_attrition_marker(u.supply),
+                    u.experience
                 ),
                 reinforce_disabled_reason(world, player_faction, u.station),
             ),
@@ -573,6 +615,22 @@ pub(super) fn sync_unit_panel(
                     UnitActionKind::Reinforce | UnitActionKind::Disband => reinforce_reason.is_none(),
                 };
             bg.0 = if enabled { COLOR_ENABLED } else { COLOR_DISABLED };
+        }
+        for (button, mut bg) in &mut delegate_buttons {
+            if button.0 != slot {
+                continue;
+            }
+            bg.0 = match (unit.is_some(), delegated) {
+                (false, _) => COLOR_DISABLED,
+                (true, true) => COLOR_ACTIVE,
+                (true, false) => COLOR_ENABLED,
+            };
+        }
+        for (label, mut text) in &mut delegate_labels {
+            if label.0 != slot {
+                continue;
+            }
+            text.0 = if delegated { "操作を戻す [U]".to_string() } else { "AI委任 [U]".to_string() };
         }
     }
 
@@ -620,6 +678,28 @@ pub(super) fn handle_unit_action_clicks(mut sim: ResMut<SimRes>, slots: Res<Unit
             UnitActionKind::Disband => Action::DisbandUnit { unit: UnitId(unit_id) },
         };
         sim.0.push_human_action(action);
+    }
+}
+
+/// Military delegation's click handler (docs/design.md §14) - the mouse
+/// path to the same toggle `input::keyboard_input`'s `U` binding reaches,
+/// one unit at a time instead of the whole current selection. Reads
+/// `SimDriver::is_delegated` itself (not the button's current background
+/// color) to decide which way to toggle, so a click always reflects this
+/// frame's real state even if `sync_unit_panel` hasn't repainted the button
+/// yet.
+pub(super) fn handle_unit_delegate_clicks(mut sim: ResMut<SimRes>, slots: Res<UnitPanelSlots>, query: Query<(&Interaction, &UnitDelegateButton), Changed<Interaction>>) {
+    for (interaction, button) in &query {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Some(unit_id) = slots.0[button.0] else { continue };
+        let unit = UnitId(unit_id);
+        if sim.0.is_delegated(unit) {
+            sim.0.undelegate_unit(unit);
+        } else {
+            sim.0.delegate_unit(unit);
+        }
     }
 }
 

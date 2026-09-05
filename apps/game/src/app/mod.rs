@@ -525,9 +525,24 @@ pub fn run(
     } else {
         BTreeSet::new()
     };
+    // `--debug-delegate-units` (`ScreenshotConfig::delegate_units`'s own
+    // doc): computed from `world` here for the same reason
+    // `debug_selected_units` is - `world` moves into `SimDriver::
+    // new_with_player` right below, and delegation itself has to happen
+    // against the constructed `SimDriver` (`SimDriver::delegate_unit`),
+    // not `World`, so this only captures *which* units to delegate.
+    let debug_delegate_units: bool = screenshot.as_ref().is_some_and(|c| c.delegate_units);
+
+    let mut sim_driver = SimDriver::new_with_player(world, seed, player_faction, replay_days);
+    if debug_delegate_units && let Some(p) = player_faction {
+        let units: Vec<UnitId> = sim_driver.sim.world.units.iter().filter(|u| u.alive && u.owner == p).map(|u| u.id).collect();
+        for unit in units {
+            sim_driver.delegate_unit(unit);
+        }
+    }
 
     app.insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.10)))
-        .insert_resource(SimRes(SimDriver::new_with_player(world, seed, player_faction, replay_days)))
+        .insert_resource(SimRes(sim_driver))
         .insert_resource(SpeedRes {
             // `X20` only for the unattended `AtDay` case (this function's
             // own doc) - reaching, say, day 719 at `X1` would need 719
@@ -586,6 +601,7 @@ pub fn run(
                 panels::handle_speed_button_clicks,
                 panels::handle_region_action_clicks,
                 panels::handle_unit_action_clicks,
+                panels::handle_unit_delegate_clicks,
                 panels::handle_policy_toggle,
                 panels::handle_policy_button_clicks,
                 panels::handle_diplomacy_button_clicks,

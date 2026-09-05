@@ -23,6 +23,20 @@
 //! which. Whichever it is, `tick` applies its `decide()` output through
 //! `Simulation::apply` exactly like every AI faction's - no separate code
 //! path, per docs/design.md §14's "人間も AI と同じ入口から世界に触る".
+//!
+//! **Military delegation** (docs/design.md §14): `delegate_unit`/
+//! `undelegate_unit`/`is_delegated` forward straight to the live
+//! `HumanAgent` controller (a no-op / `false` for every other `Controller`
+//! variant, same shape as `push_human_action`). Nothing here needs to know
+//! *how* a delegated unit gets ordered - `HumanAgent::decide` already folds
+//! those orders into the exact same `Vec<Action>` a player's own queued
+//! orders come back in, so this file's own invariant above (`tick` just
+//! applies whatever `decide()` returns) already covers it, and so does
+//! `--record`/`--replay`: a delegated unit's AI-issued orders land in
+//! `last_human_actions` like any other action, get written to the
+//! recording, and a `--replay` run reproduces them from that recording via
+//! `ReplayAgent` with no delegation-specific replay logic at all - see
+//! `tests::delegated_play_replays_identically`.
 
 use archipelago_agents::HumanAgent;
 use archipelago_sim::action::{Action, ActionError};
@@ -163,6 +177,40 @@ impl SimDriver {
             && let Controller::Human(agent) = &mut self.controllers[i]
         {
             agent.push(action);
+        }
+    }
+
+    /// Hands `unit`'s day-to-day orders to the same `HeuristicAgent` logic
+    /// the AI factions run (`archipelago_agents::HumanAgent::delegate`'s own
+    /// doc) - a no-op with no live `HumanAgent` controller, mirroring
+    /// `push_human_action`'s own doc for why (observing-only mode, or a
+    /// `--replay` run with a `ReplayAgent` in this slot instead).
+    pub fn delegate_unit(&mut self, unit: archipelago_sim::ids::UnitId) {
+        if let Some(i) = self.human_index
+            && let Controller::Human(agent) = &mut self.controllers[i]
+        {
+            agent.delegate(unit);
+        }
+    }
+
+    /// Takes `unit` back under direct player control - see `delegate_unit`
+    /// and `archipelago_agents::HumanAgent::undelegate`.
+    pub fn undelegate_unit(&mut self, unit: archipelago_sim::ids::UnitId) {
+        if let Some(i) = self.human_index
+            && let Controller::Human(agent) = &mut self.controllers[i]
+        {
+            agent.undelegate(unit);
+        }
+    }
+
+    /// Whether `unit` is currently delegated - `false` with no live
+    /// `HumanAgent` controller (nothing can be delegated at all in that
+    /// case). Read by `apps/game`'s unit panel/map visuals to mark
+    /// AI-controlled units.
+    pub fn is_delegated(&self, unit: archipelago_sim::ids::UnitId) -> bool {
+        match self.human_index.map(|i| &self.controllers[i]) {
+            Some(Controller::Human(agent)) => agent.is_delegated(unit),
+            _ => false,
         }
     }
 
@@ -435,6 +483,88 @@ mod tests {
             format!("{:?}", replay_driver.sim.world),
             final_state,
             "the replay must reach byte-identical final state to the original recorded run"
+        );
+    }
+
+    /// Military delegation's own determinism guard, alongside
+    /// `recorded_play_replays_identically` above: delegates every one of
+    /// the player faction's units to `HeuristicAgent` logic at day 0 (no
+    /// other player input at all - the point of delegation is to let the
+    /// AI run the whole army), records the resulting play, and checks a
+    /// fresh `SimDriver` replaying that recording (with **no** delegation
+    /// call made against it at all - `delegate_unit`'s own doc says the
+    /// recorded `Action`s are all a replay ever needs) reaches byte-identical
+    /// final state.
+    ///
+    /// Confirmed this can actually fail: temporarily made `HumanAgent::
+    /// decide` skip appending the filtered `military` actions (returning
+    /// only the drained queue, as it did before delegation existed) and
+    /// re-ran - `recorded` came back with every day empty (nothing was
+    /// ever delegated *and* pushed by hand in this test), so the driver
+    /// never issued a single order for its own units all game and the
+    /// final `World` differed sharply from a real delegated run (far fewer
+    /// regions/units owned by the player faction at the end). Reverted
+    /// before committing.
+    #[test]
+    fn delegated_play_replays_identically() {
+        const SEED: u64 = 1;
+        const DAYS: u32 = 120;
+        let player = FactionId(0);
+
+        let mut driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), None);
+        let starting_units: Vec<archipelago_sim::ids::UnitId> =
+            driver.sim.world.units.iter().filter(|u| u.owner == player && u.alive).map(|u| u.id).collect();
+        assert!(!starting_units.is_empty(), "faction 0 must start with at least one living unit to delegate");
+        for &unit in &starting_units {
+            driver.delegate_unit(unit);
+            assert!(driver.is_delegated(unit), "delegate_unit must be reflected by is_delegated immediately");
+        }
+
+        let mut recorded: Vec<Vec<Action>> = Vec::new();
+        for _ in 0..DAYS {
+            if driver.outcome(DAYS) != Outcome::Ongoing {
+                break;
+            }
+            // Every later-recruited unit is delegated too, the moment it
+            // appears - a player who has handed over "the military" would
+            // expect a freshly raised unit to join the delegated pool, not
+            // sit idle under nobody's orders.
+            for unit in driver.sim.world.units.iter().filter(|u| u.owner == player && u.alive).map(|u| u.id).collect::<Vec<_>>() {
+                driver.delegate_unit(unit);
+            }
+            driver.tick();
+            recorded.push(driver.last_human_actions().to_vec());
+        }
+        let final_day = driver.sim.world.day;
+        let final_state = format!("{:?}", driver.sim.world);
+        assert_ne!(final_day, 0, "the delegated run must have actually played");
+        assert!(
+            recorded.iter().any(|day| !day.is_empty()),
+            "a fully-delegated faction must actually receive unit orders over 120 days with no player input at all"
+        );
+
+        let path = std::env::temp_dir().join(format!("archipelago-game-delegated-record-test-{}.json", std::process::id()));
+        crate::action_codec::write_record(&path, &recorded).expect("write recording");
+        let replayed_days = crate::action_codec::read_record(&path).expect("read recording");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(replayed_days, recorded, "round-tripping the delegated recording through the record file must reproduce the exact same actions");
+
+        // No `delegate_unit` call anywhere against this driver - replay
+        // must reproduce the delegated AI's orders purely from the
+        // recorded `Action`s, exactly like any other player action.
+        let mut replay_driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), Some(replayed_days));
+        for _ in 0..DAYS {
+            if replay_driver.outcome(DAYS) != Outcome::Ongoing {
+                break;
+            }
+            replay_driver.tick();
+        }
+
+        assert_eq!(replay_driver.sim.world.day, final_day, "the delegated replay must stop on the exact same day as the original run");
+        assert_eq!(
+            format!("{:?}", replay_driver.sim.world),
+            final_state,
+            "the delegated replay must reach byte-identical final state to the original delegated run"
         );
     }
 }

@@ -32,6 +32,24 @@ const DEVASTATION_TINT: Color = Color::srgb(0.16, 0.13, 0.10);
 /// own doc for why this deliberately stops short of `1.0`.
 const MAX_DEVASTATION_MIX: f32 = 0.8;
 
+/// Military delegation's own map marker (docs/design.md §14): a delegated
+/// unit's marker is mixed toward this near-white rather than drawn in plain
+/// `faction_color` - the same "state the player needs to see without
+/// opening a panel" role `DEVASTATION_TINT`/occupation mixing already play
+/// for regions. A *lightness* shift rather than another hue: every
+/// `palette::faction_color` entry is a fully-saturated mid-tone, so pushing
+/// toward white reads as "highlighted" against all eight of them uniformly,
+/// where picking some other bright hue (gold, say) would have been nearly
+/// indistinguishable from faction 3's own amber - confirmed by looking at
+/// an actual screenshot, not just by inspecting the two `Color` values side
+/// by side (docs/conventions.md §2, CLAUDE.md's "画面は見る。数えない").
+const DELEGATED_MARKER_TINT: Color = Color::srgb(0.98, 0.98, 0.95);
+/// How far a delegated unit's marker mixes toward `DELEGATED_MARKER_TINT` -
+/// short of `1.0` so the marker still visibly carries its owner's
+/// `faction_color` underneath, the same way `MAX_DEVASTATION_MIX` keeps a
+/// devastated region's owner color partly visible.
+const DELEGATED_MARKER_MIX: f32 = 0.65;
+
 pub(super) fn sync_region_visuals(
     sim: Res<SimRes>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -165,7 +183,9 @@ pub(super) fn sync_unit_visuals(
         let strength = ((unit.manpower / UNIT_MANPOWER) + (unit.equipment / UNIT_EQUIPMENT)) / 2.0;
         transform.scale = Vec3::splat(strength.clamp(0.4, 1.3));
         if let Some(mut mat) = materials.get_mut(&material_handle.0) {
-            mat.color = faction_color(unit.owner.index());
+            let base = faction_color(unit.owner.index());
+            mat.color =
+                if sim.0.is_delegated(unit.id) { base.mix(&DELEGATED_MARKER_TINT, DELEGATED_MARKER_MIX) } else { base };
         }
     }
 }

@@ -49,6 +49,12 @@ struct Args {
     debug_open_policy: bool,
     debug_select_region: Option<String>,
     debug_select_units: bool,
+    /// `--debug-delegate-units`: military delegation's own verification
+    /// convenience (docs/design.md §14, `ScreenshotConfig::delegate_units`'s
+    /// own doc) - delegates every living unit the `--play`ed faction owns
+    /// at startup, so a `--screenshot` run can show delegated units marked
+    /// as such with nothing at the keyboard to press `U` first.
+    debug_delegate_units: bool,
     debug_camera_region: Option<String>,
     debug_camera_zoom: f32,
     /// `--cjk-font <path>`: overrides `apps/game/src/app/fonts.rs`'s
@@ -85,6 +91,7 @@ fn parse_args() -> Args {
     let mut debug_open_policy = false;
     let mut debug_select_region = None;
     let mut debug_select_units = false;
+    let mut debug_delegate_units = false;
     let mut debug_camera_region = None;
     let mut debug_camera_zoom = DEFAULT_DEBUG_CAMERA_ZOOM;
     let mut cjk_font = None;
@@ -130,6 +137,7 @@ fn parse_args() -> Args {
                 debug_select_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-select-region expects a region index or name")));
             }
             "--debug-select-units" => debug_select_units = true,
+            "--debug-delegate-units" => debug_delegate_units = true,
             "--debug-camera-region" => {
                 debug_camera_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-region expects a region index or name")));
             }
@@ -183,6 +191,7 @@ fn parse_args() -> Args {
         debug_open_policy,
         debug_select_region,
         debug_select_units,
+        debug_delegate_units,
         debug_camera_region,
         debug_camera_zoom,
         cjk_font,
@@ -288,6 +297,7 @@ fn main() {
         supply_overlay: args.debug_supply_overlay,
         select_region: debug_select_region,
         select_units: args.debug_select_units,
+        delegate_units: args.debug_delegate_units,
         camera_focus_region: debug_camera_region,
         camera_zoom: args.debug_camera_zoom,
     });

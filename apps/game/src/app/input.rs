@@ -5,12 +5,16 @@
 //!
 //! Every system here only ever writes `SpeedRes`/`SelectedRegion`/
 //! `SelectedUnits`/`MenuRegion`/`DiplomacyPanel`/`ActiveGood`/the camera's
-//! own `Transform`/zoom directly - and reaches `SimRes` **only** through
+//! own `Transform`/zoom directly - and reaches `SimRes` only through
 //! `SimDriver::push_human_action`, exactly the same `Action`-queueing door
 //! `HumanAgent::push` (docs/design.md §14: "人間も AI と同じ入口から世界に
-//! 触る") opens for anything else. No system here ever calls
-//! `SimDriver::tick` or mutates `Simulation`/`World` directly - that stays
-//! `sim_control::advance_simulation`'s job alone.
+//! 触る") opens for anything else, or through `SimDriver::delegate_unit`/
+//! `undelegate_unit`/`is_delegated` - military delegation is player intent
+//! living in `HumanAgent` itself, not a `Simulation` mutation, so it never
+//! goes through `Action`/`push_human_action` at all (see those methods'
+//! own docs). No system here ever calls `SimDriver::tick` or mutates
+//! `Simulation`/`World` directly - that stays `sim_control::
+//! advance_simulation`'s job alone.
 //!
 //! **No client-side legality pre-filtering beyond what a player can already
 //! see on screen** (docs/phase7-spec.md "命令の可否を隠さない"): a move
@@ -236,6 +240,25 @@ pub(super) fn keyboard_input(
     if keys.just_pressed(KeyCode::KeyK) {
         for &unit in &selected_units.0 {
             sim.0.push_human_action(Action::DisbandUnit { unit: archipelago_sim::ids::UnitId(unit) });
+        }
+    }
+    // Military delegation (docs/design.md §14): `U` toggles every currently
+    // selected unit's delegated state independently (a mixed selection
+    // hands over whichever aren't already delegated and takes back
+    // whichever are, rather than forcing the whole selection to one state) -
+    // `panels::UnitPanelRoot`'s per-unit "AI委任 [U]"/"操作を戻す [U]" button
+    // does the same, one unit at a time. This never goes through
+    // `push_human_action`/`Action` at all - delegation is player intent
+    // living in `archipelago_agents::HumanAgent`, not a `Simulation`
+    // mutation (`SimDriver::delegate_unit`/`undelegate_unit`'s own doc).
+    if keys.just_pressed(KeyCode::KeyU) {
+        for &unit in &selected_units.0 {
+            let unit = archipelago_sim::ids::UnitId(unit);
+            if sim.0.is_delegated(unit) {
+                sim.0.undelegate_unit(unit);
+            } else {
+                sim.0.delegate_unit(unit);
+            }
         }
     }
     if keys.just_pressed(KeyCode::KeyG) {
