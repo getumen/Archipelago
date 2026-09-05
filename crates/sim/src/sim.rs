@@ -17,6 +17,7 @@ use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
 use crate::trade;
+use crate::transport;
 use crate::world::{VictoryCondition, World};
 
 /// How a run ended, or that it hasn't. `Victory` names every winner
@@ -149,6 +150,12 @@ impl Simulation {
         timings.economy += t2.elapsed();
 
         let t3 = Instant::now();
+        // Stage 9B (docs/phase9-spec.md "輸送路線": "戦災・遮断で下がり、回復
+        // 経路を持つ"): every `TransportLine`'s `condition` is damaged/
+        // repaired from *today's* contested state before the flow that same
+        // state gates is computed, the same "snapshot before this tick's
+        // changes" convention `recompute_supply`'s own `contested` follows.
+        transport::tick_transport_condition(&mut self.world);
         logistics::recompute_supply(&mut self.world);
         logistics::distribute_supply(&mut self.world);
         timings.logistics += t3.elapsed();

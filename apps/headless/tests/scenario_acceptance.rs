@@ -87,6 +87,15 @@ struct Trajectory {
     combat_events: u32,
     /// `Event::RegionCaptured` count over the whole run.
     captures: u32,
+    /// `Event::FactionEliminated` count over the whole run - Stage 9B's
+    /// `insolvent_streak_resets_when_a_faction_is_eliminated` self-test
+    /// reads this instead of requiring a full `Outcome::Victory`, since a
+    /// capacity-constrained supply network can decisively eliminate a
+    /// faction while still leaving the remaining two locked in a
+    /// stalemate (docs/phase9-spec.md "バランス調整は今回のスコープでは
+    /// ない") - what this self-test actually needs is proof the
+    /// streak-reset-on-elimination code path really ran at least once.
+    eliminations: u32,
     /// Summed `casualties` off every `Battle`/`NavalBattle` event.
     casualties: f32,
     /// Per faction (indexed by `FactionId.0`), the longest run of
@@ -122,6 +131,7 @@ fn run_trajectory(world: World, seed: u64, days: u32) -> Trajectory {
 
     let mut combat_events = 0u32;
     let mut captures = 0u32;
+    let mut eliminations = 0u32;
     let mut casualties = 0f32;
     let mut insolvent_streak = vec![0u32; n];
     let mut max_insolvent_streak_days = vec![0u32; n];
@@ -154,6 +164,7 @@ fn run_trajectory(world: World, seed: u64, days: u32) -> Trajectory {
                     casualties += c;
                 }
                 Event::RegionCaptured { .. } => captures += 1,
+                Event::FactionEliminated { .. } => eliminations += 1,
                 _ => {}
             }
         }
@@ -180,7 +191,7 @@ fn run_trajectory(world: World, seed: u64, days: u32) -> Trajectory {
     };
     max_frozen_streak_days = max_frozen_streak_days.max(frozen_streak);
 
-    Trajectory { final_day: sim.world.day, outcome, combat_events, captures, casualties, max_insolvent_streak_days, max_frozen_streak_days }
+    Trajectory { final_day: sim.world.day, outcome, combat_events, captures, casualties, eliminations, max_insolvent_streak_days, max_frozen_streak_days }
 }
 
 // ---------------------------------------------------------------------
@@ -428,12 +439,32 @@ mod trajectory_self_test {
 
     #[test]
     fn insolvent_streak_resets_when_a_faction_is_eliminated() {
-        // mvp seed 1 has two factions eliminated by day ~260 (confirmed via
-        // this test's own assertions below) - their insolvency streak must
-        // stop accumulating at elimination, not keep counting a "faction"
-        // that no longer has an economy to be insolvent in.
+        // mvp seed 1 eliminates at least one faction well before day 720
+        // (confirmed via `t.eliminations` below) - that faction's
+        // insolvency streak must stop accumulating at elimination, not keep
+        // counting a "faction" that no longer has an economy to be
+        // insolvent in.
+        //
+        // Stage 9B (docs/phase9-spec.md "2. 補給を有限流量にする") rewrite:
+        // this used to require a full `Outcome::Victory` (mvp seed 1
+        // eliminated two of three factions down to a single survivor under
+        // the pre-Stage-9B model). Measured after the flow-model swap: mvp
+        // seed 1 still eliminates 中央同盟 by day ~260 exactly as before
+        // (`assert_war_actually_happened`'s own captures/casualties floors
+        // still pass), but the remaining two factions now settle into a
+        // stalemate rather than one finishing the other off - a genuine
+        // balance consequence of capacity-constrained supply, not something
+        // this pass tunes away. What this self-test actually needs is proof
+        // the streak-reset-on-elimination code path ran at least once, which
+        // `t.eliminations > 0` establishes directly instead of leaning on
+        // `Outcome::Victory` as a proxy for it.
         let t = run_trajectory(scenario::build_world(), 1, 720);
-        assert!(matches!(t.outcome, Outcome::Victory { .. }), "mvp seed 1 must end in a Victory, got {:?}", t.outcome);
+        assert!(
+            matches!(t.outcome, Outcome::Victory { .. } | Outcome::Stalemate),
+            "mvp seed 1 must reach a real conclusion, got {:?}",
+            t.outcome
+        );
+        assert!(t.eliminations > 0, "mvp seed 1 must eliminate at least one faction for this self-test to mean anything");
         // None of the streaks may exceed the number of days the run
         // actually lasted - a streak counter that failed to reset on
         // elimination could otherwise report a number larger than the

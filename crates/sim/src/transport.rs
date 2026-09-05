@@ -1,15 +1,25 @@
-//! Stage 9A (docs/phase9-spec.md "1. 層の分離"): the transport network,
-//! kept as its own layer separate from `Region::links` (troop movement) and
-//! `world::World::supply` (still computed by `logistics::recompute_supply`
-//! exactly as before). Nothing reads these types yet - Stage 9B is the
-//! model swap that makes supply flow over this network instead of
-//! `Region::links`. Today this module is pure data plus the type-level
-//! invariants `docs/conventions.md` §1 asks for (`Condition`, `Capacity`):
-//! everything else about *how* the network behaves (finite capacity
-//! contention, `condition` damage/repair) is Stage 9B's job, not this
-//! one's.
+//! The transport network, kept as its own layer separate from
+//! `Region::links` (troop movement only) and `Region`'s own political/
+//! economic fields. Stage 9A (docs/phase9-spec.md "1. 層の分離") added the
+//! pure data here plus the type-level invariants `docs/conventions.md` §1
+//! asks for (`Condition`, `Capacity`). Stage 9B (docs/phase9-spec.md "2. 補
+//! 給を有限流量にする") is the model swap that makes `logistics::
+//! recompute_supply` route actual, capacity-constrained flow over this
+//! network instead of best-path bottleneck reachability over
+//! `Region::links`, and adds this module's own two behaviours: `condition`'s
+//! damage/repair cycle (`tick_transport_condition`) and a line's actual
+//! per-tick ceiling once war damage is folded in (`TransportLine::
+//! effective_capacity`). `Region::port` is now purely a capacity *magnitude*
+//! (import volume, `Region::value`); every "does this region have a port at
+//! all" check goes through `World::port_node`/`has_port_node` instead, so
+//! blockade and import eligibility can never disagree with the transport
+//! layer about which regions have one (`naval::is_port_blockaded`'s doc).
 
+use crate::balance::{
+    INFRA_DAMAGE_SHARE, LINE_CONDITION_DAMAGE_PER_TICK, LINE_CONDITION_REPAIR_PER_TICK,
+};
 use crate::ids::{RegionId, TransportNodeId};
+use crate::world::World;
 
 /// docs/phase9-spec.md "輸送ノード": what a `TransportNode` is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,17 +28,17 @@ pub enum TransportNodeKind {
     Junction,
     /// Pays out supply to the units stationed in its own region (Stage 9B).
     Depot,
-    /// Faces open water. Stage 9A keeps `Region::port` as the sole source of
-    /// truth for *how much* port capacity a region has and whether it can be
-    /// blockaded (`naval::is_port_blockaded` is unchanged) - see this
-    /// module's own doc and `scenario::ScenarioError::PortNodeWithoutRegionPort`
-    /// for the one consistency rule Stage 9A enforces between the two: a
-    /// `Port` node may only exist for a region that already reports
-    /// `port > 0.0`, so the new layer can never claim a port the old one
-    /// doesn't also know about. Stage 9B/9C is expected to make this node,
-    /// not `Region::port`, the thing blockade actually keys off - at that
-    /// point the region-level field either gets removed or becomes a
-    /// derived read of the node.
+    /// Faces open water - the source of truth for *whether* a region has a
+    /// port at all (`World::has_port_node`, `naval::is_port_blockaded`'s
+    /// doc) and, since Stage 9B, the injection point for that region's
+    /// import volume (`Region::port * balance::PORT_SUPPLY_PER_PORT`,
+    /// zeroed under blockade). `Region::port` still holds *how much* port
+    /// capacity a region has (a magnitude only, never an existence flag) -
+    /// `scenario::ScenarioError::PortNodeWithoutRegionPort`/
+    /// `RegionPortWithoutPortNode` keep the two from disagreeing about
+    /// which regions have a port: a `Port` node may only exist for a region
+    /// that reports `port > 0.0`, and such a region must declare exactly
+    /// that node.
     Port,
 }
 
@@ -160,9 +170,14 @@ impl Capacity {
 
 /// One route of the transport network (docs/phase9-spec.md "輸送路線").
 /// Undirected: `capacity`/`condition` are properties of the physical route
-/// itself, not of one direction across it - Stage 9B decides how a
-/// direction-specific flow is drawn against that shared capacity each tick;
-/// nothing in Stage 9A reads either field at all.
+/// itself, not of one direction across it - `logistics::recompute_supply`
+/// draws flow against this same shared ceiling each tick regardless of
+/// which direction it travels, so a line whose forward and backward
+/// traffic both route genuinely (two independent streams crossing the same
+/// trunk) still never carries more than one `effective_capacity` combined
+/// (`line_flow_never_doubles_under_two_way_traffic` pins this) - unlike
+/// `world::Link`'s declared-per-direction throughput for movement, which
+/// *is* a separate full ceiling per direction.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TransportLine {
     pub from: TransportNodeId,
@@ -170,4 +185,65 @@ pub struct TransportLine {
     pub kind: TransportLineKind,
     pub capacity: Capacity,
     pub condition: Condition,
+}
+
+impl TransportLine {
+    /// Stage 9B (docs/phase9-spec.md "2. 補給を有限流量にする"): this line's
+    /// actual per-tick throughput ceiling, before `logistics::
+    /// recompute_supply`'s flow allocation ever contends for it -
+    /// `capacity * condition`, further attenuated by war damage
+    /// (`Region::devastation`) at *both* endpoint regions, the transport-
+    /// network counterpart of `Region::effective_infrastructure` reading
+    /// through devastation rather than the raw field. A devastated relay
+    /// point cripples a line running through it exactly the way it cripples
+    /// that region's own production (`devastation_reduces_supply_throughput`
+    /// pins this) - reuses `INFRA_DAMAGE_SHARE` rather than a near-duplicate
+    /// constant, since it is the same "how much of devastation actually
+    /// bites into infrastructure-like throughput" share `Region::
+    /// effective_infrastructure` already applies.
+    pub fn effective_capacity(&self, world: &World) -> f32 {
+        let from_region = world.transport_node(self.from).region;
+        let to_region = world.transport_node(self.to).region;
+        let health = |r: RegionId| 1.0 - world.region(r).devastation * INFRA_DAMAGE_SHARE;
+        (self.capacity.get() * self.condition.get() * health(from_region) * health(to_region)).max(0.0)
+    }
+}
+
+/// Stage 9B (docs/phase9-spec.md "輸送路線": "戦災・遮断で下がり、回復経路を
+/// 持つ"; CLAUDE.md's「繰り返し踏んだ欠陥」: "状態には必ず回復経路を持たせる"):
+/// every line touching a currently-contested region (`World::
+/// has_enemy_units` true for either endpoint's own region) loses
+/// `LINE_CONDITION_DAMAGE_PER_TICK`; every other line recovers
+/// `LINE_CONDITION_REPAIR_PER_TICK` back toward `Condition::FULL`. Reads
+/// `has_enemy_units` off unit positions as they stood at the top of this
+/// tick, the same "snapshot before today's changes" convention
+/// `logistics::recompute_supply`'s own `contested` already follows, so a
+/// front line that has just been cleared this same tick still counts as
+/// contested for today's damage and only starts recovering tomorrow.
+///
+/// Fixed iteration order (`world.transport_lines`'s own `Vec` order, never a
+/// `HashMap`/`HashSet`) and no branch depends on anything but each line's
+/// own two endpoint regions, so this is trivially order-independent -
+/// nothing here reads or writes any other line's state.
+pub fn tick_transport_condition(world: &mut World) {
+    let contested: Vec<bool> = world
+        .regions
+        .iter()
+        .map(|r| world.has_enemy_units(r.id, r.owner))
+        .collect();
+
+    for i in 0..world.transport_lines.len() {
+        let line = world.transport_lines[i];
+        let from_region = world.transport_node(line.from).region;
+        let to_region = world.transport_node(line.to).region;
+        let damaged = contested[from_region.index()] || contested[to_region.index()];
+        let delta = if damaged {
+            -LINE_CONDITION_DAMAGE_PER_TICK
+        } else {
+            LINE_CONDITION_REPAIR_PER_TICK
+        };
+        let next = (line.condition.get() + delta).clamp(0.0, 1.0);
+        world.transport_lines[i].condition =
+            Condition::new(next).expect("clamped into 0.0..=1.0 above");
+    }
 }

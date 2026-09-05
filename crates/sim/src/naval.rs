@@ -53,16 +53,23 @@ pub fn tick_sea_control(world: &mut World) {
 /// currently at `Stance::War` with its owner holds at least
 /// `BLOCKADE_CONTROL_THRESHOLD` control in any sea zone the region faces.
 /// Judged per port region, never aggregated — a blockade of one port must
-/// never affect another (`Region::port`-less regions can't be blockaded;
-/// every MVP region has a port, but the guard keeps the function meaningful
-/// on a map that doesn't). External code review fix A1: reads
+/// never affect another (a region with no `Port` transport node can't be
+/// blockaded; every MVP region has one, but the guard keeps the function
+/// meaningful on a map that doesn't). External code review fix A1: reads
 /// `World::hostile_control_max` rather than the raw `SeaZone::enemy_control_max`
 /// - a faction at `Ceasefire`/`NonAggression`/`Alliance` with the owner,
 /// however dominant its fleet presence, must not blockade its own treaty
 /// partner's port.
+///
+/// Stage 9B: keyed off `World::has_port_node` rather than `Region::port >
+/// 0.0` - the transport layer's `Port` node is now the source of truth for
+/// *whether* a region has a port at all (`Region::port`'s own doc); the two
+/// can never disagree since `scenario::Scenario::validate` keeps them in
+/// lockstep, but this is the one place that fact is actually acted on
+/// rather than merely enforced.
 pub fn is_port_blockaded(world: &World, region: RegionId) -> bool {
     let owner = world.region(region).owner;
-    if world.region(region).port <= 0.0 {
+    if !world.has_port_node(region) {
         return false;
     }
     world
@@ -80,6 +87,28 @@ pub fn is_port_blockaded(world: &World, region: RegionId) -> bool {
 /// that do carry one.
 pub fn strait_factor(world: &World, zone: SeaZoneId, faction: FactionId) -> f32 {
     (1.0 - world.sea_zone(zone).enemy_control_max(faction)).clamp(0.0, 1.0)
+}
+
+/// Stage 9B: the sea-control throttle a `transport::TransportLineKind::Sea`
+/// line suffers, mirroring `strait_factor` exactly (`1 -` the highest
+/// control any *other* faction than `owner` holds) but derived from the
+/// line's own two endpoint regions rather than a stored `strait_zone` - the
+/// zone(s) actually crossed are whichever sea zone both regions' coastlines
+/// share (`World::zones_touching`), read fresh every call (never cached),
+/// so a front that shifts after a route was chosen throttles it the very
+/// same tick (CLAUDE.md「繰り返し踏んだ欠陥」: "発令時点の値を焼き込まない").
+/// `1.0` (no throttle) if the two regions share no common sea zone at all -
+/// every same-owner `Sea` transport line connects two regions that do, in
+/// every shipped scenario, but this stays honest about the general case
+/// rather than assuming it.
+pub fn sea_line_factor(world: &World, region_a: RegionId, region_b: RegionId, owner: FactionId) -> f32 {
+    let zones_b = world.zones_touching(region_b);
+    world
+        .zones_touching(region_a)
+        .into_iter()
+        .filter(|z| zones_b.contains(z))
+        .map(|z| strait_factor(world, z, owner))
+        .fold(1.0f32, f32::min)
 }
 
 /// docs/phase2-spec.md "3. 海戦": resolves combat in every sea zone held by
@@ -195,7 +224,7 @@ fn best_facing_port_supply(world: &World, zone: SeaZoneId, faction: FactionId) -
         .iter()
         .filter(|&&r| {
             let region = world.region(r);
-            region.owner == faction && region.port > 0.0 && !world.has_enemy_units(r, faction)
+            region.owner == faction && world.has_port_node(r) && !world.has_enemy_units(r, faction)
         })
         .map(|&r| world.supply[r.index()])
         .fold(0.0f32, f32::max)

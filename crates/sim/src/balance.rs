@@ -878,3 +878,64 @@ pub const NL_PROPOSAL_COOLDOWN_DAYS: u32 = 20;
 /// recipient, the prompt built from it) - ordinary proposals, in any
 /// language, sit far below this.
 pub const NL_PROPOSAL_TEXT_MAX_CHARS: usize = 500;
+
+// ---------------------------------------------------------------------------
+// Stage 9B (docs/phase9-spec.md "2. 補給を有限流量にする"): the transport-
+// network flow model that replaces best-path bottleneck reachability.
+// ---------------------------------------------------------------------------
+
+/// Share of a region's `industry_total()` injected into the transport
+/// network as its own supply source - extracted, unchanged in value, from
+/// the pre-Stage-9B `Region::supply_source_blockaded`'s inline `* 0.5`, so
+/// swapping the routing model alone doesn't also silently change how much a
+/// region can inject to begin with.
+pub const INDUSTRY_SUPPLY_SHARE: f32 = 0.5;
+
+/// Supply injected into the transport network per point of `Region::port`,
+/// at that region's own `Port` node(s), zeroed when the port is blockaded
+/// (`naval::is_port_blockaded`) - extracted, unchanged in value, from the
+/// pre-Stage-9B `Region::supply_source_blockaded`'s inline `* 4.0`.
+pub const PORT_SUPPLY_PER_PORT: f32 = 4.0;
+
+/// Fixed number of synchronous (Jacobi-style: every round's allocation is
+/// computed from the *previous* round's residual state and committed only
+/// once the whole round has been evaluated) proportional-flow rounds
+/// `logistics::recompute_supply` runs before stopping - never a float
+/// convergence test, so the same seed always runs exactly this many rounds
+/// (docs/phase9-spec.md "2. 決定論": "打ち切り条件を反復回数で固定する").
+/// The network is sparse (japan_hex: 468 nodes / 853 lines, roughly planar),
+/// so this is cheap - a fixed `SUPPLY_FLOW_ROUNDS * lines` pass, not a search.
+/// Chosen well above the map's own diameter in *rounds* (each round's BFS
+/// already spans an entire source-to-sink path in one pass; rounds are only
+/// needed to re-shake residual capacity between competing sinks after a
+/// commit, not to cross more hops) so repeated contention between sinks
+/// sharing a chokepoint has room to settle before the cutoff.
+///
+/// **Measured, not guessed.** japan_hex seed 1, 720 days, mean
+/// `supply_ratio` over the surviving factions: 24 rounds → 0.3223,
+/// 48 → 0.3254, 96 → 0.3254. 48 and 96 agree to every printed digit for
+/// every faction, so the scheme has fully settled by 48 and the cutoff is
+/// not what limits how well a faction is supplied — 24 lands within about
+/// 1% of that. Raising it buys a fraction of a percent for twice the work,
+/// so it stays at 24. **Do not raise this hoping to fix a starving
+/// faction**: the measurement above says the round count is not the cause.
+pub const SUPPLY_FLOW_ROUNDS: usize = 24;
+
+/// Floor below which a flow-graph edge/vertex budget is treated as
+/// exhausted for this tick - guards the proportional-scaling division
+/// (`granted / total_desired`) against float noise turning an already-spent
+/// resource into a divide-by-near-zero.
+pub const SUPPLY_FLOW_EPSILON: f32 = 1e-4;
+
+/// Daily `Condition` lost by a `TransportLine` touching a contested region
+/// (`World::has_enemy_units` true for either endpoint's region) - war damage
+/// interdicting the line, docs/phase9-spec.md "輸送路線": "戦災・遮断で下がり".
+pub const LINE_CONDITION_DAMAGE_PER_TICK: f32 = 0.03;
+
+/// Daily `Condition` recovered by a `TransportLine` touching no contested
+/// region - the required recovery path (docs/phase9-spec.md "輸送路線":
+/// "回復経路を持つ"; CLAUDE.md's「繰り返し踏んだ欠陥」: "状態には必ず回復経路
+/// を持たせる"). Slower than the damage rate, so a line that spent a long
+/// siege near zero takes a real stretch of peace to fully recover, not one
+/// quiet tick.
+pub const LINE_CONDITION_REPAIR_PER_TICK: f32 = 0.015;

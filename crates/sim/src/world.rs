@@ -212,6 +212,16 @@ pub struct Region {
     /// Production capacity per commodity, indexed by `Good::index()`.
     pub capacity: [f32; GOOD_COUNT],
     pub infrastructure: f32,
+    /// Port capacity *magnitude* only, in `0.0..` - never read as an
+    /// existence flag (`port > 0.0`) since Stage 9B: whether this region has
+    /// a port at all is `World::has_port_node`'s question to answer, off the
+    /// transport layer's own `TransportNodeKind::Port` node, so the two
+    /// representations can never disagree about which regions have one
+    /// (`scenario::ScenarioError::PortNodeWithoutRegionPort`/
+    /// `RegionPortWithoutPortNode` keep them in lockstep). This field still
+    /// drives `trade::tick_imports`' import ceiling, `logistics::
+    /// recompute_supply`'s import injection at that node
+    /// (`balance::PORT_SUPPLY_PER_PORT`), `node_throughput`, and `value`.
     pub port: f32,
     pub mobilized: f32,
     pub unrest: f32,
@@ -574,16 +584,30 @@ pub struct World {
     pub regions: Vec<Region>,
     pub factions: Vec<Faction>,
     pub units: Vec<Unit>,
-    /// Supply throughput available at each region, indexed by `RegionId`.
+    /// The amount of Munitions+Arms throughput that actually flowed to each
+    /// region's own units this tick, indexed by `RegionId` - Stage 9B
+    /// (docs/phase9-spec.md "2. 補給を有限流量にする") redefinition of what
+    /// this array means. Before Stage 9B this was a *ceiling* the region
+    /// could draw on regardless of how much its own units actually needed
+    /// (best-path bottleneck reachability over `Region::links`, never
+    /// consumed by contending demand); it is now the *delivered* amount from
+    /// `logistics::recompute_supply`'s capacity-constrained flow over the
+    /// transport network, already bounded by that region's own demand, so it
+    /// can never exceed what `logistics::distribute_supply` goes on to
+    /// actually serve. Every reader that used to treat this as an
+    /// independent-of-demand capacity figure (`node_throughput_limits_supply`
+    /// is the one place that mattered) was re-examined for Stage 9B - see
+    /// that test's own doc for how it was adapted.
     pub supply: Vec<f32>,
     /// Stage 2D (docs/phase2-spec.md "海域"): the map's sea zones, separate
     /// from the region graph.
     pub sea_zones: Vec<SeaZone>,
-    /// Stage 9A (docs/phase9-spec.md "1. 層の分離"): the transport network's
-    /// nodes and routes - a layer separate from both `regions` (politics/
-    /// economy) and each region's own `links` (troop movement). Nothing
-    /// reads these yet; `logistics::recompute_supply` still propagates
-    /// supply over `Region::links` exactly as before Stage 9A.
+    /// The transport network's nodes and routes (docs/phase9-spec.md "1. 層
+    /// の分離") - a layer separate from both `regions` (politics/economy)
+    /// and each region's own `links` (troop movement only, since Stage 9B).
+    /// `logistics::recompute_supply` routes actual flow over this network;
+    /// `World::port_node`/`has_port_node` is the sole source of truth for
+    /// which regions have a port (`Region::port`'s own doc).
     pub transport_nodes: Vec<TransportNode>,
     pub transport_lines: Vec<TransportLine>,
     pub day: u32,
@@ -753,5 +777,26 @@ impl World {
 
     pub fn unit_mut(&mut self, id: UnitId) -> &mut Unit {
         &mut self.units[id.index()]
+    }
+
+    pub fn transport_node(&self, id: crate::ids::TransportNodeId) -> &TransportNode {
+        &self.transport_nodes[id.index()]
+    }
+
+    /// The first (lowest `TransportNodeId`, so this is deterministic even if
+    /// a region ever declared more than one - `docs/phase9-spec.md` "輸送
+    /// ノード" allows it in principle, though no shipped scenario does)
+    /// `Port` node belonging to `region`, if any. The sole source of truth
+    /// for "does this region have a port at all" since Stage 9B - see
+    /// `Region::port`'s own doc for why that field is never read as an
+    /// existence check any more.
+    pub fn port_node(&self, region: RegionId) -> Option<&TransportNode> {
+        self.transport_nodes
+            .iter()
+            .find(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Port)
+    }
+
+    pub fn has_port_node(&self, region: RegionId) -> bool {
+        self.port_node(region).is_some()
     }
 }

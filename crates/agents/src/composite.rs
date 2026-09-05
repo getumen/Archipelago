@@ -408,9 +408,27 @@ mod tests {
     /// module's other tests do by hand-editing and reverting: if `decide`
     /// routed by anything other than which agent actually owns
     /// `Layer::Military` here, `mixed` and `flipped` would look the same.
-    /// They don't - `flipped` attacks far less (dove's own low rate) and
-    /// seeks peace far less than `mixed` (hawk's diplomacy layer, reading a
-    /// low-casualty world its own passive military produced).
+    /// They don't - `flipped` attacks far less (dove's own low rate).
+    ///
+    /// Stage 9B (docs/phase9-spec.md "2. 補給を有限流量にする") changed what
+    /// `flipped`'s peace-seeking looks like, and this doc was rewritten to
+    /// match a re-measurement rather than the original guess: before Stage
+    /// 9B's capacity-constrained transport flow, a passive (dove) military
+    /// mostly just produced a low-casualty world its hawk diplomat had
+    /// little reason to act on, so `flipped_peace` sat *below* `mixed_peace`.
+    /// Under Stage 9B's finite, contended supply, a passive military facing
+    /// the same aggressive default-`HeuristicAgent` neighbors every other
+    /// faction runs gets militarily outmatched *harder* - `diplomacy_ai`'s
+    /// `outmatched` check reads a live `own_power`/`enemy_power` ratio, not
+    /// just a casualty count, and a starved, poorly-organized standing force
+    /// loses that ratio badly even without heavy fighting of its own. So the
+    /// flipped faction's own hawk diplomat, despite its low
+    /// `peace_disposition`, ends up proposing/accepting `Ceasefire` far
+    /// *more* than the mixed faction's dove diplomat does - measured at
+    /// `flipped_peace=80` against `mixed_peace=14` over the same 300 days,
+    /// a wide enough gap that it reads as a real property of the new
+    /// dynamics rather than seed noise. This is reported, not tuned away -
+    /// see docs/phase9-spec.md's own "balance is not this pass's job" note.
     #[test]
     fn mixed_agent_composition_is_a_genuine_mixture() {
         const DAYS: u32 = 300;
@@ -491,10 +509,25 @@ mod tests {
             "flipping which agent owns Layer::Military must sharply cut attacks: \
              flipped={flipped_attacks}, mixed={mixed_attacks}"
         );
+        // Stage 9B rewrite (see this test's own doc above): under the
+        // capacity-constrained transport flow, a passive (dove) military
+        // gets outmatched hard enough by the same aggressive neighbors that
+        // its own hawk diplomat seeks peace *more* than the mixed faction's
+        // dove diplomat does, not less - the routing direction still
+        // visibly drives the outcome (that's what this assertion pins),
+        // just in the opposite direction the pre-Stage-9B model produced.
         assert!(
-            flipped_peace < mixed_peace,
-            "flipping which agent owns Layer::Military (and therefore who generates the world's casualties) must \
-             cut peace-seeking too: flipped={flipped_peace}, mixed={mixed_peace}"
+            flipped_peace != mixed_peace,
+            "flipping which agent owns Layer::Military (and therefore who generates the world's casualties and \
+             fights its wars) must still change peace-seeking behaviour, not leave it identical: \
+             flipped={flipped_peace}, mixed={mixed_peace}"
+        );
+        assert!(
+            flipped_peace > mixed_peace,
+            "under Stage 9B's finite supply, a passive (dove) military should get outmatched hard enough by the \
+             same aggressive neighbors that its own hawk diplomat seeks peace *more* than the mixed faction's dove \
+             diplomat does (this test's own doc has the measured numbers and reasoning): \
+             flipped={flipped_peace}, mixed={mixed_peace}"
         );
     }
 }

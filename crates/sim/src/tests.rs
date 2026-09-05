@@ -26,7 +26,7 @@ use crate::rng::Rng;
 use crate::scenario;
 use crate::sim::{Outcome, Simulation};
 use crate::trade;
-use crate::transport::{Capacity, Condition, TransportLineKind, TransportNodeKind};
+use crate::transport::{self, Capacity, Condition, TransportLineKind, TransportNodeKind};
 use crate::world::{Domain, DominationShare, Station, VictoryCondition, VictoryDeclaration, World};
 
 /// Stage 6C (docs/phase6-spec.md "Stage 6C" item 1): this test used to
@@ -43,16 +43,25 @@ use crate::world::{Domain, DominationShare, Station, VictoryCondition, VictoryDe
 /// capturing it) instead, on mvp's 10-region map, and prove below that the
 /// rewritten assertion can in fact fail.
 ///
-/// Region 2 (`minami_tohoku`, a same-owner Rail link with no `strait_zone`)
-/// is the only land corridor between region 1 (`kita_tohoku`) and
-/// touhou_rengou's industrial base at region 3 (`kanto`) — region 1 has no
-/// other route there. `isolate_single_source` zeroes every other
-/// touhou_rengou region's own capacity/port and saturates `kanto`'s, so
-/// whatever reaches region 1 is provably attributable to the corridor
-/// being tested rather than region 1's own (unboosted, unzeroed)
-/// `supply_source` masking the cut, the same reasoning
-/// `japan47_chokepoints_still_bind`'s own `isolate_single_source` doc
-/// explains for a multi-region faction.
+/// Region 2 (`minami_tohoku`) hosts the only transport-network corridor
+/// (`minami_tohoku_depot -> kita_tohoku_depot`, a `Rail` `TransportLine`)
+/// between region 1 (`kita_tohoku`) and touhou_rengou's industrial base at
+/// region 3 (`kanto`) — region 1 has no other route there. `isolate_single_source`
+/// zeroes every other touhou_rengou region's own capacity/port and
+/// saturates `kanto`'s, so whatever reaches region 1 is provably
+/// attributable to the corridor being tested rather than region 1's own
+/// (unboosted, unzeroed) `supply_source` masking the cut, the same
+/// reasoning `japan47_chokepoints_still_bind`'s own `isolate_single_source`
+/// doc explains for a multi-region faction.
+///
+/// Stage 9B rewrite: `world.supply[region]` is now demand-bounded (this
+/// module's own doc) rather than a pure network ceiling, so a region with
+/// no units posted in it always reads `0.0` regardless of whether the
+/// corridor mechanism works at all — mvp's default unit placement never
+/// puts one at kita_tohoku (`scenario::build_world`'s `locations` cycle
+/// only ever lands on `kanto`/`minami_tohoku`). A single unit is added at
+/// kita_tohoku in both boards below so `before`/`after` measure the actual
+/// corridor mechanism instead of trivially reading zero either way.
 #[test]
 fn supply_corridor_cut() {
     fn isolate_single_source(world: &mut World, source: RegionId) {
@@ -70,17 +79,41 @@ fn supply_corridor_cut() {
         world.region_mut(source).infrastructure = 1.0;
     }
 
+    fn station_garrison(world: &mut World, region: RegionId) {
+        let owner = world.region(region).owner;
+        let id = crate::ids::UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner,
+            name: "Garrison".to_string(),
+            station: Station::Region(region),
+            movement: None,
+            manpower: 1.0,
+            equipment: crate::balance::UNIT_EQUIPMENT,
+            organization: 100.0,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+        });
+    }
+
     let kanto = RegionId(3);
     let kita_tohoku = RegionId(1);
     let minami_tohoku = RegionId(2);
 
     let mut world = scenario::build_world();
     isolate_single_source(&mut world, kanto);
+    station_garrison(&mut world, kita_tohoku);
     logistics::recompute_supply(&mut world);
     let before = world.supply[kita_tohoku.index()];
 
     let mut cut = scenario::build_world();
     isolate_single_source(&mut cut, kanto);
+    station_garrison(&mut cut, kita_tohoku);
     let owner = cut.region(minami_tohoku).owner;
     // A foreign, at-war unit merely *stationed* in region 2 - enough to
     // make `World::has_enemy_units`/`recompute_supply`'s `contested[i]`
@@ -1182,19 +1215,83 @@ fn build_rejected_when_contested() {
 /// Stage 2B acceptance test: devastating a corridor region that supply
 /// relays through should reduce what reaches the region behind it, the same
 /// way a contested/owner-changed corridor does in `supply_corridor_cut`.
+///
+/// Stage 9B rewrite: mvp's default unit placement never posts a unit at
+/// region 1 (`supply_corridor_cut`'s own doc explains why), and
+/// `world.supply[region]` is now demand-bounded, so without a unit there
+/// this always read `0.0` regardless of devastation. A single garrison unit
+/// is added at region 1 so `before` is provably nonzero and `after` reflects
+/// the corridor's own devastation, not an empty demand sink. Stage 9B also
+/// ties a `TransportLine`'s `effective_capacity` to *both* endpoint
+/// regions' devastation (`INFRA_DAMAGE_SHARE`-scaled, `TransportLine::
+/// effective_capacity`'s own doc) exactly the way the pre-Stage-9B relay
+/// formula read `effective_infrastructure`, so this property survives the
+/// model swap unchanged in spirit.
 #[test]
 fn devastation_reduces_supply_throughput() {
-    let mut world = scenario::build_world();
-    logistics::recompute_supply(&mut world);
-    let before = world.supply[RegionId(1).index()];
+    fn build(devastate_corridor: bool) -> f32 {
+        let mut world = scenario::build_world();
+        let kanto = RegionId(3);
+        let region1 = RegionId(1);
 
-    // Region 2 is the only corridor between region 1 and the industrial
-    // heartland at region 3 (see `supply_corridor_cut`); devastating it
-    // (without changing its owner) should still choke what it relays onward.
-    world.region_mut(RegionId(2)).devastation = 0.9;
-    logistics::recompute_supply(&mut world);
-    let after = world.supply[RegionId(1).index()];
+        // Boost the source, zero every other same-faction region's own
+        // base (`supply_corridor_cut`'s own `isolate_single_source`),
+        // and post a large garrison at region 1 so demand there is far
+        // above what the (devastated) corridor could ever carry - without
+        // this, a single unit's tiny demand is satisfiable even at a
+        // heavily devastated corridor's reduced capacity, and the
+        // devastation would never actually bind (`node_throughput_limits_supply`'s
+        // own doc makes the same "saturate demand, not just the source"
+        // point for exactly this reason).
+        let faction = world.region(kanto).owner;
+        for i in 0..world.regions.len() {
+            let r = RegionId(i as u32);
+            if r != kanto && world.region(r).owner == faction {
+                world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+                world.region_mut(r).port = 0.0;
+            }
+        }
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(kanto).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(kanto).infrastructure = 1.0;
 
+        for i in 0..20 {
+            let id = crate::ids::UnitId(world.units.len() as u32);
+            world.units.push(military::Unit {
+                id,
+                owner: faction,
+                name: format!("Garrison {i}"),
+                station: Station::Region(region1),
+                movement: None,
+                manpower: 1.0,
+                equipment: UNIT_EQUIPMENT,
+                organization: 100.0,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_station: Station::Region(region1),
+                experience: 0.0,
+                alive: true,
+            });
+        }
+
+        // Region 2 is the only corridor between region 1 and the
+        // industrial heartland at region 3 (see `supply_corridor_cut`);
+        // devastating it (without changing its owner) should still choke
+        // what it relays onward.
+        if devastate_corridor {
+            world.region_mut(RegionId(2)).devastation = 0.9;
+        }
+        logistics::recompute_supply(&mut world);
+        world.supply[region1.index()]
+    }
+
+    let before = build(false);
+    let after = build(true);
+
+    assert!(before > 0.0, "sanity: region 1 should receive relayed supply via region 2 when intact: {before}");
     assert!(
         after < before * 0.9,
         "expected devastating the relay corridor to reduce downstream supply: \
@@ -1947,19 +2044,26 @@ fn kanmon_tunnel_survives_blockade() {
     );
 }
 
-/// Stage 2D acceptance test: a real `Strait` link's throughput must fall
+/// Stage 2D acceptance test: a real sea crossing's throughput must fall
 /// once the sea zone it crosses is dominated by an enemy faction — the
 /// contrast case for `kanmon_tunnel_survives_blockade`.
+///
+/// Stage 9B rewrite: the mechanism is now `naval::sea_line_factor`
+/// throttling the `hokkaido_port -> kita_tohoku_port` `Sea` `TransportLine`
+/// (`logistics::compute_transport_flow`'s own doc), not a region `Link`'s
+/// `strait_zone`. `world.supply[region]` is also demand-bounded now - mvp's
+/// default unit placement never posts one at region 1
+/// (`supply_corridor_cut`'s own doc) - so a garrison unit is added there.
 #[test]
 fn sea_control_throttles_strait() {
     let build = |enemy_control: f32| {
         let mut world = scenario::build_world();
         // 北東北 (region 1) also reaches faction 0's industrial heartland
         // via 南東北/関東 (region 2/3, Rail) - zero that route out so the
-        // 北海道—北東北 Strait link (crossing 北方海域, zone 0) is the *only*
-        // high-value path into region 1, isolating the strait's own
+        // 北海道—北東北 Sea line (crossing 北方海域, zone 0) is the *only*
+        // high-value path into region 1, isolating the crossing's own
         // throttle instead of measuring a route that bypasses it entirely.
-        for &r in &[RegionId(2), RegionId(3)] {
+        for &r in &[RegionId(1), RegionId(2), RegionId(3)] {
             world.region_mut(r).capacity = [0.0; GOOD_COUNT];
             world.region_mut(r).port = 0.0;
         }
@@ -1970,6 +2074,33 @@ fn sea_control_throttles_strait() {
         world.region_mut(RegionId(1)).infrastructure = 1.0;
         // Region 0/1 are both faction 0's; the enemy here is faction 1.
         world.sea_zone_mut(SeaZoneId(0)).control = vec![0.0, enemy_control, 0.0];
+
+        // A garrison well above the Sea line's own 6.0 capacity, so demand
+        // - not the tiny appetite of a single unit - is what the crossing's
+        // own throttle actually has to hold back (`region 1`'s own base is
+        // also zeroed above, so none of this can come from local production
+        // either - `japan47_chokepoints_still_bind`'s `station_garrison`
+        // doc makes the same point).
+        for i in 0..10 {
+            let id = crate::ids::UnitId(world.units.len() as u32);
+            world.units.push(military::Unit {
+                id,
+                owner: world.region(RegionId(1)).owner,
+                name: format!("Garrison {i}"),
+                station: Station::Region(RegionId(1)),
+                movement: None,
+                manpower: 1.0,
+                equipment: UNIT_EQUIPMENT,
+                organization: 100.0,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_station: Station::Region(RegionId(1)),
+                experience: 0.0,
+                alive: true,
+            });
+        }
 
         logistics::recompute_supply(&mut world);
         world.supply[RegionId(1).index()]
@@ -4957,35 +5088,44 @@ fn japan47_completes_720_days() {
 /// Stage 6B's key regression guard (docs/phase6-spec.md "japan47_chokepoints_
 /// still_bind"): Phase 2's chokepoint design ("回廊を断つと奥が枯れる") must
 /// still hold at 47-region scale for all three deliberately-placed
-/// chokepoints - Kanmon (山口—福岡, `Tunnel`), Seikan (青森—北海道,
-/// `Strait`), and the central highlands (長野・岐阜, `Road`/`Mountain`).
+/// chokepoints - Kanmon (山口—福岡), Seikan (青森—北海道), and the central
+/// highlands (長野・岐阜).
 ///
 /// External code review fix (P2): the original version of this test flipped
-/// the target region's *owner* to "cut" every corridor. `recompute_supply`
-/// refuses to relay across a faction boundary unconditionally (`if
-/// world.regions[j].owner != owner_i { continue }`), so that always zeroed
-/// supply regardless of link kind, `max_throughput`, sea control, or
-/// whether an alternate route existed - the test could not fail even if the
-/// chokepoint mechanic were completely broken. This version keeps ownership
-/// unchanged throughout and instead drives the *actual* mechanism each
-/// chokepoint is supposed to bind through:
-///   - Seikan (`Strait`): enemy sea control over 北方海域, via
-///     `naval::strait_factor` - exactly how a real blockade throttles a
-///     strait link (docs/phase2-spec.md "1. 海峡リンクの遮断").
-///   - Kanmon (`Tunnel`, deliberately blockade-immune): its own low
-///     `max_throughput` as the binding cap, an enemy landing force holding
-///     福岡 (contested, not captured - `recompute_supply`'s `contested[i]`
-///     skip) as the sever, and an explicit check that sea control leaves it
-///     untouched.
-///   - Central highlands (`Road`, no `strait_zone` at all): an enemy force
-///     holding both 長野 and 岐阜 (again contested, not captured), which
-///     blocks them from relaying onward exactly like a real siege would,
-///     with no ownership change anywhere.
-/// `isolate_single_source` (below) still boosts one region into a saturated
-/// source and zeroes every other same-faction region's own base, so
-/// whatever the target region receives remains provably attributable to
-/// relay across the corridor under test, not some other region's own idle
-/// production.
+/// the target region's *owner* to "cut" every corridor - that always zeroed
+/// supply regardless of the mechanism under test, so the test could not fail
+/// even if the chokepoint mechanic were completely broken. This version
+/// keeps ownership unchanged throughout and drives the *actual* mechanism:
+///   - Seikan (a `TransportLineKind::Sea` line): enemy sea control over
+///     北方海域, via `naval::sea_line_factor` - exactly how a real blockade
+///     throttles a sea crossing (docs/phase2-spec.md "1. 海峡リンクの遮断"'s
+///     transport-network counterpart).
+///   - Kanmon (a low-capacity `Rail` line, deliberately blockade-immune):
+///     its own low capacity as the binding cap, an enemy landing force
+///     holding 福岡 (contested, not captured) as the sever, and an explicit
+///     check that sea control leaves it untouched.
+///   - Central highlands (`Road` lines, no sea zone involved at all): an
+///     enemy force holding both 長野 and 岐阜 (again contested, not
+///     captured), which blocks them from relaying onward exactly like a
+///     real siege would, with no ownership change anywhere.
+///
+/// Stage 9B rewrite: supply now flows over the transport network
+/// (`world.transport_nodes`/`transport_lines`), not `Region::links`, so
+/// every corridor above is now driven through the corresponding
+/// `TransportLine` rather than a region `Link`'s `LinkKind`/`strait_zone` -
+/// `transport_line_capacity` below looks up a line's own
+/// `effective_capacity` directly instead of reading a `LinkKind` constant.
+/// `world.supply[region]` is also now demand-bounded (this module's own
+/// doc): mvp/japan47's default unit placement doesn't necessarily post a
+/// unit at every target region measured here, so `station_garrison` adds
+/// one explicitly at each sink under test - without it, a target region
+/// with no units would trivially read `0.0` regardless of whether the
+/// corridor mechanism works at all (`supply_corridor_cut`'s own doc found
+/// the same gap for mvp). `isolate_single_source` (below) still boosts one
+/// region into a saturated source and zeroes every other same-faction
+/// region's own base, so whatever the target region receives remains
+/// provably attributable to relay across the corridor under test, not some
+/// other region's own idle production.
 #[test]
 fn japan47_chokepoints_still_bind() {
     let base_world = || scenario::load_str(&load_japan47_str()).expect("scenarios/japan47.json must build a valid World");
@@ -5025,24 +5165,46 @@ fn japan47_chokepoints_still_bind() {
         world.region_mut(source).infrastructure = 1.0;
     }
 
+    // Posts a garrison of `count` units of `region`'s own owner in `region`
+    // - real, non-trivial Munitions demand for the Stage 9B demand-bounded
+    // flow model to actually deliver against (see this test's own doc).
+    fn station_garrison(world: &mut World, region: RegionId, count: usize) {
+        let owner = world.region(region).owner;
+        for i in 0..count {
+            let id = crate::ids::UnitId(world.units.len() as u32);
+            world.units.push(military::Unit {
+                id,
+                owner,
+                name: format!("Garrison {i}"),
+                station: Station::Region(region),
+                movement: None,
+                manpower: 1.0,
+                equipment: UNIT_EQUIPMENT,
+                organization: 100.0,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_station: Station::Region(region),
+                experience: 0.0,
+                alive: true,
+            });
+        }
+    }
+
     // Stations a single foreign, at-war unit in `region` - enough to make
     // `World::has_enemy_units`/`recompute_supply`'s `contested[i]` true -
     // without touching `Region::owner`. This is what actually stops a
-    // region from relaying supply onward per `recompute_supply`'s `if
-    // contested[i] { continue }`; it does not stop the region from itself
-    // still receiving whatever a non-contested neighbor relays into it,
-    // which is exactly the "corridor besieged, not captured" case this test
-    // wants for Kanmon/central-highlands (as opposed to Seikan, where the
-    // real mechanism under test is sea control, not land contest).
+    // region from relaying supply onward; it does not stop the region from
+    // itself still receiving whatever a non-contested neighbor relays into
+    // it, which is exactly the "corridor besieged, not captured" case this
+    // test wants for Kanmon/central-highlands (as opposed to Seikan, where
+    // the real mechanism under test is sea control, not land contest).
     //
     // `enemy` must genuinely be at war with `owner` - `has_enemy_units` (and
     // therefore `contested[i]`) is gated on `Diplomacy::is_at_war`, not mere
-    // faction identity. `(owner.0 + 1) % n` used to always be a safe pick
-    // back when every faction started at war with every other
-    // (`Diplomacy::new`'s old unconditional default); now that
-    // scenarios/japan47.json declares its own starting blocs, that neighbor
-    // may instead be an ally, so search for a faction actually at war
-    // instead of assuming one.
+    // faction identity, so search for a faction actually at war instead of
+    // assuming one.
     fn contest_with_enemy(world: &mut World, region: RegionId) {
         let owner = world.region(region).owner;
         let enemy = (0..world.factions.len())
@@ -5070,13 +5232,29 @@ fn japan47_chokepoints_still_bind() {
     }
 
     // Gives `enemy` total (1.0) control of `zone`, every other faction 0.0 -
-    // `naval::strait_factor`/`SeaZone::enemy_control_max` then read this
+    // `naval::sea_line_factor`/`SeaZone::enemy_control_max` then read this
     // directly, the same shape `tick_sea_control` itself would produce if
     // `enemy`'s fleet were the only power present.
     fn dominate_zone(world: &mut World, zone: SeaZoneId, enemy: FactionId) {
         let mut control = vec![0.0f32; world.factions.len()];
         control[enemy.index()] = 1.0;
         world.sea_zone_mut(zone).control = control;
+    }
+
+    // Stage 9B: the actual per-tick ceiling of the (unique) `TransportLine`
+    // directly connecting `a` and `b`'s regions - the transport-network
+    // replacement for reading a `LinkKind` constant off a region `Link`.
+    fn transport_line_capacity(world: &World, a: RegionId, b: RegionId) -> f32 {
+        world
+            .transport_lines
+            .iter()
+            .find(|l| {
+                let ra = world.transport_node(l.from).region;
+                let rb = world.transport_node(l.to).region;
+                (ra == a && rb == b) || (ra == b && rb == a)
+            })
+            .expect("test setup requires a direct TransportLine between these two regions")
+            .effective_capacity(world)
     }
 
     // Region/sea-zone ids in file order = RegionId/SeaZoneId assignment
@@ -5087,10 +5265,11 @@ fn japan47_chokepoints_still_bind() {
     let ids: Vec<String> = scenario.regions.iter().map(|r| r.id.clone()).collect();
     let zone_ids: Vec<String> = scenario.sea_zones.iter().map(|z| z.id.clone()).collect();
 
-    // 1. Seikan (青森—北海道 Strait, zone 北方海域/`hoppou`): 青森 is the
-    //    sole source for all of 北方連合. 北海道's *only* link is this
-    //    strait, so enemy sea control there (`naval::strait_factor` -> 0)
-    //    must starve it - ownership of 北海道 never changes.
+    // 1. Seikan (青森—北海道, a `Sea` TransportLine, zone 北方海域/`hoppou`):
+    //    青森 is the sole source for all of 北方連合. 北海道's only route is
+    //    this sea crossing, so enemy sea control there (`naval::
+    //    sea_line_factor` -> 0) must starve it - ownership of 北海道 never
+    //    changes.
     {
         let aomori = id_of(&ids, "aomori");
         let hokkaido = id_of(&ids, "hokkaido");
@@ -5098,11 +5277,13 @@ fn japan47_chokepoints_still_bind() {
 
         let mut world = base_world();
         isolate_single_source(&mut world, aomori);
+        station_garrison(&mut world, hokkaido, 1);
         logistics::recompute_supply(&mut world);
         let open = world.supply[hokkaido.index()];
 
         let mut cut = base_world();
         isolate_single_source(&mut cut, aomori);
+        station_garrison(&mut cut, hokkaido, 1);
         let owner = cut.region(aomori).owner;
         let enemy = FactionId((owner.0 + 1) % cut.factions.len() as u32);
         dominate_zone(&mut cut, hoppou, enemy);
@@ -5117,8 +5298,8 @@ fn japan47_chokepoints_still_bind() {
         );
     }
 
-    // 2. Kanmon (山口—福岡 Tunnel, deliberately blockade-immune - no
-    //    `strait_zone`): 山口 is the sole source for all of 西日本同盟
+    // 2. Kanmon (山口—福岡, a low-capacity `Rail` TransportLine, deliberately
+    //    blockade-immune): 山口 is the sole source for all of 西日本同盟
     //    (spanning both 中国 and 九州).
     {
         let yamaguchi = id_of(&ids, "yamaguchi");
@@ -5130,34 +5311,57 @@ fn japan47_chokepoints_still_bind() {
         let setouchi = zone_id_of(&zone_ids, "setouchi");
         let toshina = zone_id_of(&zone_ids, "toshina");
 
+        // 福岡 and 鹿児島 both draw through the *same* single 8.0-capacity
+        // corridor (山口->福岡->熊本->鹿児島) - loading heavy demand at both
+        // at once would make them contend with *each other* for that shared
+        // corridor (correctly, per Stage 9B's whole reason to exist - see
+        // `supply_behind_shared_line_is_demand_proportional` below, which
+        // pins exactly that), which would confound 2a's "does the corridor's
+        // own ceiling bind" question with "how is it split between two
+        // sinks". So 2a's heavy demand goes at 福岡 alone, and 2b/2c's own
+        // baseline/comparisons use a separate board with heavy demand at
+        // 鹿児島 alone instead.
         let mut world = base_world();
         isolate_single_source(&mut world, yamaguchi);
+        // A large garrison at 福岡 so demand there sits well above the
+        // tunnel's own low capacity - otherwise a small demand is trivially
+        // satisfiable even at a heavily-throttled corridor, and 2a below
+        // would never actually observe the tunnel's ceiling binding
+        // (`node_throughput_limits_supply`'s own doc makes the same point).
+        station_garrison(&mut world, fukuoka, 20);
         logistics::recompute_supply(&mut world);
         let open_fukuoka = world.supply[fukuoka.index()];
-        let open_kagoshima = world.supply[kagoshima.index()];
+
+        let mut world_kagoshima = base_world();
+        isolate_single_source(&mut world_kagoshima, yamaguchi);
+        station_garrison(&mut world_kagoshima, kagoshima, 20);
+        logistics::recompute_supply(&mut world_kagoshima);
+        let open_kagoshima = world_kagoshima.supply[kagoshima.index()];
 
         assert!(open_kagoshima > 0.0, "sanity: Kanmon should relay something into Kyushu when intact: {open_kagoshima}");
 
-        // 2a. Its low `max_throughput` (8.0, versus a Rail link's 25.0) is
-        //     what actually binds - even with 山口 saturated far past what
-        //     any single link could carry, 福岡's inbound supply cannot
-        //     exceed the tunnel's own ceiling.
-        let tunnel_cap = crate::world::LinkKind::Tunnel.max_throughput();
+        // 2a. Its own low capacity (8.0, versus a Rail line's ordinary
+        //     25.0) is what actually binds - even with 山口 saturated and
+        //     福岡's own demand pushed well past it, 福岡's inbound supply
+        //     cannot exceed the tunnel line's own ceiling.
+        let tunnel_cap = transport_line_capacity(&world, yamaguchi, fukuoka);
         assert!(
             open_fukuoka <= tunnel_cap + 0.05,
-            "Kanmon's max_throughput ({tunnel_cap}) must cap what reaches 福岡 even from a saturated source: open_fukuoka={open_fukuoka}"
+            "Kanmon's own capacity ({tunnel_cap}) must cap what reaches 福岡 even from a saturated source and heavy \
+             local demand: open_fukuoka={open_fukuoka}"
         );
         assert!(
             (open_fukuoka - tunnel_cap).abs() < 0.5,
-            "with 山口 saturated, 福岡's inbound supply should sit at (not far below) Kanmon's max_throughput ceiling \
-             of {tunnel_cap}, proving the tunnel - not downstream Kyushu rail (max_throughput 25.0) - is what binds: \
-             open_fukuoka={open_fukuoka}"
+            "with 山口 saturated and demand pushed past it, 福岡's inbound supply should sit at (not far below) \
+             Kanmon's own capacity ceiling of {tunnel_cap}, proving the tunnel - not downstream Kyushu rail (25.0) - \
+             is what binds: open_fukuoka={open_fukuoka}"
         );
 
         // 2b. An enemy force holding 福岡 (contested, not captured) severs
         //     the rest of Kyushu from 山口 - ownership never changes.
         let mut cut = base_world();
         isolate_single_source(&mut cut, yamaguchi);
+        station_garrison(&mut cut, kagoshima, 20);
         let owner = cut.region(yamaguchi).owner;
         contest_with_enemy(&mut cut, fukuoka);
         logistics::recompute_supply(&mut cut);
@@ -5173,10 +5377,13 @@ fn japan47_chokepoints_still_bind() {
         // 2c. Immunity, the deliberate flip side of 2b (docs/phase2-spec.md
         //     "関門トンネルが封鎖の影響を受けないのは意図的である"): total
         //     enemy sea control over *both* zones the corridor touches must
-        //     leave Kyushu's supply untouched, because the tunnel names no
-        //     `strait_zone` for `naval::strait_factor` to throttle.
+        //     leave Kyushu's supply untouched, because the tunnel is
+        //     modeled as a `Rail` line, never a `Sea` one
+        //     (`naval::sea_line_factor` is only ever applied to `Sea` lines
+        //     - `logistics::compute_transport_flow`'s own doc).
         let mut blockaded = base_world();
         isolate_single_source(&mut blockaded, yamaguchi);
+        station_garrison(&mut blockaded, kagoshima, 20);
         let enemy = FactionId((owner.0 + 1) % blockaded.factions.len() as u32);
         dominate_zone(&mut blockaded, setouchi, enemy);
         dominate_zone(&mut blockaded, toshina, enemy);
@@ -5190,13 +5397,13 @@ fn japan47_chokepoints_still_bind() {
         );
     }
 
-    // 3. Central highlands (長野・岐阜, Road - no `strait_zone` at all):
-    //    愛知 is the sole source for all of 中部同盟. 愛知 has no direct
-    //    link to 石川's Hokuriku cluster (新潟/富山/石川/福井) at all - every
-    //    route runs through 岐阜 directly, or through 静岡->長野. An enemy
-    //    force holding both 長野 and 岐阜 (contested, not captured) blocks
-    //    both from relaying onward, leaving Hokuriku with no alternate
-    //    route and no ownership change anywhere.
+    // 3. Central highlands (長野・岐阜, `Road` TransportLines - no sea zone
+    //    involved): 愛知 is the sole source for all of 中部同盟. 愛知 has no
+    //    direct link to 石川's Hokuriku cluster (新潟/富山/石川/福井) at all -
+    //    every route runs through 岐阜 directly, or through 静岡->長野. An
+    //    enemy force holding both 長野 and 岐阜 (contested, not captured)
+    //    blocks both from relaying onward, leaving Hokuriku with no
+    //    alternate route and no ownership change anywhere.
     {
         let aichi = id_of(&ids, "aichi");
         let nagano = id_of(&ids, "nagano");
@@ -5205,11 +5412,13 @@ fn japan47_chokepoints_still_bind() {
 
         let mut world = base_world();
         isolate_single_source(&mut world, aichi);
+        station_garrison(&mut world, ishikawa, 1);
         logistics::recompute_supply(&mut world);
         let open = world.supply[ishikawa.index()];
 
         let mut cut = base_world();
         isolate_single_source(&mut cut, aichi);
+        station_garrison(&mut cut, ishikawa, 1);
         let owner = cut.region(aichi).owner;
         contest_with_enemy(&mut cut, nagano);
         contest_with_enemy(&mut cut, gifu);
@@ -5225,6 +5434,504 @@ fn japan47_chokepoints_still_bind() {
              with no alternate route quietly carrying it: open={open}, severed={severed}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 9B (docs/phase9-spec.md "2. 補給を有限流量にする", §7 "Stage 9B"):
+// the flow-model acceptance tests proper. `BRANCH_SCENARIO` is a hand-built,
+// single-faction map shaped exactly like the property each test needs: one
+// source region, a hub, and two sibling sinks (`left`/`right`) that only
+// ever reach the source through the hub - the hub's own inbound line
+// (`hub_depot`'s `source_depot -> hub_depot` `TransportLine`, capacity
+// `BRANCH_BOTTLENECK_CAPACITY`) is the single shared bottleneck every test
+// below drives. `left`/`right`'s own `hub_depot -> *_depot` lines are given
+// generous capacity so they never bind - only the shared corridor should.
+// ---------------------------------------------------------------------------
+
+const BRANCH_BOTTLENECK_CAPACITY: f32 = 10.0;
+
+const BRANCH_SCENARIO: &str = r#"
+{
+  "regions": [
+    { "id": "source", "name": "Source", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1000.0,"machinery":1000.0,"munitions":1000.0,"arms":1000.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [0.0, 0.0],
+      "links": [ { "to": "hub", "kind": "rail" } ] },
+    { "id": "hub", "name": "Hub", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [1.0, 0.0],
+      "links": [ { "to": "source", "kind": "rail" }, { "to": "left", "kind": "rail" }, { "to": "right", "kind": "rail" }, { "to": "enemy_home", "kind": "rail" } ] },
+    { "id": "left", "name": "Left", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [2.0, 1.0],
+      "links": [ { "to": "hub", "kind": "rail" } ] },
+    { "id": "right", "name": "Right", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [2.0, -1.0],
+      "links": [ { "to": "hub", "kind": "rail" } ] },
+    { "id": "enemy_home", "name": "Enemy Home", "terrain": "plain", "population": 1.0,
+      "capacity": {"food":0.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 0.0, "port": 0.0, "position": [1.0, 2.0],
+      "links": [ { "to": "hub", "kind": "rail" } ] }
+  ],
+  "sea_zones": [],
+  "transport": {
+    "nodes": [
+      { "id": "source_depot", "name": "Source Depot", "kind": "depot", "region": "source" },
+      { "id": "hub_depot", "name": "Hub Depot", "kind": "depot", "region": "hub" },
+      { "id": "left_depot", "name": "Left Depot", "kind": "depot", "region": "left" },
+      { "id": "right_depot", "name": "Right Depot", "kind": "depot", "region": "right" },
+      { "id": "enemy_home_depot", "name": "Enemy Home Depot", "kind": "depot", "region": "enemy_home" }
+    ],
+    "lines": [
+      { "from": "source_depot", "to": "hub_depot", "kind": "rail", "capacity": 10.0, "condition": 1.0 },
+      { "from": "hub_depot", "to": "left_depot", "kind": "rail", "capacity": 100.0, "condition": 1.0 },
+      { "from": "hub_depot", "to": "right_depot", "kind": "rail", "capacity": 100.0, "condition": 1.0 }
+    ]
+  },
+  "factions": [
+    { "id": "f1", "name": "F1", "capital": "source", "regions": ["source", "hub", "left", "right"] },
+    { "id": "f2", "name": "F2", "capital": "enemy_home", "regions": ["enemy_home"] }
+  ],
+  "diplomacy": { "blocs": [] },
+  "victory": [ { "type": "conquest" } ]
+}
+"#;
+
+/// Stations `count` garrison units (each `SUPPLY_NEED_PER_MANPOWER`-worth of
+/// Munitions demand) of `region`'s own owner in `region`, for the
+/// `BRANCH_SCENARIO`-based tests below.
+fn station_units(world: &mut World, region: RegionId, count: usize) {
+    let owner = world.region(region).owner;
+    for i in 0..count {
+        let id = crate::ids::UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner,
+            name: format!("Unit {i}"),
+            station: Station::Region(region),
+            movement: None,
+            manpower: 1.0,
+            equipment: UNIT_EQUIPMENT,
+            organization: 100.0,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+        });
+    }
+}
+
+fn branch_region(ids: &[String], name: &str) -> RegionId {
+    RegionId(ids.iter().position(|id| id == name).expect("region must exist in BRANCH_SCENARIO") as u32)
+}
+
+fn branch_ids() -> Vec<String> {
+    scenario::Scenario::parse(BRANCH_SCENARIO).unwrap().regions.iter().map(|r| r.id.clone()).collect()
+}
+
+/// A fresh `BRANCH_SCENARIO` `World`, with `Scenario::build_world`'s
+/// auto-placed starting units (three per faction, at capital + owned
+/// neighbors - the same placement `scenario::build_world`'s own doc
+/// describes for the embedded mvp scenario, applied to *any* loaded
+/// scenario) removed - the tests below need to control every unit's
+/// demand exactly, not have `source`/`hub`/`enemy_home` carry incidental
+/// demand from that default placement.
+fn branch_world() -> World {
+    let mut world = scenario::load_str(BRANCH_SCENARIO).expect("BRANCH_SCENARIO must be valid");
+    world.units.clear();
+    world
+}
+
+/// **The central Stage 9B property** (docs/phase9-spec.md §7 Stage 9B,
+/// criterion 1; CLAUDE.md: "Phase 9 の存在理由"): adding units *behind the
+/// same line* - even in a sibling region whose own unit count never
+/// changes - lowers that sibling's per-unit supply, because the two
+/// regions are now genuinely contending for the same finite corridor
+/// capacity rather than each independently drawing a best-path ceiling
+/// that ignores the other entirely.
+///
+/// `left` keeps exactly 2 units throughout. With `right` empty, `left`'s
+/// tiny demand (2.0) sits far under the shared corridor's 10.0 capacity, so
+/// it is served in full. Adding a large garrison at `right` (sharing the
+/// *same* `source_depot -> hub_depot` line, not `left`'s own downstream
+/// line) pushes combined demand past the corridor's capacity, and `left`'s
+/// per-unit supply drops sharply *without a single unit of its own ever
+/// moving, arriving, or leaving* - proof this is real capacity contention
+/// across regions, not merely each region's own demand capping its own
+/// ceiling (which a region could exhibit entirely on its own, and would
+/// prove nothing about the network).
+///
+/// Confirmed this can fail: temporarily hardcoded the round's per-resource
+/// `scale` closures (`scale_vertex`/`scale_line`) in `compute_transport_flow`
+/// to always return `1.0` (i.e. every desired amount granted in full,
+/// exactly the pre-Stage-9B "capacity never actually consumed" defect this
+/// stage exists to fix) and re-ran - `left`'s per-unit supply came back
+/// identical (`1.0`) in both the empty-`right` and loaded-`right` cases, and
+/// the assertion below failed immediately. Reverted before committing.
+#[test]
+fn supply_behind_shared_line_is_demand_proportional() {
+    let ids = branch_ids();
+    let left = branch_region(&ids, "left");
+    let right = branch_region(&ids, "right");
+
+    let mut idle_right = branch_world();
+    station_units(&mut idle_right, left, 2);
+    logistics::recompute_supply(&mut idle_right);
+    let per_unit_idle = idle_right.supply[left.index()] / 2.0;
+
+    let mut loaded_right = branch_world();
+    station_units(&mut loaded_right, left, 2);
+    station_units(&mut loaded_right, right, 40);
+    logistics::recompute_supply(&mut loaded_right);
+    let per_unit_loaded = loaded_right.supply[left.index()] / 2.0;
+
+    assert!(
+        per_unit_idle > 0.9,
+        "sanity: with the corridor otherwise idle, left's tiny demand should be served in full: {per_unit_idle}"
+    );
+    assert!(
+        per_unit_loaded < per_unit_idle * 0.7,
+        "adding a large garrison behind the SAME corridor at a sibling region (right) must lower left's own \
+         per-unit supply, even though left's own unit count never changed: idle={per_unit_idle}, loaded={per_unit_loaded}"
+    );
+}
+
+/// docs/phase9-spec.md §7 Stage 9B, criterion 2: cutting one line drops
+/// supply beyond it; with a detour present, it falls to the detour's own
+/// capacity rather than to zero. Extends `BRANCH_SCENARIO`'s topology (via
+/// direct `World` edits rather than a second scenario file) with a second,
+/// lower-capacity `source_depot -> hub_depot` line standing in for a
+/// detour - `World`'s `transport_lines: Vec<TransportLine>` has no
+/// uniqueness constraint on endpoints, so two parallel lines between the
+/// same two nodes is exactly "two routes between the same two places", the
+/// simplest possible detour shape.
+///
+/// Confirmed this can fail: temporarily left the detour line's capacity
+/// unclamped at the *primary* line's own 10.0 (instead of a distinctly
+/// lower 3.0) - the "falls to the detour's capacity, not to the primary's"
+/// half of the assertion below is what actually distinguishes this from a
+/// test that would pass even if the detour were silently ignored;
+/// re-running with the detour line simply deleted confirms the *other*
+/// half - `severed` was `0.0` with no detour present, versus positive once
+/// it exists - so both halves of "falls to the detour's capacity rather
+/// than to zero" are independently exercised.
+#[test]
+fn cutting_a_line_falls_to_the_detour_capacity_not_zero() {
+    const DETOUR_CAPACITY: f32 = 3.0;
+
+    let ids = branch_ids();
+    let source = branch_region(&ids, "source");
+    let hub = branch_region(&ids, "hub");
+    let left = branch_region(&ids, "left");
+
+    fn primary_line_index(world: &World, source: RegionId, hub: RegionId) -> usize {
+        world
+            .transport_lines
+            .iter()
+            .position(|l| world.transport_node(l.from).region == source && world.transport_node(l.to).region == hub)
+            .expect("BRANCH_SCENARIO must declare a source -> hub line")
+    }
+
+    // No detour at all: severing the one corridor must starve `left` to
+    // exactly zero.
+    let mut no_detour = branch_world();
+    station_units(&mut no_detour, left, 2);
+    let primary = primary_line_index(&no_detour, source, hub);
+    no_detour.transport_lines[primary].condition = Condition::new(0.0).unwrap();
+    logistics::recompute_supply(&mut no_detour);
+    let severed_no_detour = no_detour.supply[left.index()];
+
+    // A detour present: severing the *primary* line (condition -> 0) still
+    // leaves the parallel, lower-capacity detour line intact.
+    let mut with_detour = branch_world();
+    station_units(&mut with_detour, left, 2);
+    let hub_node = with_detour.transport_nodes.iter().find(|n| n.region == hub).unwrap().id;
+    let source_node = with_detour.transport_nodes.iter().find(|n| n.region == source).unwrap().id;
+    with_detour.transport_lines.push(crate::transport::TransportLine {
+        from: source_node,
+        to: hub_node,
+        kind: TransportLineKind::Rail,
+        capacity: Capacity::new(DETOUR_CAPACITY).unwrap(),
+        condition: Condition::new(1.0).unwrap(),
+    });
+    logistics::recompute_supply(&mut with_detour);
+    let open_with_detour = with_detour.supply[left.index()];
+
+    let primary = primary_line_index(&with_detour, source, hub);
+    with_detour.transport_lines[primary].condition = Condition::new(0.0).unwrap();
+    logistics::recompute_supply(&mut with_detour);
+    let severed_with_detour = with_detour.supply[left.index()];
+
+    assert_eq!(severed_no_detour, 0.0, "with no detour at all, cutting the sole corridor must starve left to exactly zero");
+    assert!(open_with_detour > 1.8, "sanity: with both lines intact, left should draw near its full 2.0 demand: {open_with_detour}");
+    assert!(
+        severed_with_detour > 0.0,
+        "with a detour present, cutting the primary line must not starve left to zero: {severed_with_detour}"
+    );
+    assert!(
+        severed_with_detour <= DETOUR_CAPACITY + 0.05,
+        "with a detour present, cutting the primary line must cap left's supply at the detour's own capacity \
+         ({DETOUR_CAPACITY}), not leave it at the primary's higher ceiling: severed_with_detour={severed_with_detour}"
+    );
+}
+
+/// docs/phase9-spec.md §7 Stage 9B, criterion 3: oversubscribed allocation
+/// is proportional to demand and independent of iteration order - "which
+/// front gets supply must never depend on iteration order or on an id"
+/// (CLAUDE.md「繰り返し踏んだ欠陥」). `left`/`right` share the same 10.0
+/// corridor with *different* demand (6 units vs. 2 units, a 3:1 ratio);
+/// both boards below have the exact same topology and demand, differing
+/// only in which region id (`RegionId(2)` vs `RegionId(3)`, the order
+/// `BRANCH_SCENARIO`'s own region list assigns them) carries the *larger*
+/// demand - `compute_transport_flow` iterates regions in ascending
+/// `RegionId` order (`logistics.rs`'s own doc), so this directly probes
+/// whether being visited first/last changes the *ratio* each side receives.
+///
+/// Confirmed this can fail: temporarily changed the commit loop in
+/// `compute_transport_flow` to grant candidates their full `desired` amount
+/// in ascending-`RegionId` order until the line's residual capacity ran out
+/// (a sequential first-come-first-served allocator, the exact "fixed
+/// priority decided by iteration order" shape CLAUDE.md lists first) and
+/// re-ran - the low-id region always drained the corridor first regardless
+/// of which side actually carried the larger demand, and the proportionality
+/// assertion below failed. Reverted before committing.
+#[test]
+fn oversubscribed_allocation_is_proportional_and_order_independent() {
+    fn measure(heavy_is_left: bool) -> (f32, f32) {
+        let mut world = branch_world();
+        let ids = branch_ids();
+        let left = branch_region(&ids, "left");
+        let right = branch_region(&ids, "right");
+        let (heavy, light) = if heavy_is_left { (left, right) } else { (right, left) };
+        // 30:10 (a 3:1 ratio, same as `6:2`) but large enough combined
+        // (40.0) to genuinely oversubscribe the 10.0 corridor - `6:2`'s
+        // combined demand (8.0) fit under the corridor with room to spare,
+        // so both sides were served in full regardless of allocation order,
+        // and this test could not actually have caught a broken allocator.
+        station_units(&mut world, heavy, 30);
+        station_units(&mut world, light, 10);
+        logistics::recompute_supply(&mut world);
+        (world.supply[heavy.index()], world.supply[light.index()])
+    }
+
+    let (heavy_left, light_left) = measure(true);
+    let (heavy_right, light_right) = measure(false);
+
+    assert!(heavy_left + light_left <= BRANCH_BOTTLENECK_CAPACITY + 0.05, "sanity: total delivered must not exceed the corridor's own capacity");
+    assert!(
+        heavy_left > light_left * 2.0,
+        "the 30-unit side must receive noticeably more than the 10-unit side (roughly a 3:1 split of the shared \
+         corridor): heavy={heavy_left}, light={light_left}"
+    );
+    assert!(
+        (heavy_left - heavy_right).abs() < 0.05 && (light_left - light_right).abs() < 0.05,
+        "swapping which region id (left, the lower id, vs right, the higher id) carries the heavier demand must \
+         not change who gets how much - only demand should: (heavy_left={heavy_left}, light_left={light_left}) \
+         vs (heavy_right={heavy_right}, light_right={light_right})"
+    );
+}
+
+// ---------------------------------------------------------------------
+// P1 fix (external code review, post-Stage-9B): each `TransportLine`'s
+// residual budget was initialized as `[c, c]` - a full `capacity *
+// condition` *per direction* - instead of one shared budget for the whole
+// (undirected) physical route. Two genuinely independent streams routing
+// in opposite directions over the same line in the same tick could
+// therefore together carry up to `2 * capacity * condition`: the exact
+// "capacity is never consumed" defect Stage 9B exists to fix, reintroduced
+// in a smaller, two-way-traffic-shaped form. `CROSS_SCENARIO` below is
+// built specifically to make both directions of one line route genuinely
+// (not merely as a hypothetical): a `west`/`east` pair straddle the line
+// under test, each fed primarily from its own adjacent producer
+// (`west_producer`/`east_producer`) - but each producer's own adjacent
+// relay line is shared: whatever that relay line doesn't grant its "own"
+// side (because the *other* side's demand crossing the test line also
+// contends for it, pooled the same way any two candidates sharing a
+// resource are) crosses the test line into the opposite side. This yields
+// two real, simultaneous cross-line flows, not a contrived one.
+// ---------------------------------------------------------------------
+const CROSS_SCENARIO: &str = r#"
+{
+  "regions": [
+    { "id": "east", "name": "East", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [0.0, 0.0],
+      "links": [ {"to":"west","kind":"rail"}, {"to":"filler","kind":"rail"} ] },
+    { "id": "west", "name": "West", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [1.0, 0.0],
+      "links": [ {"to":"east","kind":"rail"}, {"to":"west_producer","kind":"rail"} ] },
+    { "id": "west_producer", "name": "WestProducer", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":500.0,"machinery":500.0,"munitions":500.0,"arms":500.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [2.0, 0.0],
+      "links": [ {"to":"west","kind":"rail"}, {"to":"east_producer","kind":"rail"} ] },
+    { "id": "east_producer", "name": "EastProducer", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":500.0,"machinery":500.0,"munitions":500.0,"arms":500.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [3.0, 0.0],
+      "links": [ {"to":"west_producer","kind":"rail"}, {"to":"filler","kind":"rail"} ] },
+    { "id": "filler", "name": "Filler", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"arms":0.0},
+      "infrastructure": 1.0, "port": 0.0, "position": [1.5, 1.0],
+      "links": [ {"to":"east_producer","kind":"rail"}, {"to":"east","kind":"rail"} ] }
+  ],
+  "sea_zones": [],
+  "transport": {
+    "nodes": [
+      { "id": "east_d", "name": "East Depot", "kind": "depot", "region": "east" },
+      { "id": "west_d", "name": "West Depot", "kind": "depot", "region": "west" },
+      { "id": "wp_d", "name": "WestProducer Depot", "kind": "depot", "region": "west_producer" },
+      { "id": "ep_d", "name": "EastProducer Depot", "kind": "depot", "region": "east_producer" },
+      { "id": "filler_d", "name": "Filler Depot", "kind": "depot", "region": "filler" }
+    ],
+    "lines": [
+      { "from": "east_d", "to": "west_d", "kind": "rail", "capacity": 8.0, "condition": 1.0 },
+      { "from": "west_d", "to": "wp_d", "kind": "rail", "capacity": 12.0, "condition": 1.0 },
+      { "from": "wp_d", "to": "ep_d", "kind": "rail", "capacity": 12.0, "condition": 1.0 },
+      { "from": "ep_d", "to": "filler_d", "kind": "rail", "capacity": 12.0, "condition": 1.0 },
+      { "from": "filler_d", "to": "east_d", "kind": "rail", "capacity": 12.0, "condition": 1.0 }
+    ]
+  },
+  "factions": [
+    { "id": "f1", "name": "F1", "capital": "east", "regions": ["east","west","west_producer","east_producer","filler"] }
+  ],
+  "diplomacy": { "blocs": [] },
+  "victory": [ { "type": "conquest" } ]
+}
+"#;
+
+const CROSS_LINE_CAPACITY: f32 = 8.0;
+
+/// **The central P1-fix invariant**: no `TransportLine`'s total flow in a
+/// tick, summed over *both* directions, may exceed its own
+/// `capacity * condition` - the property `[c, c]` violated. `east`/`west`
+/// each draw mostly from their own adjacent producer, but every producer's
+/// relay line is shared with the *other* side's crossing demand (see this
+/// section's own doc above), so real traffic genuinely routes both ways
+/// over the `east`-`west` line in the same tick - this is not a
+/// hypothetical, order-dependent, or exhaustion-timing artifact; `east`
+/// and `west` both carry heavy, identical demand from the start.
+///
+/// Confirmed this fails against the pre-fix code: with `residual_line`
+/// initialized as `[c, c]` (a full 8.0 budget *per direction* instead of
+/// one shared 8.0 for the line), this scenario produced `east->west =
+/// 5.0` and `west->east = 6.0` - a combined 11.0 over a line whose own
+/// `capacity * condition` is 8.0, i.e. the line carried 137% of what it
+/// physically allows. Fixed (`residual_line: Vec<f32>`, one shared budget
+/// per line, opposing directions pooled into the same `total_desired_line`
+/// and arbitrated by the same proportional-scale mechanism any other
+/// contended resource uses), this same scenario instead produces
+/// `east->west = 2.0` and `west->east = 6.0` - a combined 8.0, exactly the
+/// line's own `capacity * condition` and no more - and this assertion
+/// holds.
+#[test]
+fn line_flow_never_doubles_under_two_way_traffic() {
+    let ids = scenario::Scenario::parse(CROSS_SCENARIO).unwrap().regions.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+    let idx = |name: &str| RegionId(ids.iter().position(|i| i == name).unwrap() as u32);
+    let east = idx("east");
+    let west = idx("west");
+
+    let mut world = scenario::load_str(CROSS_SCENARIO).expect("CROSS_SCENARIO must be valid");
+    world.units.clear();
+    station_units(&mut world, east, 30);
+    station_units(&mut world, west, 30);
+    logistics::recompute_supply(&mut world);
+
+    let flows = logistics::supply_link_flows(&world);
+    let mut forward = 0.0f32;
+    let mut backward = 0.0f32;
+    for f in &flows {
+        if f.from == east && f.to == west {
+            forward = f.throughput.flow();
+        }
+        if f.from == west && f.to == east {
+            backward = f.throughput.flow();
+        }
+    }
+
+    assert!(forward > 0.5, "sanity: east must genuinely draw some of its supply across the line from west's producer: {forward}");
+    assert!(backward > 0.5, "sanity: west must genuinely draw some of its supply across the line from east's producer: {backward}");
+    assert!(
+        forward + backward <= CROSS_LINE_CAPACITY + 0.05,
+        "a single physical line's combined forward+backward flow this tick must never exceed its own \
+         capacity * condition ({CROSS_LINE_CAPACITY}): forward={forward}, backward={backward}, \
+         total={} - two-way traffic must not double the line's effective capacity",
+        forward + backward
+    );
+}
+
+/// docs/phase9-spec.md §7 Stage 9B, criterion 4: `condition` recovers.
+/// CLAUDE.md's「繰り返し踏んだ欠陥」: "状態には必ず回復経路を持たせる" - a
+/// line driven down by war damage must have a real path back up, not just a
+/// one-way accumulator.
+///
+/// Confirmed this can fail: temporarily deleted the `else` branch of
+/// `transport::tick_transport_condition`'s `damaged` check (so an
+/// uncontested line's `condition` was simply left unchanged forever instead
+/// of stepped toward `Condition::FULL`) and re-ran - `condition` stayed
+/// pinned at its damaged floor for the entire post-enemy-departure window,
+/// and the final assertion below failed. Reverted before committing.
+#[test]
+fn transport_line_condition_recovers_after_damage_stops() {
+    let mut world = branch_world();
+    let ids = branch_ids();
+    let hub = branch_region(&ids, "hub");
+    let source = branch_region(&ids, "source");
+
+    let line_index = world
+        .transport_lines
+        .iter()
+        .position(|l| world.transport_node(l.from).region == source && world.transport_node(l.to).region == hub)
+        .expect("BRANCH_SCENARIO must declare a source -> hub line");
+
+    // An at-war enemy unit contests `hub`, damaging every line touching it
+    // (`transport::tick_transport_condition`'s doc) - `BRANCH_SCENARIO`'s
+    // `f2` (home region `enemy_home`, otherwise untouched by this test)
+    // starts at war with `f1` by default (`Diplomacy::new`'s unconditional
+    // baseline, since `BRANCH_SCENARIO` declares no blocs).
+    let owner = world.region(hub).owner;
+    let enemy = world.faction(FactionId(1)).id;
+    let raider = crate::ids::UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: raider,
+        owner: enemy,
+        name: "Enemy Raider".to_string(),
+        station: Station::Region(hub),
+        movement: None,
+        manpower: 1.0,
+        equipment: 1.0,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(hub),
+        experience: 0.0,
+        alive: true,
+    });
+    assert!(world.diplomacy.is_at_war(owner, enemy), "test setup requires the raider's faction to be at war with hub's owner");
+
+    for _ in 0..30 {
+        transport::tick_transport_condition(&mut world);
+    }
+    let damaged = world.transport_lines[line_index].condition.get();
+    assert!(damaged < 0.5, "30 days of contest should have driven condition well below its starting 1.0: {damaged}");
+
+    // The enemy withdraws - `hub` is no longer contested.
+    world.units[raider.index()].alive = false;
+    for _ in 0..30 {
+        transport::tick_transport_condition(&mut world);
+    }
+    let recovered = world.transport_lines[line_index].condition.get();
+
+    assert!(
+        recovered > damaged + 0.1,
+        "condition must recover once the line is no longer contested, not stay pinned at its damaged floor: \
+         damaged={damaged}, recovered={recovered}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -5247,11 +5954,16 @@ fn japan47_chokepoints_still_bind() {
 /// each other and against the real `recompute_supply` output they both
 /// re-derive from.
 ///
-/// Confirmed this can fail: temporarily dropped the `.min(node_throughput[j])`
-/// term from `supply_link_flows`'s formula (leaving `supply_routes`'s copy
-/// of the same formula unchanged) and re-ran - the final flow-vs-cap
-/// assertion failed (`supply_link_flows` reported a larger number than
-/// `world.supply` actually held). Reverted before committing.
+/// Confirmed this can fail: temporarily dropped the `Inbound` node-side cap
+/// from `compute_transport_flow` for `supply_link_flows`'s own re-run
+/// (leaving `supply_routes`'s independent re-run unchanged) and re-ran - the
+/// final flow-vs-cap assertion failed (`supply_link_flows` reported a larger
+/// number than `world.supply` actually held). Reverted before committing.
+///
+/// Stage 9B rewrite: `world.supply[region]` is demand-bounded now (this
+/// module's own doc) - mvp's default unit placement never posts one at
+/// kita_tohoku (`supply_corridor_cut`'s own doc), so a garrison unit is
+/// added there to make the sanity check meaningful.
 #[test]
 fn supply_route_reconstruction_matches_logistics() {
     fn isolate_single_source(world: &mut World, source: RegionId) {
@@ -5275,6 +5987,24 @@ fn supply_route_reconstruction_matches_logistics() {
 
     let mut world = scenario::build_world();
     isolate_single_source(&mut world, kanto);
+    let id = crate::ids::UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id,
+        owner: world.region(kita_tohoku).owner,
+        name: "Garrison".to_string(),
+        station: Station::Region(kita_tohoku),
+        movement: None,
+        manpower: 1.0,
+        equipment: UNIT_EQUIPMENT,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(kita_tohoku),
+        experience: 0.0,
+        alive: true,
+    });
     logistics::recompute_supply(&mut world);
 
     let routes = logistics::supply_routes(&world);
@@ -5300,15 +6030,23 @@ fn supply_route_reconstruction_matches_logistics() {
     );
 }
 
-/// `chokepoint_is_flagged_when_saturated`: the 中国—九州 Kanmon Tunnel
-/// (`max_throughput` 8.0, the lowest of any `LinkKind`), once 中国 is
-/// boosted into a saturated source exactly as `kanmon_tunnel_survives_
-/// blockade` sets up, is flagged `is_saturated`; the same link on an
-/// ordinary, unmodified board is not.
+/// `chokepoint_is_flagged_when_saturated`: the 中国—九州 Kanmon corridor
+/// (transport-network `TransportLine` capacity 8.0, the lowest in the mvp
+/// map), once 中国 is boosted into a saturated source exactly as
+/// `kanmon_tunnel_survives_blockade` sets up *and* 九州's own demand is
+/// pushed well past that 8.0 ceiling, is flagged `is_saturated`; the same
+/// link on an ordinary, unmodified board is not.
 ///
 /// Confirmed this can fail: temporarily hardcoded
 /// `LinkThroughput::is_saturated` to always return `false` and re-ran - the
 /// positive assertion below failed immediately. Reverted before committing.
+///
+/// Stage 9B rewrite: `world.supply[region]` (and therefore this line's own
+/// committed flow) is demand-bounded now, so a small demand never pushes a
+/// line to its own capacity ceiling regardless of how saturated the source
+/// is - a heavy garrison is added at 九州 so demand there genuinely exceeds
+/// the corridor's own 8.0 capacity (`japan47_chokepoints_still_bind`'s
+/// `station_garrison` makes the same point for its own Kanmon sub-test).
 #[test]
 fn chokepoint_is_flagged_when_saturated() {
     let chugoku = RegionId(7);
@@ -5321,6 +6059,26 @@ fn chokepoint_is_flagged_when_saturated() {
     world.region_mut(chugoku).infrastructure = 1.0;
     world.region_mut(kyushu).port = 0.0;
     world.region_mut(kyushu).capacity = [0.0; GOOD_COUNT];
+    for i in 0..20 {
+        let id = crate::ids::UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner: world.region(kyushu).owner,
+            name: format!("Garrison {i}"),
+            station: Station::Region(kyushu),
+            movement: None,
+            manpower: 1.0,
+            equipment: UNIT_EQUIPMENT,
+            organization: 100.0,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(kyushu),
+            experience: 0.0,
+            alive: true,
+        });
+    }
 
     logistics::recompute_supply(&mut world);
 
@@ -6090,3 +6848,4 @@ fn shipped_scenarios_all_declare_transport_networks() {
         "japan_hex.json's transport block must say clearly that it is a Stage 9A placeholder, not real rail/port data"
     );
 }
+

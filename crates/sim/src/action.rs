@@ -477,11 +477,13 @@ fn apply_recruit(
 
     // Stage 2D (docs/phase2-spec.md "艦隊": "艦隊は港のある自領地域でのみ建造
     // できる"): a fleet needs a port to launch from; a land unit doesn't
-    // care about `region.port` at all.
+    // care whether the region has one at all. Stage 9B: "has a port" is
+    // `World::has_port_node`'s question, not `region.port > 0.0`'s (see
+    // `Region::port`'s own doc).
     let station = match domain {
         Domain::Land => Station::Region(region_id),
         Domain::Sea => {
-            if region.port <= 0.0 {
+            if !world.has_port_node(region_id) {
                 return Err(ActionError::NoPort);
             }
             let zone = naval::home_zone(world, region_id).ok_or(ActionError::NoPort)?;
