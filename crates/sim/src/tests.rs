@@ -16,7 +16,7 @@ use crate::event::Event;
 use crate::focus::{self, NationalFocus};
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::{Group, GROUP_COUNT};
-use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, TransportNodeId, UnitId};
 use crate::logistics;
 use crate::military;
 use crate::naval;
@@ -26,6 +26,7 @@ use crate::rng::Rng;
 use crate::scenario;
 use crate::sim::{Outcome, Simulation};
 use crate::trade;
+use crate::transport::{Capacity, Condition, TransportLineKind, TransportNodeKind};
 use crate::world::{Domain, DominationShare, Station, VictoryCondition, VictoryDeclaration, World};
 
 /// Stage 6C (docs/phase6-spec.md "Stage 6C" item 1): this test used to
@@ -4371,6 +4372,17 @@ const MINI_VALID_SCENARIO: &str = r#"
       "links": [ { "to": "b", "kind": "rail" } ] }
   ],
   "sea_zones": [],
+  "transport": {
+    "nodes": [
+      { "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },
+      { "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },
+      { "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" }
+    ],
+    "lines": [
+      { "from": "a_depot", "to": "b_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }
+    ]
+  },
   "factions": [
     { "id": "f1", "name": "F1", "capital": "a", "regions": ["a", "b"] },
     { "id": "f2", "name": "F2", "capital": "c", "regions": ["c"] }
@@ -4527,6 +4539,17 @@ const BLOC_SCENARIO: &str = r#"
       "links": [ { "to": "b", "kind": "rail" } ] }
   ],
   "sea_zones": [],
+  "transport": {
+    "nodes": [
+      { "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },
+      { "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },
+      { "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" }
+    ],
+    "lines": [
+      { "from": "a_depot", "to": "b_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }
+    ]
+  },
   "factions": [
     { "id": "f1", "name": "F1", "capital": "a", "regions": ["a"] },
     { "id": "f2", "name": "F2", "capital": "b", "regions": ["b"] },
@@ -5737,4 +5760,333 @@ fn target_unit_identifies_exactly_the_unit_orders() {
     for (action, expected) in cases {
         assert_eq!(action.target_unit(), expected, "{action:?} should target {expected:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 9A (docs/phase9-spec.md "1. 層の分離", "3. データ"): the transport
+// network's types, scenario schema and validation. Supply computation is
+// unchanged - `logistics::recompute_supply` still propagates over
+// `Region::links` exactly as it did before this stage, which is why every
+// pre-existing test above still passes unmodified once `MINI_VALID_SCENARIO`/
+// `BLOC_SCENARIO` gained a minimal, valid `transport` block of their own.
+// ---------------------------------------------------------------------------
+
+/// `MINI_VALID_SCENARIO`'s `transport` block must build into the exact
+/// `TransportNode`/`TransportLine` values it describes: three `Depot` nodes
+/// (none of `a`/`b`/`c` has a port, so no `Port` node), each resolved to its
+/// own region, and two `Rail` lines resolved to the right node ids in
+/// declaration order (`TransportNodeId` assignment mirrors `RegionId`'s own
+/// "file order fixes id" convention - `Scenario::transport_nodes`'s doc).
+///
+/// Confirmed this can fail: temporarily swapped `TransportNode { region:
+/// RegionId(index_of[def.region.as_str()]), .. }` in `Scenario::build_world`
+/// for a hardcoded `RegionId(0)` and re-ran - the `b_depot`/`c_depot`
+/// assertions below failed (both reported region `a`). Reverted before
+/// committing.
+#[test]
+fn transport_network_builds_correctly() {
+    let world = scenario::load_str(MINI_VALID_SCENARIO).expect("MINI_VALID_SCENARIO must be valid");
+
+    assert_eq!(world.transport_nodes.len(), 3);
+    for (i, region) in [(0, RegionId(0)), (1, RegionId(1)), (2, RegionId(2))] {
+        let node = &world.transport_nodes[i];
+        assert_eq!(node.id, TransportNodeId(i as u32));
+        assert_eq!(node.kind, TransportNodeKind::Depot);
+        assert_eq!(node.region, region, "node {i} should belong to region {region:?}");
+    }
+
+    assert_eq!(world.transport_lines.len(), 2);
+    let line0 = world.transport_lines[0];
+    assert_eq!((line0.from, line0.to), (TransportNodeId(0), TransportNodeId(1)), "a_depot -> b_depot");
+    assert_eq!(line0.kind, TransportLineKind::Rail);
+    assert_eq!(line0.capacity, Capacity::new(25.0).unwrap());
+    assert_eq!(line0.condition, Condition::new(1.0).unwrap());
+
+    let line1 = world.transport_lines[1];
+    assert_eq!((line1.from, line1.to), (TransportNodeId(1), TransportNodeId(2)), "b_depot -> c_depot");
+}
+
+/// docs/phase9-spec.md §7 Stage 9A: "輸送網が欠けたシナリオ... 明確なエラー
+/// になる" - a scenario that omits the required `transport` field entirely
+/// must be rejected, naming exactly what's missing, per docs/conventions.md
+/// §3's "フォールバック原則禁止" applied here exactly as it already is to
+/// `diplomacy`/`victory`/`position` (there is no implied "derive it from
+/// `Region::links`" fallback - docs/phase9-spec.md §3's own explicit ban).
+///
+/// Confirmed this can fail: temporarily changed `Scenario::parse` to treat a
+/// missing `transport` field as `(Vec::new(), Vec::new())` instead of
+/// propagating `require_object_field`'s error, and re-ran - `load_str`
+/// stopped returning `Err` for this input (and built a `World` with an
+/// empty transport network no scenario ever declared). Reverted before
+/// committing.
+#[test]
+fn missing_transport_declaration_is_rejected() {
+    let no_transport = MINI_VALID_SCENARIO.replacen(
+        "  \"sea_zones\": [],\n  \"transport\": {\n    \"nodes\": [\n      { \"id\": \"a_depot\", \"name\": \"A Depot\", \"kind\": \"depot\", \"region\": \"a\" },\n      { \"id\": \"b_depot\", \"name\": \"B Depot\", \"kind\": \"depot\", \"region\": \"b\" },\n      { \"id\": \"c_depot\", \"name\": \"C Depot\", \"kind\": \"depot\", \"region\": \"c\" }\n    ],\n    \"lines\": [\n      { \"from\": \"a_depot\", \"to\": \"b_depot\", \"kind\": \"rail\", \"capacity\": 25.0, \"condition\": 1.0 },\n      { \"from\": \"b_depot\", \"to\": \"c_depot\", \"kind\": \"rail\", \"capacity\": 25.0, \"condition\": 1.0 }\n    ]\n  },\n",
+        "  \"sea_zones\": [],\n",
+        1,
+    );
+    match scenario::load_str(&no_transport) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("transport"), "expected the error to name `transport`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a missing `transport` field, got {other:?}"),
+    }
+}
+
+/// docs/phase9-spec.md §7 Stage 9A: "存在しないノードを指す路線... 明確な
+/// エラーになる" - a line naming a node id nothing declares must be
+/// rejected, distinctly from every other error.
+///
+/// Confirmed this can fail: temporarily removed the `transport_node_ids.
+/// contains(l.to.as_str())` check from `Scenario::validate` (kept only the
+/// `l.from` check) and re-ran - `load_str` no longer returned `Err` at all
+/// for this input, and `Scenario::build_world`'s `transport_node_index_of[..]`
+/// lookup for the dangling `to` id would have panicked instead. Reverted
+/// before committing.
+#[test]
+fn transport_line_with_unknown_node_is_rejected() {
+    let dangling_line = MINI_VALID_SCENARIO.replacen(
+        r#"{ "from": "b_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }"#,
+        r#"{ "from": "b_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "c_depot", "to": "nowhere_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }"#,
+        1,
+    );
+    match scenario::load_str(&dangling_line) {
+        Err(scenario::ScenarioError::UnknownId { id, .. }) => assert_eq!(id, "nowhere_depot"),
+        other => panic!("expected a distinct UnknownId error, got {other:?}"),
+    }
+}
+
+/// docs/phase9-spec.md §7 Stage 9A: "所属地域のないノード... 明確なエラーに
+/// なる" - a `TransportNode` whose `region` names an id nothing declares
+/// must be rejected, distinctly from every other error (`transport::
+/// TransportNode::region`'s doc: every node belongs to exactly one region).
+///
+/// Confirmed this can fail: temporarily removed the `region_ids.contains(n.
+/// region.as_str())` check for transport nodes from `Scenario::validate`
+/// and re-ran - `load_str` no longer returned `Err` for this input, and
+/// `Scenario::build_world`'s `index_of[def.region.as_str()]` lookup for the
+/// dangling region id would have panicked instead. Reverted before
+/// committing.
+#[test]
+fn transport_node_with_unknown_region_is_rejected() {
+    let dangling_region = MINI_VALID_SCENARIO.replacen(
+        r#"{ "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" }"#,
+        r#"{ "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "nowhere" }"#,
+        1,
+    );
+    match scenario::load_str(&dangling_region) {
+        Err(scenario::ScenarioError::UnknownId { id, .. }) => assert_eq!(id, "nowhere"),
+        other => panic!("expected a distinct UnknownId error, got {other:?}"),
+    }
+}
+
+/// Stage 9A's one consistency rule between `Region::port` and the new
+/// node-based representation (docs/phase9-spec.md §1 "港の扱い": "同じ事実
+/// が2か所に別々に存在する状態は作らない", `scenario::ScenarioError::
+/// PortNodeWithoutRegionPort`'s doc): a `Port` node cannot exist for a
+/// region that itself reports no port. `MINI_VALID_SCENARIO`'s region `a`
+/// has `"port": 0.0`, so giving it a `Port` node must be rejected.
+///
+/// Confirmed this can fail: temporarily removed the `region.port <= 0.0`
+/// check (kept construction unconditional) from `Scenario::validate` and
+/// re-ran - `load_str` stopped returning `Err` for this input, silently
+/// accepting a `Port` node for a landlocked region. Reverted before
+/// committing.
+#[test]
+fn port_node_without_region_port_is_rejected() {
+    let phantom_port = MINI_VALID_SCENARIO.replacen(
+        r#"{ "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },"#,
+        r#"{ "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },
+      { "id": "a_port", "name": "A Port", "kind": "port", "region": "a" },"#,
+        1,
+    );
+    match scenario::load_str(&phantom_port) {
+        Err(scenario::ScenarioError::PortNodeWithoutRegionPort { node, region }) => {
+            assert_eq!((node.as_str(), region.as_str()), ("a_port", "a"));
+        }
+        other => panic!("expected a distinct PortNodeWithoutRegionPort error, got {other:?}"),
+    }
+}
+
+/// The converse of `port_node_without_region_port_is_rejected`
+/// (`scenario::ScenarioError::RegionPortWithoutPortNode`'s doc): a region
+/// that reports `port > 0.0` but declares no `Port` node at all must also be
+/// rejected, distinctly - otherwise naval logic (still keyed off
+/// `Region::port` in Stage 9A) and the transport layer could disagree about
+/// whether a region has a port. `MINI_VALID_SCENARIO`'s region `a` starts
+/// with `"port": 0.0` and no `Port` node; giving it a nonzero port without
+/// adding one must fail.
+///
+/// Confirmed this can fail: temporarily removed the new
+/// `regions_with_port_node` loop (the "converse check" block) from
+/// `Scenario::validate` and re-ran - `load_str` stopped returning `Err` for
+/// this input, silently accepting a region whose `port` field and transport
+/// nodes disagree. Reverted before committing.
+#[test]
+fn region_port_without_port_node_is_rejected() {
+    let phantom_region_port = MINI_VALID_SCENARIO.replacen(
+        r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],"#,
+        r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 5.0, "position": [0.0, 0.0],"#,
+        1,
+    );
+    match scenario::load_str(&phantom_region_port) {
+        Err(scenario::ScenarioError::RegionPortWithoutPortNode { region }) => {
+            assert_eq!(region.as_str(), "a");
+        }
+        other => panic!("expected a distinct RegionPortWithoutPortNode error, got {other:?}"),
+    }
+}
+
+/// Every id-keyed collection in this schema rejects a duplicate id
+/// (`region`/`sea zone`/`faction` - see the loops at the top of
+/// `Scenario::validate`); transport nodes must be no exception, since
+/// `Scenario::build_world`'s `transport_node_index_of` map would otherwise
+/// silently collapse two distinct authored nodes onto one `TransportNodeId`.
+///
+/// Confirmed this can fail: temporarily removed the transport-node
+/// duplicate-id loop from `Scenario::validate` and re-ran - `load_str` no
+/// longer returned `Err` for this input. Reverted before committing.
+#[test]
+fn duplicate_transport_node_id_is_rejected() {
+    let duplicate = MINI_VALID_SCENARIO.replacen(
+        r#"{ "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },"#,
+        r#"{ "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },
+      { "id": "b_depot", "name": "B Depot Again", "kind": "depot", "region": "b" },"#,
+        1,
+    );
+    match scenario::load_str(&duplicate) {
+        Err(scenario::ScenarioError::DuplicateId { kind, id }) => {
+            assert_eq!((kind, id.as_str()), ("transport node", "b_depot"));
+        }
+        other => panic!("expected a distinct DuplicateId error, got {other:?}"),
+    }
+}
+
+/// `transport::Condition::new` (docs/conventions.md §1, "不正な値をそもそも
+/// 構築できなくする") is applied at scenario parse time, the same place
+/// `world::DominationShare::new` already is for `victory`'s `share` field
+/// (`parse_victory_condition`) - a `condition` outside `0.0..=1.0` is a hard
+/// `ScenarioError::Schema`, never silently clamped.
+///
+/// Confirmed this can fail: temporarily replaced `Condition::new(condition_
+/// raw).ok_or_else(..)?` in `scenario::parse_transport_line` with
+/// `Condition::new(condition_raw.clamp(0.0, 1.0)).unwrap()` and re-ran -
+/// both assertions below failed (`load_str` stopped returning `Err` for
+/// either value). Reverted before committing.
+#[test]
+fn transport_line_condition_out_of_range_is_rejected() {
+    let too_high = MINI_VALID_SCENARIO.replacen(
+        r#""kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot""#,
+        r#""kind": "rail", "capacity": 25.0, "condition": 1.5 },
+      { "from": "b_depot""#,
+        1,
+    );
+    match scenario::load_str(&too_high) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("condition"), "expected the error to name `condition`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for condition > 1.0, got {other:?}"),
+    }
+
+    let negative = MINI_VALID_SCENARIO.replacen(
+        r#""kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot""#,
+        r#""kind": "rail", "capacity": 25.0, "condition": -0.1 },
+      { "from": "b_depot""#,
+        1,
+    );
+    match scenario::load_str(&negative) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("condition"), "expected the error to name `condition`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a negative condition, got {other:?}"),
+    }
+}
+
+/// `transport::Capacity::new` (docs/conventions.md §1, applied here exactly
+/// as `Condition` already is on the same struct): a negative `capacity` must
+/// be rejected at parse time rather than reaching `TransportLine::capacity`
+/// as a bare negative `f32` - Stage 9B's planned `capacity * condition` flow
+/// limit would otherwise silently corrupt allocation on a negative value.
+///
+/// Confirmed this can fail: temporarily replaced `Capacity::new(capacity_
+/// raw).ok_or_else(..)?` in `scenario::parse_transport_line` with
+/// `Capacity::new(capacity_raw.max(0.0)).unwrap()` and re-ran - the
+/// assertion below failed (`load_str` stopped returning `Err` for a negative
+/// capacity). Reverted before committing.
+#[test]
+fn transport_line_capacity_negative_is_rejected() {
+    let negative = MINI_VALID_SCENARIO.replacen(
+        r#""kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot""#,
+        r#""kind": "rail", "capacity": -1.0, "condition": 1.0 },
+      { "from": "b_depot""#,
+        1,
+    );
+    match scenario::load_str(&negative) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("capacity"), "expected the error to name `capacity`, got {msg:?}");
+        }
+        other => panic!("expected a distinct Schema error for a negative capacity, got {other:?}"),
+    }
+}
+
+/// docs/phase9-spec.md §1 "輸送路線": `Sea` connects a port to a port via a
+/// sea zone. A `sea` line whose endpoints are ordinary `Depot` nodes (as in
+/// `MINI_VALID_SCENARIO`, which has no `Port` node at all) must be rejected,
+/// distinctly from every other error - Stage 9B/9C's blockade and import
+/// logic relies on every `Sea` line actually terminating at a `Port`.
+///
+/// Confirmed this can fail: temporarily removed the `l.kind ==
+/// TransportLineKind::Sea` check block from `Scenario::validate` and re-ran
+/// - `load_str` stopped returning `Err` for this input, silently accepting
+/// a sea line between two depots.
+#[test]
+fn sea_line_between_non_port_nodes_is_rejected() {
+    let sea_between_depots = MINI_VALID_SCENARIO.replacen(
+        r#"{ "from": "a_depot", "to": "b_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },"#,
+        r#"{ "from": "a_depot", "to": "b_depot", "kind": "sea", "capacity": 25.0, "condition": 1.0 },"#,
+        1,
+    );
+    match scenario::load_str(&sea_between_depots) {
+        Err(scenario::ScenarioError::SeaLineNotBetweenPorts { from, to, offending }) => {
+            assert_eq!((from.as_str(), to.as_str(), offending.as_str()), ("a_depot", "b_depot", "a_depot"));
+        }
+        other => panic!("expected a distinct SeaLineNotBetweenPorts error, got {other:?}"),
+    }
+}
+
+/// The three shipped scenarios must all declare (and pass validation with)
+/// a non-empty transport network (docs/phase9-spec.md §3: "すべてのシナリオ
+/// が輸送網を宣言する... フォールバック禁止"), and `japan_hex.json`'s must
+/// carry the `note` documenting it as Stage 9A's provisional placeholder
+/// (`tools/transport_network.py`'s module doc) so nobody downstream mistakes
+/// it for a real-rail-data-derived network before Stage 9C lands.
+#[test]
+fn shipped_scenarios_all_declare_transport_networks() {
+    let mvp = scenario::Scenario::parse(scenario::embedded_mvp_json()).expect("mvp.json parses");
+    mvp.validate().expect("mvp.json's transport network is valid");
+    assert!(!mvp.transport_nodes.is_empty());
+    assert!(!mvp.transport_lines.is_empty());
+
+    for path in ["../../scenarios/japan47.json", "../../scenarios/japan_hex.json"] {
+        let json_text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let scenario = scenario::Scenario::parse(&json_text).unwrap_or_else(|e| panic!("{path} must parse: {e}"));
+        scenario.validate().unwrap_or_else(|e| panic!("{path}'s transport network must validate: {e}"));
+        assert!(!scenario.transport_nodes.is_empty(), "{path} must declare transport nodes");
+        assert!(!scenario.transport_lines.is_empty(), "{path} must declare transport lines");
+    }
+
+    let hex_text = std::fs::read_to_string("../../scenarios/japan_hex.json").expect("japan_hex.json readable");
+    assert!(
+        hex_text.contains("PROVISIONAL"),
+        "japan_hex.json's transport block must say clearly that it is a Stage 9A placeholder, not real rail/port data"
+    );
 }

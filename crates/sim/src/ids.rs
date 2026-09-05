@@ -21,3 +21,4 @@ def_id!(RegionId);
 def_id!(FactionId);
 def_id!(UnitId);
 def_id!(SeaZoneId);
+def_id!(TransportNodeId);

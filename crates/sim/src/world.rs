@@ -9,6 +9,7 @@ use crate::good::{Good, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::military::Unit;
+use crate::transport::{TransportLine, TransportNode};
 
 /// Stage 2D (docs/phase2-spec.md "Stage 2D — 海軍・制海権・海上封鎖"): the two
 /// kinds of terrain a `Unit` can occupy. A land unit is always
@@ -578,6 +579,13 @@ pub struct World {
     /// Stage 2D (docs/phase2-spec.md "海域"): the map's sea zones, separate
     /// from the region graph.
     pub sea_zones: Vec<SeaZone>,
+    /// Stage 9A (docs/phase9-spec.md "1. 層の分離"): the transport network's
+    /// nodes and routes - a layer separate from both `regions` (politics/
+    /// economy) and each region's own `links` (troop movement). Nothing
+    /// reads these yet; `logistics::recompute_supply` still propagates
+    /// supply over `Region::links` exactly as before Stage 9A.
+    pub transport_nodes: Vec<TransportNode>,
+    pub transport_lines: Vec<TransportLine>,
     pub day: u32,
     /// Stage 3B (docs/phase3-spec.md "Stage 3B — 外交関係と条約"): every
     /// pair's `Stance`/`opinion`/treaty grants and the pending-proposal

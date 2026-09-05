@@ -24,6 +24,7 @@ pub mod rng;
 pub mod scenario;
 pub mod sim;
 pub mod trade;
+pub mod transport;
 pub mod world;
 
 #[cfg(test)]

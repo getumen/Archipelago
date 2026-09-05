@@ -23,9 +23,10 @@ use crate::diplomacy::Diplomacy;
 use crate::focus::NationalFocus;
 use crate::good::{ALL_GOODS, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
-use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, TransportNodeId, UnitId};
 use crate::json::{self, Value};
 use crate::military::Unit;
+use crate::transport::{Capacity, Condition, TransportLine, TransportLineKind, TransportNode, TransportNodeKind};
 use crate::world::{DominationShare, Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, VictoryCondition, VictoryDeclaration, World};
 
 /// The embedded default scenario (docs/phase6-spec.md "ファイルは
@@ -157,6 +158,31 @@ pub enum ScenarioError {
     /// so supply could never reach them (docs/phase6-spec.md "グラフが連結
     /// か（孤立地域は補給が届かず、意図しない限り誤り）").
     Disconnected { unreachable: Vec<String> },
+    /// Stage 9A (docs/phase9-spec.md "1. 層の分離"): a transport `Port`
+    /// node's own region reports `Region::port <= 0.0` - the one
+    /// consistency rule Stage 9A keeps between `Region::port` and the new
+    /// node-based representation, so the two can never disagree about
+    /// whether a region has a port at all (`transport::TransportNodeKind::Port`'s
+    /// doc). The converse - a region with a port but no `Port` node yet -
+    /// is not rejected here.
+    PortNodeWithoutRegionPort { node: String, region: String },
+    /// The converse of `PortNodeWithoutRegionPort`, added alongside it in
+    /// Stage 9A (docs/phase9-spec.md §1 "港の扱い": "同じ事実が2か所に別々に
+    /// 存在する状態は作らない"): a region reports `port > 0.0` but declares
+    /// no `Port` node at all, so naval logic (`Region::port`) and the
+    /// transport layer would disagree about whether the region has a port.
+    /// This is validation only - it changes no behaviour and picks no
+    /// source of truth between the two representations. Stage 9B is what
+    /// makes the `Port` node itself the thing blockade/import actually key
+    /// off (`transport::TransportNodeKind::Port`'s doc).
+    RegionPortWithoutPortNode { region: String },
+    /// Stage 9A (docs/phase9-spec.md §1 "輸送路線": "`kind` は... `Sea`
+    /// （港と港を海域経由で結ぶ）"): a `Sea` line names an endpoint whose
+    /// node `kind` isn't `Port`. `Rail`/`Road` are unrestricted - a `Rail`
+    /// line legitimately ends at a `Port` node too (that's how the port
+    /// reaches inland; `tools/transport_network.py`'s module doc), so this
+    /// check is `Sea`-only.
+    SeaLineNotBetweenPorts { from: String, to: String, offending: String },
     /// `regions` or `factions` is an empty array. Every validation loop
     /// below iterates over one or the other, so an empty collection makes
     /// every one of them a no-op and the file "passes" - and then a caller
@@ -203,6 +229,15 @@ impl fmt::Display for ScenarioError {
             }
             ScenarioError::Disconnected { unreachable } => {
                 write!(f, "region graph is not connected: unreachable from the rest of the map: {}", unreachable.join(", "))
+            }
+            ScenarioError::PortNodeWithoutRegionPort { node, region } => {
+                write!(f, "transport node `{node}` is a port, but region `{region}` reports no port (`port <= 0.0`)")
+            }
+            ScenarioError::RegionPortWithoutPortNode { region } => {
+                write!(f, "region `{region}` reports a port (`port > 0.0`) but declares no `port` transport node")
+            }
+            ScenarioError::SeaLineNotBetweenPorts { from, to, offending } => {
+                write!(f, "sea line `{from}` -> `{to}`: node `{offending}` is not a `port` node")
             }
             ScenarioError::Empty { what } => write!(f, "scenario has no {what}"),
         }
@@ -262,6 +297,33 @@ pub struct FactionDef {
     pub regions: Vec<String>,
 }
 
+/// One `TransportNode`, as authored in the scenario file (docs/phase9-spec.md
+/// "輸送ノード"). `region` is a string id, resolved by `build_world` like
+/// every other cross-reference in this file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransportNodeDef {
+    pub id: String,
+    pub name: String,
+    pub kind: TransportNodeKind,
+    pub region: String,
+}
+
+/// One `TransportLine`, as authored in the scenario file (docs/phase9-spec.md
+/// "輸送路線"). Unlike `LinkDef` (kept per-region, mirroring `Region::links`),
+/// this is a flat, undirected edge between two node ids in the scenario's
+/// top-level `transport.lines` array - a transport line has no "owning"
+/// node the way a region link is authored under one region's own list, so
+/// there is no reciprocal-entry rule to check here (`Scenario::validate`'s
+/// doc for what *is* checked).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransportLineDef {
+    pub from: String,
+    pub to: String,
+    pub kind: TransportLineKind,
+    pub capacity: Capacity,
+    pub condition: Condition,
+}
+
 /// One starting alliance bloc (`DiplomacyDef`'s doc). Every faction listed
 /// here starts allied (`Stance::Alliance`) with every other faction in the
 /// same bloc - `id`/`name` exist purely for readability (error messages,
@@ -307,6 +369,13 @@ pub struct DiplomacyDef {
 pub struct Scenario {
     pub regions: Vec<RegionDef>,
     pub sea_zones: Vec<SeaZoneDef>,
+    /// Stage 9A (docs/phase9-spec.md "3. データ", "フォールバック禁止":
+    /// every scenario must declare its own transport network - there is no
+    /// default derived from `regions[].links`). `TransportNodeDef` order
+    /// fixes `TransportNodeId` assignment, the same convention `regions`/
+    /// `sea_zones`/`factions` already use.
+    pub transport_nodes: Vec<TransportNodeDef>,
+    pub transport_lines: Vec<TransportLineDef>,
     pub factions: Vec<FactionDef>,
     pub diplomacy: DiplomacyDef,
     /// This scenario's required, declared victory conditions
@@ -438,6 +507,57 @@ fn parse_faction(v: &Value, path: &str) -> Result<FactionDef, ScenarioError> {
     Ok(FactionDef { id, name, capital, regions })
 }
 
+fn parse_transport_node(v: &Value, path: &str) -> Result<TransportNodeDef, ScenarioError> {
+    let id = require_str(v, path, "id")?;
+    let name = require_str(v, path, "name")?;
+    let kind_key = require_str(v, path, "kind")?;
+    let kind = TransportNodeKind::from_key(&kind_key)
+        .ok_or_else(|| schema_err(format!("`{path}.kind` names unknown transport node kind `{kind_key}`")))?;
+    let region = require_str(v, path, "region")?;
+    Ok(TransportNodeDef { id, name, kind, region })
+}
+
+fn parse_transport_line(v: &Value, path: &str) -> Result<TransportLineDef, ScenarioError> {
+    let from = require_str(v, path, "from")?;
+    let to = require_str(v, path, "to")?;
+    let kind_key = require_str(v, path, "kind")?;
+    let kind = TransportLineKind::from_key(&kind_key)
+        .ok_or_else(|| schema_err(format!("`{path}.kind` names unknown transport line kind `{kind_key}`")))?;
+    let capacity_raw = require_f32(v, path, "capacity")?;
+    let capacity = Capacity::new(capacity_raw)
+        .ok_or_else(|| schema_err(format!("`{path}.capacity` must be non-negative and finite, got {capacity_raw}")))?;
+    let condition_raw = require_f32(v, path, "condition")?;
+    let condition = Condition::new(condition_raw)
+        .ok_or_else(|| schema_err(format!("`{path}.condition` must be between 0.0 and 1.0, got {condition_raw}")))?;
+    Ok(TransportLineDef { from, to, kind, capacity, condition })
+}
+
+/// Parses the scenario's required `transport` field - docs/phase9-spec.md
+/// "3. データ": "すべてのシナリオが輸送網を宣言する... フォールバック禁止。
+/// 輸送網のないシナリオを地域リンクで補うことはしない". A scenario missing
+/// this field entirely (or missing `nodes`/`lines` under it) is a hard
+/// `ScenarioError::Schema`, exactly like every other required top-level
+/// field (`diplomacy`, `victory`) - never an implied empty network.
+fn parse_transport(v: &Value, path: &str) -> Result<(Vec<TransportNodeDef>, Vec<TransportLineDef>), ScenarioError> {
+    let nodes_value = require_object_field(v, path, "nodes")?;
+    let nodes_path = format!("{path}.nodes");
+    let nodes = require_array(nodes_value, &nodes_path)?
+        .iter()
+        .enumerate()
+        .map(|(i, n)| parse_transport_node(n, &format!("{nodes_path}[{i}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let lines_value = require_object_field(v, path, "lines")?;
+    let lines_path = format!("{path}.lines");
+    let lines = require_array(lines_value, &lines_path)?
+        .iter()
+        .enumerate()
+        .map(|(i, l)| parse_transport_line(l, &format!("{lines_path}[{i}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((nodes, lines))
+}
+
 fn parse_bloc(v: &Value, path: &str) -> Result<BlocDef, ScenarioError> {
     let id = require_str(v, path, "id")?;
     let name = require_str(v, path, "name")?;
@@ -521,6 +641,9 @@ impl Scenario {
             .map(|(i, z)| parse_sea_zone(z, &format!("sea_zones[{i}]")))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let transport_value = require_object_field(&root, "$", "transport")?;
+        let (transport_nodes, transport_lines) = parse_transport(transport_value, "transport")?;
+
         let factions_value = require_object_field(&root, "$", "factions")?;
         let factions = require_array(factions_value, "factions")?
             .iter()
@@ -534,7 +657,7 @@ impl Scenario {
         let victory_value = require_object_field(&root, "$", "victory")?;
         let victory = parse_victory(victory_value, "victory")?;
 
-        Ok(Scenario { regions, sea_zones, factions, diplomacy, victory })
+        Ok(Scenario { regions, sea_zones, transport_nodes, transport_lines, factions, diplomacy, victory })
     }
 
     /// Every check from docs/phase6-spec.md's "検証": non-empty, ids exist,
@@ -571,6 +694,12 @@ impl Scenario {
         for fac in &self.factions {
             if !faction_ids.insert(fac.id.as_str()) {
                 return Err(ScenarioError::DuplicateId { kind: "faction", id: fac.id.clone() });
+            }
+        }
+        let mut transport_node_ids = std::collections::BTreeSet::new();
+        for n in &self.transport_nodes {
+            if !transport_node_ids.insert(n.id.as_str()) {
+                return Err(ScenarioError::DuplicateId { kind: "transport node", id: n.id.clone() });
             }
         }
 
@@ -630,6 +759,69 @@ impl Scenario {
             for region in &fac.regions {
                 if !region_ids.contains(region.as_str()) {
                     return Err(ScenarioError::UnknownId { context: format!("faction `{}` regions", fac.id), id: region.clone() });
+                }
+            }
+        }
+
+        // Stage 9A transport network (docs/phase9-spec.md "1. 層の分離",
+        // "3. データ"): every node's `region` must resolve, and a `Port`
+        // node's region must actually report a port - the one place Stage
+        // 9A keeps `Region::port` and the new node-based representation
+        // from disagreeing (`ScenarioError::PortNodeWithoutRegionPort`'s
+        // doc). Every line's `from`/`to` must resolve to a real node.
+        let mut regions_with_port_node = std::collections::BTreeSet::new();
+        for n in &self.transport_nodes {
+            if !region_ids.contains(n.region.as_str()) {
+                return Err(ScenarioError::UnknownId { context: format!("transport node `{}`", n.id), id: n.region.clone() });
+            }
+            if n.kind == TransportNodeKind::Port {
+                let region = self.regions.iter().find(|r| r.id == n.region).expect("dangling region id already rejected above");
+                if region.port <= 0.0 {
+                    return Err(ScenarioError::PortNodeWithoutRegionPort { node: n.id.clone(), region: n.region.clone() });
+                }
+                regions_with_port_node.insert(n.region.as_str());
+            }
+        }
+        // The converse check (`ScenarioError::RegionPortWithoutPortNode`'s
+        // doc): a region that reports `port > 0.0` must declare at least
+        // one `Port` node, so naval logic (still keyed off `Region::port`
+        // in Stage 9A) and the transport layer never disagree about
+        // whether a region has a port at all.
+        for r in &self.regions {
+            if r.port > 0.0 && !regions_with_port_node.contains(r.id.as_str()) {
+                return Err(ScenarioError::RegionPortWithoutPortNode { region: r.id.clone() });
+            }
+        }
+        for l in &self.transport_lines {
+            if !transport_node_ids.contains(l.from.as_str()) {
+                return Err(ScenarioError::UnknownId {
+                    context: format!("transport line `{}` -> `{}`", l.from, l.to),
+                    id: l.from.clone(),
+                });
+            }
+            if !transport_node_ids.contains(l.to.as_str()) {
+                return Err(ScenarioError::UnknownId {
+                    context: format!("transport line `{}` -> `{}`", l.from, l.to),
+                    id: l.to.clone(),
+                });
+            }
+            // docs/phase9-spec.md §1 defines `Sea` as connecting a port to a
+            // port via a sea zone (`ScenarioError::SeaLineNotBetweenPorts`'s
+            // doc) - both endpoints must already be `Port` nodes, checked
+            // now that both are known to resolve. `Rail`/`Road` are left
+            // alone: a `Rail` line ending at a `Port` node is how that port
+            // reaches inland (see the mvp/japan47/japan_hex data itself).
+            if l.kind == TransportLineKind::Sea {
+                for end in [&l.from, &l.to] {
+                    let node =
+                        self.transport_nodes.iter().find(|n| &n.id == end).expect("dangling node id already rejected above");
+                    if node.kind != TransportNodeKind::Port {
+                        return Err(ScenarioError::SeaLineNotBetweenPorts {
+                            from: l.from.clone(),
+                            to: l.to.clone(),
+                            offending: node.id.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -754,6 +946,8 @@ impl Scenario {
             self.sea_zones.iter().enumerate().map(|(i, z)| (z.id.as_str(), i as u32)).collect();
         let faction_index_of: std::collections::HashMap<&str, u32> =
             self.factions.iter().enumerate().map(|(i, f)| (f.id.as_str(), i as u32)).collect();
+        let transport_node_index_of: std::collections::HashMap<&str, u32> =
+            self.transport_nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i as u32)).collect();
 
         let mut owner_of: Vec<FactionId> = vec![FactionId(0); self.regions.len()];
         for (f_idx, fac) in self.factions.iter().enumerate() {
@@ -884,6 +1078,30 @@ impl Scenario {
             }
         }
 
+        let transport_nodes: Vec<TransportNode> = self
+            .transport_nodes
+            .iter()
+            .enumerate()
+            .map(|(i, def)| TransportNode {
+                id: TransportNodeId(i as u32),
+                name: def.name.clone(),
+                kind: def.kind,
+                region: RegionId(index_of[def.region.as_str()]),
+            })
+            .collect();
+
+        let transport_lines: Vec<TransportLine> = self
+            .transport_lines
+            .iter()
+            .map(|def| TransportLine {
+                from: TransportNodeId(transport_node_index_of[def.from.as_str()]),
+                to: TransportNodeId(transport_node_index_of[def.to.as_str()]),
+                kind: def.kind,
+                capacity: def.capacity,
+                condition: def.condition,
+            })
+            .collect();
+
         let supply: Vec<f32> = regions.iter().map(Region::supply_source).collect();
 
         // Scenario-scoped starting diplomacy (this type's own doc): every
@@ -900,7 +1118,18 @@ impl Scenario {
             .collect();
         let diplomacy = Diplomacy::new_with_blocs(self.factions.len(), &blocs);
 
-        World { regions, factions, units, supply, sea_zones, day: 0, diplomacy, victory: self.victory.clone() }
+        World {
+            regions,
+            factions,
+            units,
+            supply,
+            sea_zones,
+            transport_nodes,
+            transport_lines,
+            day: 0,
+            diplomacy,
+            victory: self.victory.clone(),
+        }
     }
 
     /// The inverse of `parse`: renders this scenario back to the same JSON
@@ -955,6 +1184,41 @@ impl Scenario {
                 })
                 .collect(),
         );
+        let transport = Value::obj(vec![
+            (
+                "nodes",
+                Value::arr(
+                    self.transport_nodes
+                        .iter()
+                        .map(|n| {
+                            Value::obj(vec![
+                                ("id", Value::str(n.id.clone())),
+                                ("name", Value::str(n.name.clone())),
+                                ("kind", Value::str(n.kind.key())),
+                                ("region", Value::str(n.region.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "lines",
+                Value::arr(
+                    self.transport_lines
+                        .iter()
+                        .map(|l| {
+                            Value::obj(vec![
+                                ("from", Value::str(l.from.clone())),
+                                ("to", Value::str(l.to.clone())),
+                                ("kind", Value::str(l.kind.key())),
+                                ("capacity", Value::f32num(l.capacity.get())),
+                                ("condition", Value::f32num(l.condition.get())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]);
         let factions = Value::arr(
             self.factions
                 .iter()
@@ -999,6 +1263,7 @@ impl Scenario {
         Value::obj(vec![
             ("regions", regions),
             ("sea_zones", sea_zones),
+            ("transport", transport),
             ("factions", factions),
             ("diplomacy", diplomacy),
             ("victory", victory),

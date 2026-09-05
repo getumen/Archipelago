@@ -161,6 +161,21 @@ mod tests {
           "links": [ { "to": "b", "kind": "rail" } ] }
       ],
       "sea_zones": [],
+      "transport": {
+        "nodes": [
+          { "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },
+          { "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },
+          { "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" },
+          { "id": "d_depot", "name": "D Depot", "kind": "depot", "region": "d" },
+          { "id": "e_depot", "name": "E Depot", "kind": "depot", "region": "e" }
+        ],
+        "lines": [
+          { "from": "a_depot", "to": "b_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+          { "from": "a_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+          { "from": "a_depot", "to": "d_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+          { "from": "b_depot", "to": "e_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }
+        ]
+      },
       "factions": [
         { "id": "f1", "name": "F1", "capital": "a", "regions": ["a", "b", "c", "d", "e"] }
       ],

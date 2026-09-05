@@ -1960,25 +1960,1442 @@
       ]
     }
   ],
-
   "diplomacy": {
     "blocs": [
       {
         "id": "touhou_bloc",
         "name": "東日本ブロック",
-        "factions": ["hokuto_rengou", "kanto_fu", "chubu_domei"]
+        "factions": [
+          "hokuto_rengou",
+          "kanto_fu",
+          "chubu_domei"
+        ]
       },
       {
         "id": "seinihon_bloc",
         "name": "西日本ブロック",
-        "factions": ["kinki_fu", "seinihon_domei", "shikoku_rengou"]
+        "factions": [
+          "kinki_fu",
+          "seinihon_domei",
+          "shikoku_rengou"
+        ]
       }
     ]
   },
-
   "victory": [
-    { "type": "conquest" },
-    { "type": "coalition" },
-    { "type": "domination", "share": 0.75 }
-  ]
+    {
+      "type": "conquest"
+    },
+    {
+      "type": "coalition"
+    },
+    {
+      "type": "domination",
+      "share": 0.75
+    }
+  ],
+  "transport": {
+    "nodes": [
+      {
+        "id": "hokkaido_depot",
+        "name": "北海道 補給拠点",
+        "kind": "depot",
+        "region": "hokkaido"
+      },
+      {
+        "id": "hokkaido_port",
+        "name": "北海道 港",
+        "kind": "port",
+        "region": "hokkaido"
+      },
+      {
+        "id": "aomori_depot",
+        "name": "青森県 補給拠点",
+        "kind": "depot",
+        "region": "aomori"
+      },
+      {
+        "id": "aomori_port",
+        "name": "青森県 港",
+        "kind": "port",
+        "region": "aomori"
+      },
+      {
+        "id": "iwate_depot",
+        "name": "岩手県 補給拠点",
+        "kind": "depot",
+        "region": "iwate"
+      },
+      {
+        "id": "iwate_port",
+        "name": "岩手県 港",
+        "kind": "port",
+        "region": "iwate"
+      },
+      {
+        "id": "akita_depot",
+        "name": "秋田県 補給拠点",
+        "kind": "depot",
+        "region": "akita"
+      },
+      {
+        "id": "akita_port",
+        "name": "秋田県 港",
+        "kind": "port",
+        "region": "akita"
+      },
+      {
+        "id": "miyagi_depot",
+        "name": "宮城県 補給拠点",
+        "kind": "depot",
+        "region": "miyagi"
+      },
+      {
+        "id": "miyagi_port",
+        "name": "宮城県 港",
+        "kind": "port",
+        "region": "miyagi"
+      },
+      {
+        "id": "yamagata_depot",
+        "name": "山形県 補給拠点",
+        "kind": "depot",
+        "region": "yamagata"
+      },
+      {
+        "id": "yamagata_port",
+        "name": "山形県 港",
+        "kind": "port",
+        "region": "yamagata"
+      },
+      {
+        "id": "fukushima_depot",
+        "name": "福島県 補給拠点",
+        "kind": "depot",
+        "region": "fukushima"
+      },
+      {
+        "id": "fukushima_port",
+        "name": "福島県 港",
+        "kind": "port",
+        "region": "fukushima"
+      },
+      {
+        "id": "ibaraki_depot",
+        "name": "茨城県 補給拠点",
+        "kind": "depot",
+        "region": "ibaraki"
+      },
+      {
+        "id": "ibaraki_port",
+        "name": "茨城県 港",
+        "kind": "port",
+        "region": "ibaraki"
+      },
+      {
+        "id": "tochigi_depot",
+        "name": "栃木県 補給拠点",
+        "kind": "depot",
+        "region": "tochigi"
+      },
+      {
+        "id": "gunma_depot",
+        "name": "群馬県 補給拠点",
+        "kind": "depot",
+        "region": "gunma"
+      },
+      {
+        "id": "saitama_depot",
+        "name": "埼玉県 補給拠点",
+        "kind": "depot",
+        "region": "saitama"
+      },
+      {
+        "id": "chiba_depot",
+        "name": "千葉県 補給拠点",
+        "kind": "depot",
+        "region": "chiba"
+      },
+      {
+        "id": "chiba_port",
+        "name": "千葉県 港",
+        "kind": "port",
+        "region": "chiba"
+      },
+      {
+        "id": "tokyo_depot",
+        "name": "東京都 補給拠点",
+        "kind": "depot",
+        "region": "tokyo"
+      },
+      {
+        "id": "tokyo_port",
+        "name": "東京都 港",
+        "kind": "port",
+        "region": "tokyo"
+      },
+      {
+        "id": "kanagawa_depot",
+        "name": "神奈川県 補給拠点",
+        "kind": "depot",
+        "region": "kanagawa"
+      },
+      {
+        "id": "kanagawa_port",
+        "name": "神奈川県 港",
+        "kind": "port",
+        "region": "kanagawa"
+      },
+      {
+        "id": "niigata_depot",
+        "name": "新潟県 補給拠点",
+        "kind": "depot",
+        "region": "niigata"
+      },
+      {
+        "id": "niigata_port",
+        "name": "新潟県 港",
+        "kind": "port",
+        "region": "niigata"
+      },
+      {
+        "id": "toyama_depot",
+        "name": "富山県 補給拠点",
+        "kind": "depot",
+        "region": "toyama"
+      },
+      {
+        "id": "toyama_port",
+        "name": "富山県 港",
+        "kind": "port",
+        "region": "toyama"
+      },
+      {
+        "id": "ishikawa_depot",
+        "name": "石川県 補給拠点",
+        "kind": "depot",
+        "region": "ishikawa"
+      },
+      {
+        "id": "ishikawa_port",
+        "name": "石川県 港",
+        "kind": "port",
+        "region": "ishikawa"
+      },
+      {
+        "id": "fukui_depot",
+        "name": "福井県 補給拠点",
+        "kind": "depot",
+        "region": "fukui"
+      },
+      {
+        "id": "fukui_port",
+        "name": "福井県 港",
+        "kind": "port",
+        "region": "fukui"
+      },
+      {
+        "id": "yamanashi_depot",
+        "name": "山梨県 補給拠点",
+        "kind": "depot",
+        "region": "yamanashi"
+      },
+      {
+        "id": "nagano_depot",
+        "name": "長野県 補給拠点",
+        "kind": "depot",
+        "region": "nagano"
+      },
+      {
+        "id": "gifu_depot",
+        "name": "岐阜県 補給拠点",
+        "kind": "depot",
+        "region": "gifu"
+      },
+      {
+        "id": "shizuoka_depot",
+        "name": "静岡県 補給拠点",
+        "kind": "depot",
+        "region": "shizuoka"
+      },
+      {
+        "id": "shizuoka_port",
+        "name": "静岡県 港",
+        "kind": "port",
+        "region": "shizuoka"
+      },
+      {
+        "id": "aichi_depot",
+        "name": "愛知県 補給拠点",
+        "kind": "depot",
+        "region": "aichi"
+      },
+      {
+        "id": "aichi_port",
+        "name": "愛知県 港",
+        "kind": "port",
+        "region": "aichi"
+      },
+      {
+        "id": "mie_depot",
+        "name": "三重県 補給拠点",
+        "kind": "depot",
+        "region": "mie"
+      },
+      {
+        "id": "mie_port",
+        "name": "三重県 港",
+        "kind": "port",
+        "region": "mie"
+      },
+      {
+        "id": "shiga_depot",
+        "name": "滋賀県 補給拠点",
+        "kind": "depot",
+        "region": "shiga"
+      },
+      {
+        "id": "kyoto_depot",
+        "name": "京都府 補給拠点",
+        "kind": "depot",
+        "region": "kyoto"
+      },
+      {
+        "id": "kyoto_port",
+        "name": "京都府 港",
+        "kind": "port",
+        "region": "kyoto"
+      },
+      {
+        "id": "osaka_depot",
+        "name": "大阪府 補給拠点",
+        "kind": "depot",
+        "region": "osaka"
+      },
+      {
+        "id": "osaka_port",
+        "name": "大阪府 港",
+        "kind": "port",
+        "region": "osaka"
+      },
+      {
+        "id": "hyogo_depot",
+        "name": "兵庫県 補給拠点",
+        "kind": "depot",
+        "region": "hyogo"
+      },
+      {
+        "id": "hyogo_port",
+        "name": "兵庫県 港",
+        "kind": "port",
+        "region": "hyogo"
+      },
+      {
+        "id": "nara_depot",
+        "name": "奈良県 補給拠点",
+        "kind": "depot",
+        "region": "nara"
+      },
+      {
+        "id": "wakayama_depot",
+        "name": "和歌山県 補給拠点",
+        "kind": "depot",
+        "region": "wakayama"
+      },
+      {
+        "id": "wakayama_port",
+        "name": "和歌山県 港",
+        "kind": "port",
+        "region": "wakayama"
+      },
+      {
+        "id": "tottori_depot",
+        "name": "鳥取県 補給拠点",
+        "kind": "depot",
+        "region": "tottori"
+      },
+      {
+        "id": "tottori_port",
+        "name": "鳥取県 港",
+        "kind": "port",
+        "region": "tottori"
+      },
+      {
+        "id": "shimane_depot",
+        "name": "島根県 補給拠点",
+        "kind": "depot",
+        "region": "shimane"
+      },
+      {
+        "id": "shimane_port",
+        "name": "島根県 港",
+        "kind": "port",
+        "region": "shimane"
+      },
+      {
+        "id": "okayama_depot",
+        "name": "岡山県 補給拠点",
+        "kind": "depot",
+        "region": "okayama"
+      },
+      {
+        "id": "okayama_port",
+        "name": "岡山県 港",
+        "kind": "port",
+        "region": "okayama"
+      },
+      {
+        "id": "hiroshima_depot",
+        "name": "広島県 補給拠点",
+        "kind": "depot",
+        "region": "hiroshima"
+      },
+      {
+        "id": "hiroshima_port",
+        "name": "広島県 港",
+        "kind": "port",
+        "region": "hiroshima"
+      },
+      {
+        "id": "yamaguchi_depot",
+        "name": "山口県 補給拠点",
+        "kind": "depot",
+        "region": "yamaguchi"
+      },
+      {
+        "id": "yamaguchi_port",
+        "name": "山口県 港",
+        "kind": "port",
+        "region": "yamaguchi"
+      },
+      {
+        "id": "tokushima_depot",
+        "name": "徳島県 補給拠点",
+        "kind": "depot",
+        "region": "tokushima"
+      },
+      {
+        "id": "tokushima_port",
+        "name": "徳島県 港",
+        "kind": "port",
+        "region": "tokushima"
+      },
+      {
+        "id": "kagawa_depot",
+        "name": "香川県 補給拠点",
+        "kind": "depot",
+        "region": "kagawa"
+      },
+      {
+        "id": "kagawa_port",
+        "name": "香川県 港",
+        "kind": "port",
+        "region": "kagawa"
+      },
+      {
+        "id": "ehime_depot",
+        "name": "愛媛県 補給拠点",
+        "kind": "depot",
+        "region": "ehime"
+      },
+      {
+        "id": "ehime_port",
+        "name": "愛媛県 港",
+        "kind": "port",
+        "region": "ehime"
+      },
+      {
+        "id": "kochi_depot",
+        "name": "高知県 補給拠点",
+        "kind": "depot",
+        "region": "kochi"
+      },
+      {
+        "id": "kochi_port",
+        "name": "高知県 港",
+        "kind": "port",
+        "region": "kochi"
+      },
+      {
+        "id": "fukuoka_depot",
+        "name": "福岡県 補給拠点",
+        "kind": "depot",
+        "region": "fukuoka"
+      },
+      {
+        "id": "fukuoka_port",
+        "name": "福岡県 港",
+        "kind": "port",
+        "region": "fukuoka"
+      },
+      {
+        "id": "saga_depot",
+        "name": "佐賀県 補給拠点",
+        "kind": "depot",
+        "region": "saga"
+      },
+      {
+        "id": "saga_port",
+        "name": "佐賀県 港",
+        "kind": "port",
+        "region": "saga"
+      },
+      {
+        "id": "nagasaki_depot",
+        "name": "長崎県 補給拠点",
+        "kind": "depot",
+        "region": "nagasaki"
+      },
+      {
+        "id": "nagasaki_port",
+        "name": "長崎県 港",
+        "kind": "port",
+        "region": "nagasaki"
+      },
+      {
+        "id": "kumamoto_depot",
+        "name": "熊本県 補給拠点",
+        "kind": "depot",
+        "region": "kumamoto"
+      },
+      {
+        "id": "kumamoto_port",
+        "name": "熊本県 港",
+        "kind": "port",
+        "region": "kumamoto"
+      },
+      {
+        "id": "oita_depot",
+        "name": "大分県 補給拠点",
+        "kind": "depot",
+        "region": "oita"
+      },
+      {
+        "id": "oita_port",
+        "name": "大分県 港",
+        "kind": "port",
+        "region": "oita"
+      },
+      {
+        "id": "miyazaki_depot",
+        "name": "宮崎県 補給拠点",
+        "kind": "depot",
+        "region": "miyazaki"
+      },
+      {
+        "id": "miyazaki_port",
+        "name": "宮崎県 港",
+        "kind": "port",
+        "region": "miyazaki"
+      },
+      {
+        "id": "kagoshima_depot",
+        "name": "鹿児島県 補給拠点",
+        "kind": "depot",
+        "region": "kagoshima"
+      },
+      {
+        "id": "kagoshima_port",
+        "name": "鹿児島県 港",
+        "kind": "port",
+        "region": "kagoshima"
+      },
+      {
+        "id": "okinawa_depot",
+        "name": "沖縄県 補給拠点",
+        "kind": "depot",
+        "region": "okinawa"
+      },
+      {
+        "id": "okinawa_port",
+        "name": "沖縄県 港",
+        "kind": "port",
+        "region": "okinawa"
+      }
+    ],
+    "lines": [
+      {
+        "from": "hokkaido_depot",
+        "to": "hokkaido_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aomori_depot",
+        "to": "aomori_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "iwate_depot",
+        "to": "iwate_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "akita_depot",
+        "to": "akita_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyagi_depot",
+        "to": "miyagi_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamagata_depot",
+        "to": "yamagata_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukushima_depot",
+        "to": "fukushima_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ibaraki_depot",
+        "to": "ibaraki_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chiba_depot",
+        "to": "chiba_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokyo_depot",
+        "to": "tokyo_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanagawa_depot",
+        "to": "kanagawa_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "niigata_depot",
+        "to": "niigata_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "toyama_depot",
+        "to": "toyama_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ishikawa_depot",
+        "to": "ishikawa_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukui_depot",
+        "to": "fukui_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shizuoka_depot",
+        "to": "shizuoka_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aichi_depot",
+        "to": "aichi_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "mie_depot",
+        "to": "mie_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyoto_depot",
+        "to": "kyoto_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "osaka_depot",
+        "to": "osaka_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hyogo_depot",
+        "to": "hyogo_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "wakayama_depot",
+        "to": "wakayama_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tottori_depot",
+        "to": "tottori_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shimane_depot",
+        "to": "shimane_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "okayama_depot",
+        "to": "okayama_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hiroshima_depot",
+        "to": "hiroshima_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamaguchi_depot",
+        "to": "yamaguchi_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokushima_depot",
+        "to": "tokushima_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kagawa_depot",
+        "to": "kagawa_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ehime_depot",
+        "to": "ehime_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kochi_depot",
+        "to": "kochi_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukuoka_depot",
+        "to": "fukuoka_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saga_depot",
+        "to": "saga_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nagasaki_depot",
+        "to": "nagasaki_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kumamoto_depot",
+        "to": "kumamoto_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "oita_depot",
+        "to": "oita_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyazaki_depot",
+        "to": "miyazaki_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kagoshima_depot",
+        "to": "kagoshima_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "okinawa_depot",
+        "to": "okinawa_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hokkaido_port",
+        "to": "aomori_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aomori_depot",
+        "to": "iwate_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aomori_depot",
+        "to": "akita_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "iwate_depot",
+        "to": "akita_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "iwate_depot",
+        "to": "miyagi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "akita_depot",
+        "to": "yamagata_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyagi_depot",
+        "to": "yamagata_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyagi_depot",
+        "to": "fukushima_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamagata_depot",
+        "to": "fukushima_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamagata_depot",
+        "to": "niigata_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukushima_depot",
+        "to": "niigata_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukushima_depot",
+        "to": "gunma_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukushima_depot",
+        "to": "tochigi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukushima_depot",
+        "to": "ibaraki_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ibaraki_depot",
+        "to": "tochigi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ibaraki_depot",
+        "to": "saitama_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ibaraki_depot",
+        "to": "chiba_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tochigi_depot",
+        "to": "gunma_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tochigi_depot",
+        "to": "saitama_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gunma_depot",
+        "to": "saitama_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gunma_depot",
+        "to": "niigata_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gunma_depot",
+        "to": "nagano_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saitama_depot",
+        "to": "chiba_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saitama_depot",
+        "to": "tokyo_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saitama_depot",
+        "to": "yamanashi_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chiba_depot",
+        "to": "tokyo_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokyo_depot",
+        "to": "kanagawa_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokyo_depot",
+        "to": "yamanashi_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanagawa_depot",
+        "to": "yamanashi_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanagawa_depot",
+        "to": "shizuoka_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "niigata_depot",
+        "to": "toyama_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "niigata_depot",
+        "to": "nagano_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "toyama_depot",
+        "to": "ishikawa_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "toyama_depot",
+        "to": "gifu_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "toyama_depot",
+        "to": "nagano_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ishikawa_depot",
+        "to": "fukui_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ishikawa_depot",
+        "to": "gifu_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukui_depot",
+        "to": "gifu_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukui_depot",
+        "to": "shiga_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukui_depot",
+        "to": "kyoto_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamanashi_depot",
+        "to": "shizuoka_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamanashi_depot",
+        "to": "nagano_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nagano_depot",
+        "to": "gifu_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nagano_depot",
+        "to": "shizuoka_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gifu_depot",
+        "to": "shiga_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gifu_depot",
+        "to": "aichi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gifu_depot",
+        "to": "mie_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shizuoka_depot",
+        "to": "aichi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aichi_depot",
+        "to": "mie_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "mie_depot",
+        "to": "shiga_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "mie_depot",
+        "to": "nara_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "mie_depot",
+        "to": "wakayama_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shiga_depot",
+        "to": "kyoto_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyoto_depot",
+        "to": "osaka_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyoto_depot",
+        "to": "nara_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyoto_depot",
+        "to": "hyogo_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "osaka_depot",
+        "to": "nara_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "osaka_depot",
+        "to": "wakayama_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "osaka_depot",
+        "to": "hyogo_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hyogo_depot",
+        "to": "okayama_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hyogo_depot",
+        "to": "tottori_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hyogo_port",
+        "to": "tokushima_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nara_depot",
+        "to": "wakayama_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tottori_depot",
+        "to": "okayama_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tottori_depot",
+        "to": "shimane_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shimane_depot",
+        "to": "hiroshima_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shimane_depot",
+        "to": "yamaguchi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "okayama_depot",
+        "to": "hiroshima_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "okayama_port",
+        "to": "kagawa_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hiroshima_depot",
+        "to": "yamaguchi_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hiroshima_port",
+        "to": "ehime_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamaguchi_depot",
+        "to": "fukuoka_depot",
+        "kind": "rail",
+        "capacity": 8.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokushima_depot",
+        "to": "kagawa_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokushima_depot",
+        "to": "kochi_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokushima_depot",
+        "to": "ehime_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kagawa_depot",
+        "to": "ehime_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ehime_depot",
+        "to": "kochi_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukuoka_depot",
+        "to": "saga_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukuoka_depot",
+        "to": "oita_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukuoka_depot",
+        "to": "kumamoto_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saga_depot",
+        "to": "nagasaki_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kumamoto_depot",
+        "to": "oita_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kumamoto_depot",
+        "to": "miyazaki_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kumamoto_depot",
+        "to": "kagoshima_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "oita_depot",
+        "to": "miyazaki_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyazaki_depot",
+        "to": "kagoshima_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kagoshima_port",
+        "to": "okinawa_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      }
+    ]
+  }
 }
