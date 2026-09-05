@@ -16,6 +16,20 @@
 //! `--replay` do, applies to a live game with no `--screenshot` in sight,
 //! and is listed in the ordinary usage line below rather than the
 //! debug/screenshot block.
+//!
+//! **`--replay` is layer-scoped.** A `--replay <path>` file can declare, via
+//! its own `layers` field (`archipelago_game::action_codec::read_replay`'s
+//! own doc), which `archipelago_sim::action::Layer`s it drives for the
+//! played faction; every layer it leaves out goes to a fresh AI instead
+//! (`archipelago_game::sim_driver::Replay`/`build_replay_controller`). A
+//! plain recording (whatever `--record` has always produced, no `layers`
+//! field at all) still replays the whole faction exactly as before - that
+//! is this mechanism's degenerate, unscoped case, not a separate one. This
+//! is also why `--delegate-military` and `--replay` cannot be combined: the
+//! file's own declared scope is now how a replayed faction hands
+//! `Layer::Military` to the AI, so the flag would either restate what the
+//! file already says or, if the two disagreed, be silently unable to do
+//! anything at all (see the rejection below).
 use archipelago_game::app::{PlayConfig, ScreenshotConfig, ScreenshotTrigger};
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::world::World;
@@ -28,7 +42,13 @@ fn print_usage_and_exit(msg: &str) -> ! {
          [--delegate-military] [--cjk-font <path>]\n\
          \n\
          --delegate-military: hand the entire military (orders and recruitment) to the AI \
-         for the whole game, so you can just run the economy/diplomacy - requires --play.\n\
+         for the whole game, so you can just run the economy/diplomacy - requires --play, \
+         cannot be combined with --replay.\n\
+         \n\
+         --replay <path>: a plain recording (from --record) replays the whole faction, exactly \
+         as always. A file with its own top-level {{\"layers\": [...], \"days\": [...]}} instead \
+         drives only the named layers (\"military\"/\"economy\"/\"grand_strategy\"/\"diplomacy\") \
+         and lets the AI decide the rest.\n\
          \n\
          debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames> | --screenshot-at-day <day>] \
@@ -281,17 +301,34 @@ fn main() {
     if args.delegate_military && args.play.is_none() {
         print_usage_and_exit("--delegate-military requires --play <faction> to say which faction's military to delegate");
     }
+    // A replay declares which `Layer`s it drives in the file itself
+    // (`archipelago_game::action_codec::read_replay`'s own doc) - Military
+    // included, if the replay wants it. `--delegate-military` only ever
+    // reaches a live `HumanAgent` controller (`PlayConfig::delegate_military`'s
+    // own doc): combined with `--replay` it would either duplicate what the
+    // file already declares or, if the two disagreed, silently do nothing at
+    // all (`SimDriver::delegate_military` is a no-op against a
+    // `Controller::Replay`) - both outcomes are exactly the silent-fallback
+    // shape docs/conventions.md forbids, so this is rejected outright rather
+    // than left to quietly do the wrong thing.
+    if args.delegate_military && args.replay.is_some() {
+        print_usage_and_exit(
+            "--delegate-military cannot be combined with --replay - a replay's own file declares which layers \
+             (Military included) it drives; leave Military out of that declaration instead",
+        );
+    }
 
     let play = args.play.as_deref().map(|v| resolve_faction(&world, v));
-    let replay_days = args.replay.as_deref().map(|path| {
-        archipelago_game::action_codec::read_record(std::path::Path::new(path)).unwrap_or_else(|e| {
+    let replay = args.replay.as_deref().map(|path| {
+        let (layers, days) = archipelago_game::action_codec::read_replay(std::path::Path::new(path)).unwrap_or_else(|e| {
             eprintln!("error: could not load --replay {path}: {e}");
             std::process::exit(1);
-        })
+        });
+        archipelago_game::sim_driver::Replay { layers, days }
     });
 
     let play_config =
-        play.map(|player| PlayConfig { player, record: args.record.clone(), replay: replay_days, delegate_military: args.delegate_military });
+        play.map(|player| PlayConfig { player, record: args.record.clone(), replay, delegate_military: args.delegate_military });
 
     let debug_camera_region = args.debug_camera_region.as_deref().map(|v| resolve_region(&world, v));
     let debug_select_region = args.debug_select_region.as_deref().map(|v| resolve_region(&world, v));

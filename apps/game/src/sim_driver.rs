@@ -42,9 +42,27 @@
 //! run reproduces them from that recording via `ReplayAgent` with no
 //! delegation-specific replay logic at all - see
 //! `tests::delegated_play_replays_identically`.
+//!
+//! **Layer-scoped replay** generalizes that same idea to `--replay` itself:
+//! a recording can declare, via `Replay::layers`, which `Layer`s it drives
+//! for the played faction - a scripted economy/diplomacy with the AI
+//! fighting the war, say - and `build_replay_controller` hands every layer
+//! it leaves out to a fresh `archipelago_agents::default_heuristic_agent`,
+//! composed through `archipelago_agents::CompositeAgent`. This is the exact
+//! same routing primitive `HumanAgent`'s whole-military delegation already
+//! uses (one caller passes `[Layer::Military]` to a live `HumanAgent`,
+//! the other passes an arbitrary `Layer` subset to a `ReplayAgent`) - not a
+//! second, unrelated mechanism invented alongside it. Because of that,
+//! `--delegate-military` and `--replay` are no longer combined at all
+//! (`main.rs`'s own doc): a replay's own declared scope is now how a
+//! scripted faction hands `Layer::Military` to the AI. A plain, unscoped
+//! recording (`ALL_LAYERS`, everything `--record` has ever produced) is
+//! this mechanism's degenerate case, not a separate code path - see
+//! `build_replay_controller`'s own doc for why that reproduces today's
+//! full-scope `--replay` byte-for-byte.
 
-use archipelago_agents::HumanAgent;
-use archipelago_sim::action::{Action, ActionError};
+use archipelago_agents::{CompositeAgent, HumanAgent};
+use archipelago_sim::action::{Action, ActionError, Layer, ALL_LAYERS};
 use archipelago_sim::agent::Agent;
 use archipelago_sim::event::Event;
 use archipelago_sim::ids::FactionId;
@@ -53,14 +71,15 @@ use archipelago_sim::sim::{Outcome, Simulation};
 use archipelago_sim::world::World;
 
 /// A `Vec<Action>` per day, replayed back in order - the in-memory shape of
-/// a `--record` file once `crate::action_codec::read_record` has parsed it.
-/// `decide()` never invents anything beyond what's here: running past the
-/// end of the list (a replay driven for more days than were recorded) just
-/// returns an empty `Vec` for every subsequent day, rather than panicking -
-/// harmless in practice since a replay of a *complete* recording always
-/// stops on the same day the original run did (same seed, same actions each
-/// day => byte-identical evolution => identical `Outcome`), so this only
-/// ever matters for a deliberately-truncated recording.
+/// a `--record` file once `crate::action_codec::read_record`/`read_replay`
+/// has parsed it. `decide()` never invents anything beyond what's here:
+/// running past the end of the list (a replay driven for more days than
+/// were recorded) just returns an empty `Vec` for every subsequent day,
+/// rather than panicking - harmless in practice since a replay of a
+/// *complete* recording always stops on the same day the original run did
+/// (same seed, same actions each day => byte-identical evolution =>
+/// identical `Outcome`), so this only ever matters for a
+/// deliberately-truncated recording.
 struct ReplayAgent {
     days: Vec<Vec<Action>>,
     cursor: usize,
@@ -84,13 +103,60 @@ impl Agent for ReplayAgent {
     }
 }
 
+/// A `--replay` recording plus which `Layer`s it claims for the played
+/// faction (`crate::action_codec::read_replay`'s own doc for the two file
+/// shapes this can come from). `layers == ALL_LAYERS` reproduces exactly
+/// what `--replay` has always done - the whole faction scripted, nothing
+/// left for an AI to decide; anything narrower hands every `Layer` *not*
+/// listed here to a fresh `archipelago_agents::default_heuristic_agent` for
+/// this same faction (`build_replay_controller`'s own doc), the same
+/// `archipelago_agents::CompositeAgent` routing primitive
+/// `archipelago_agents::human::HumanAgent`'s own military delegation is
+/// built on - not a second, unrelated mechanism.
+///
+/// `layers` is never inferred from `days` - a day with no diplomacy action
+/// in it must stay distinguishable from a replay that never claimed
+/// `Layer::Diplomacy` at all, which is exactly the distinction inferring
+/// from content could never draw (docs/conventions.md's no-fallback
+/// principle).
+#[derive(Clone)]
+pub struct Replay {
+    pub layers: Vec<Layer>,
+    pub days: Vec<Vec<Action>>,
+}
+
+/// Builds the `Agent` that drives `faction`'s `Controller::Replay` slot:
+/// `replay.days` through a `ReplayAgent` claiming exactly `replay.layers`,
+/// composed with a fresh `default_heuristic_agent` claiming every layer
+/// `replay.layers` left out, via `CompositeAgent` - precisely the routing
+/// primitive `HumanAgent`'s whole-military delegation already uses
+/// (`archipelago_agents::human`'s own doc), applied here to an arbitrary
+/// `Layer` subset instead of `Layer::Military` alone. When `replay.layers`
+/// is `ALL_LAYERS` no second route is even added (there is nothing left for
+/// it to claim) and the single `CompositeAgent` route around `ReplayAgent`
+/// filters nothing out - byte-identical output to a bare `ReplayAgent`, so
+/// today's full-scope `--replay` behavior is this function's degenerate
+/// case, not a separate code path.
+fn build_replay_controller(faction: FactionId, replay: Replay) -> Box<dyn Agent + Send + Sync> {
+    let mut composite = CompositeAgent::new(faction).route(replay.layers.clone(), Box::new(ReplayAgent::new(replay.days)));
+    let remaining: Vec<Layer> = ALL_LAYERS.into_iter().filter(|l| !replay.layers.contains(l)).collect();
+    if !remaining.is_empty() {
+        composite = composite.route(remaining, Box::new(archipelago_agents::default_heuristic_agent(faction.index())));
+    }
+    Box::new(composite)
+}
+
 /// Which kind of `Agent` drives one faction's slot in `SimDriver::
 /// controllers` - see this module's own doc for why exactly one of these
-/// may ever be `Human`/`Replay`.
+/// may ever be `Human`/`Replay`. `Replay` is a boxed trait object rather
+/// than a bare `ReplayAgent` because a layer-scoped replay is actually a
+/// `CompositeAgent` wrapping one (`build_replay_controller`) - `tick`'s own
+/// dispatch only ever needs `Agent::decide`, so nothing here has to know
+/// which of the two it actually is.
 enum Controller {
     Ai(Box<dyn Agent + Send + Sync>),
     Human(HumanAgent),
-    Replay(ReplayAgent),
+    Replay(Box<dyn Agent + Send + Sync>),
 }
 
 /// Owns the `Simulation` plus one `Controller` per faction.
@@ -142,21 +208,24 @@ impl SimDriver {
     }
 
     /// As `new`, but `player`, if given, is driven by a `HumanAgent` (fed
-    /// via `push_human_action`) - or, if `replay` is also given, by a
-    /// `ReplayAgent` fed from that pre-parsed `--replay` recording instead,
-    /// with no live input accepted for that faction at all. Every other
-    /// faction is `HeuristicAgent`, exactly as `new`.
-    pub fn new_with_player(world: World, seed: u64, player: Option<FactionId>, replay: Option<Vec<Vec<Action>>>) -> Self {
+    /// via `push_human_action`) - or, if `replay` is also given, by
+    /// `build_replay_controller(player, replay)` instead: `replay.days`
+    /// fed back for exactly `replay.layers`, every other layer decided by a
+    /// fresh AI, with no live input accepted for this faction at all (see
+    /// `Replay`'s own doc). Every other faction is `HeuristicAgent`,
+    /// exactly as `new`.
+    pub fn new_with_player(world: World, seed: u64, player: Option<FactionId>, replay: Option<Replay>) -> Self {
         let sim = Simulation::with_world(world, seed);
         let n = sim.world.factions.len();
         let mut controllers = Vec::with_capacity(n);
         let mut human_index = None;
+        let mut replay = replay;
         for i in 0..n {
             let faction = FactionId(i as u32);
             let controller = if Some(faction) == player {
                 human_index = Some(i);
-                match &replay {
-                    Some(days) => Controller::Replay(ReplayAgent::new(days.clone())),
+                match replay.take() {
+                    Some(r) => Controller::Replay(build_replay_controller(faction, r)),
                     None => Controller::Human(HumanAgent::new(faction)),
                 }
             } else {
@@ -511,7 +580,7 @@ mod tests {
 
         // A fresh SimDriver, same seed and scenario, with no live input at
         // all - every action comes from `replayed_days`.
-        let mut replay_driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), Some(replayed_days));
+        let mut replay_driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), Some(Replay { layers: ALL_LAYERS.to_vec(), days: replayed_days }));
         for _ in 0..DAYS {
             if replay_driver.outcome(DAYS) != Outcome::Ongoing {
                 break;
@@ -600,7 +669,7 @@ mod tests {
         // No `delegate_unit` call anywhere against this driver - replay
         // must reproduce the delegated AI's orders purely from the
         // recorded `Action`s, exactly like any other player action.
-        let mut replay_driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), Some(replayed_days));
+        let mut replay_driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), Some(Replay { layers: ALL_LAYERS.to_vec(), days: replayed_days }));
         for _ in 0..DAYS {
             if replay_driver.outcome(DAYS) != Outcome::Ongoing {
                 break;
@@ -655,5 +724,159 @@ mod tests {
             rest.iter().any(|&u| orders.iter().any(|a| a.target_unit() == Some(u))),
             "at least one non-carved-out unit must still receive an AI order this tick: {orders:?}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Layer-scoped replay
+    // -------------------------------------------------------------------
+
+    /// The headline property: a `Replay` that claims only `Layer::Economy`
+    /// must drive economic policy exactly as scripted, while every other
+    /// layer - visibly, not merely by absence of anything from the replay
+    /// itself - comes from a fresh AI (`build_replay_controller`'s own
+    /// doc). This is the exact CLI-level capability the task exists to add:
+    /// a scripted economy with the AI fighting the war.
+    ///
+    /// Confirmed this can actually fail: temporarily changed
+    /// `build_replay_controller` to skip adding the AI route for
+    /// `remaining` layers whenever it was non-empty (i.e. a layer-scoped
+    /// replay claimed its own layers and left everything else *unrouted*,
+    /// `CompositeAgent`'s own "absent layer produces nothing" rule) and
+    /// re-ran - the "AI must still act outside the replay's own layer"
+    /// assertion below failed immediately, since 30 days produced no
+    /// Military/GrandStrategy/Diplomacy action at all. Reverted before
+    /// committing.
+    #[test]
+    fn layer_scoped_replay_drives_only_its_layers() {
+        const SEED: u64 = 1;
+        const DAYS: u32 = 30;
+        let player = FactionId(0);
+
+        let scripted_day0 =
+            vec![Action::SetConscription(0.05), Action::SetIndustryPriority { good: archipelago_sim::good::Good::Munitions, weight: 1.0 }];
+        let replay = Replay { layers: vec![Layer::Economy], days: vec![scripted_day0.clone()] };
+
+        let mut driver = SimDriver::new_with_player(scenario::build_world(), SEED, Some(player), Some(replay));
+
+        let mut all_recorded: Vec<Vec<Action>> = Vec::new();
+        for day in 0..DAYS {
+            if driver.outcome(DAYS) != Outcome::Ongoing {
+                break;
+            }
+            driver.tick();
+            if day == 0 {
+                assert_eq!(
+                    driver.last_human_actions().iter().filter(|a| a.layer() == Layer::Economy).cloned().collect::<Vec<_>>(),
+                    scripted_day0,
+                    "day 0's Economy-layer output must be exactly what the replay scripted, in the order it was scripted"
+                );
+            }
+            all_recorded.push(driver.last_human_actions().to_vec());
+        }
+
+        let economy_actions: Vec<&Action> = all_recorded.iter().flatten().filter(|a| a.layer() == Layer::Economy).collect();
+        assert_eq!(
+            economy_actions,
+            scripted_day0.iter().collect::<Vec<_>>(),
+            "no Economy-layer action beyond exactly what the replay scripted may ever appear - a layer the replay claims must never also \
+             receive AI-produced orders"
+        );
+        assert!(
+            all_recorded.iter().flatten().any(|a| a.layer() != Layer::Economy),
+            "a layer the replay never claimed must still visibly receive AI-produced orders over {DAYS} days, not sit empty: {all_recorded:?}"
+        );
+    }
+
+    /// "No regression": a `Replay` claiming `ALL_LAYERS` - `--replay`'s
+    /// default, always-full-scope case before layer scoping existed - must
+    /// keep *every* recorded action, across every `Layer`, exactly as bare
+    /// `--replay` always has. Deliberately scripts one action per `Layer`
+    /// on day 0 so a bug that dropped even a single layer from the
+    /// "full scope" wrapping is caught here directly, rather than only
+    /// surfacing as a subtler divergence many simulated days later.
+    ///
+    /// Confirmed this can actually fail: temporarily hardcoded
+    /// `build_replay_controller` to route the `ReplayAgent` to
+    /// `[Layer::Military, Layer::Economy]` regardless of `replay.layers`
+    /// (leaving `Diplomacy`/`GrandStrategy` to the "remaining" AI route
+    /// instead of the replay) and re-ran - the final assertion failed
+    /// because `last_human_actions` no longer contained the scripted
+    /// `SetNationalFocus`/`DeclareWar`. Reverted before committing.
+    #[test]
+    fn full_scope_replay_keeps_every_layers_actions() {
+        let player = FactionId(0);
+        let world = scenario::build_world();
+        let unit = world.units.iter().find(|u| u.owner == player && u.alive).map(|u| u.id).expect("faction 0 has a living unit");
+
+        let scripted_day0 = vec![
+            Action::HoldUnit { unit },
+            Action::SetConscription(0.3),
+            Action::SetNationalFocus(archipelago_sim::focus::NationalFocus::DefensivePosture),
+            Action::DeclareWar { to: FactionId(1) },
+        ];
+        assert_eq!(
+            scripted_day0.iter().map(Action::layer).collect::<std::collections::BTreeSet<_>>(),
+            ALL_LAYERS.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            "test setup: the scripted day-0 actions must cover every Layer, or this test can't prove full scope keeps all of them"
+        );
+
+        let replay = Replay { layers: ALL_LAYERS.to_vec(), days: vec![scripted_day0.clone()] };
+        let mut driver = SimDriver::new_with_player(world, 1, Some(player), Some(replay));
+        driver.tick();
+        assert_eq!(
+            driver.last_human_actions(),
+            &scripted_day0[..],
+            "a full-scope (ALL_LAYERS) replay must keep every recorded action across every layer, unchanged from before layer scoping existed"
+        );
+    }
+
+    /// A layer-scoped recording, round-tripped through the real
+    /// `crate::action_codec::write_scoped_record`/`read_replay` file format
+    /// (not just an in-memory `Replay`), must replay to byte-identical
+    /// final state - the same determinism guarantee `--replay` has always
+    /// made (`recorded_play_replays_identically`'s own doc), now checked
+    /// for the layer-scoped file shape.
+    ///
+    /// Confirmed this can actually fail: temporarily replayed the second
+    /// run against `SEED + 1` instead of `SEED` and re-ran - the final
+    /// `World` `Debug` snapshot assertion failed immediately (and the
+    /// `day_a == day_b` assertion above it failed too), confirming these
+    /// aren't vacuously true. Reverted before committing.
+    #[test]
+    fn layer_scoped_recording_replays_identically() {
+        const SEED: u64 = 1;
+        const DAYS: u32 = 60;
+        let player = FactionId(0);
+
+        let layers = vec![Layer::Economy, Layer::Diplomacy];
+        let days: Vec<Vec<Action>> = vec![
+            vec![Action::SetConscription(0.2), Action::SetCivilianRation(0.8)],
+            vec![],
+            vec![Action::SetIndustryPriority { good: archipelago_sim::good::Good::Munitions, weight: 0.7 }],
+        ];
+
+        let path = std::env::temp_dir().join(format!("archipelago-game-scoped-record-test-{}.json", std::process::id()));
+        crate::action_codec::write_scoped_record(&path, &layers, &days).expect("write scoped recording");
+        let (read_layers, read_days) = crate::action_codec::read_replay(&path).expect("read scoped recording");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read_layers, layers, "round-tripping a scoped recording through the real file format must preserve its declared layers exactly");
+        assert_eq!(read_days, days, "round-tripping a scoped recording through the real file format must preserve its recorded actions exactly");
+
+        fn run(seed: u64, player: FactionId, layers: Vec<Layer>, days: Vec<Vec<Action>>, days_cap: u32) -> (u32, String) {
+            let mut driver = SimDriver::new_with_player(scenario::build_world(), seed, Some(player), Some(Replay { layers, days }));
+            for _ in 0..days_cap {
+                if driver.outcome(days_cap) != Outcome::Ongoing {
+                    break;
+                }
+                driver.tick();
+            }
+            (driver.sim.world.day, format!("{:?}", driver.sim.world))
+        }
+
+        let (day_a, state_a) = run(SEED, player, read_layers.clone(), read_days.clone(), DAYS);
+        let (day_b, state_b) = run(SEED, player, read_layers, read_days, DAYS);
+        assert_ne!(day_a, 0, "the scoped replay must have actually played");
+        assert_eq!(day_a, day_b, "the same seed and the same layer-scoped recording must stop on the same day");
+        assert_eq!(state_a, state_b, "the same seed and the same layer-scoped recording must reach byte-identical final World state");
     }
 }

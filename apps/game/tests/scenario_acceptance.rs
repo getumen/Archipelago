@@ -49,7 +49,7 @@
 use archipelago_agents::default_heuristic_agent;
 use archipelago_game::action_codec;
 use archipelago_game::sim_driver::SimDriver;
-use archipelago_sim::action::{Action, Layer};
+use archipelago_sim::action::{Action, Layer, ALL_LAYERS};
 use archipelago_sim::agent::Agent;
 use archipelago_sim::focus::NationalFocus;
 use archipelago_sim::good::Good;
@@ -134,7 +134,7 @@ fn run_scripted_opening_via_replay_file() -> (f32, u32, String) {
     let _ = std::fs::remove_file(&path);
     assert_eq!(replayed, recording, "round-tripping the scripted opening through the real --record/--replay file format must not change it");
 
-    let mut driver = SimDriver::new_with_player(world, SEED, Some(faction), Some(replayed));
+    let mut driver = SimDriver::new_with_player(world, SEED, Some(faction), Some(archipelago_game::sim_driver::Replay { layers: ALL_LAYERS.to_vec(), days: replayed }));
     run_to_completion(&mut driver);
     (munitions(driver.world(), faction), driver.sim.world.day, format!("{:?}", driver.sim.world))
 }
@@ -336,7 +336,7 @@ fn delegated_military_matches_ai_baseline_for_kanto() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(replayed, recorded, "round-tripping the delegated recording through the record file must not change it");
 
-    let mut replay_driver = SimDriver::new_with_player(load_japan_hex(), SEED_KANTO, Some(faction), Some(replayed));
+    let mut replay_driver = SimDriver::new_with_player(load_japan_hex(), SEED_KANTO, Some(faction), Some(archipelago_game::sim_driver::Replay { layers: ALL_LAYERS.to_vec(), days: replayed }));
     while replay_driver.outcome(DAYS) == Outcome::Ongoing {
         replay_driver.tick();
     }

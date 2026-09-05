@@ -41,9 +41,11 @@ pub struct PlayConfig {
     /// `None` when `--record` wasn't given - playing is fully supported
     /// without recording anything.
     pub record: Option<String>,
-    /// `--replay <path>`, already parsed - `Some` means `player` is driven
-    /// by this recording instead of live input.
-    pub replay: Option<Vec<Vec<Action>>>,
+    /// `--replay <path>`, already parsed via `crate::action_codec::
+    /// read_replay` - `Some` means `player` is driven by this recording
+    /// (for exactly the `Layer`s it declares - see `crate::sim_driver::
+    /// Replay`'s own doc) instead of live input.
+    pub replay: Option<crate::sim_driver::Replay>,
     /// `--delegate-military` (docs/design.md §14, `main.rs`'s own doc): a
     /// real, player-facing way to play "I run the economy, the AI runs the
     /// war" from the very first frame, with no keyboard input required at
@@ -53,6 +55,16 @@ pub struct PlayConfig {
     /// effect without `--screenshot` too - see `main.rs`'s own history
     /// note): this is a first-class way to play, not a verification
     /// convenience.
+    ///
+    /// `main.rs` rejects this combined with `--replay` outright: a replay's
+    /// own declared `Layer` scope (`replay`'s own doc) is now how a
+    /// scripted faction hands `Layer::Military` to the AI, so
+    /// `--delegate-military` would either be redundant with what the file
+    /// already says or - worse, if it disagreed - a flag silently unable to
+    /// do anything (`SimDriver::delegate_military` only ever touches a live
+    /// `HumanAgent` controller, never a `Controller::Replay`), which is
+    /// exactly the silent-no-op docs/conventions.md's no-fallback rule
+    /// forbids.
     pub delegate_military: bool,
 }
 

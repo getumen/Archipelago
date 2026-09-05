@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use archipelago_sim::action::{Action, ActionError};
+use archipelago_sim::action::{Action, ActionError, Layer, ALL_LAYERS};
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm};
 use archipelago_sim::focus::NationalFocus;
@@ -40,6 +40,14 @@ fn good_key(good: Good) -> &'static str {
 
 fn good_from_key(key: &str) -> Option<Good> {
     ALL_GOODS.iter().copied().find(|g| g.key() == key)
+}
+
+fn layer_key(layer: Layer) -> &'static str {
+    layer.key()
+}
+
+fn layer_from_key(key: &str) -> Result<Layer, String> {
+    ALL_LAYERS.into_iter().find(|l| l.key() == key).ok_or_else(|| format!("unknown layer `{key}`"))
 }
 
 fn treaty_key(t: Treaty) -> &'static str {
@@ -323,17 +331,15 @@ pub fn action_error_ja(e: ActionError) -> &'static str {
 
 /// Encodes a full recording - one `Vec<Action>` per day - as compact JSON.
 pub fn encode_days(days: &[Vec<Action>]) -> String {
-    Value::arr(days.iter().map(|day| Value::arr(day.iter().map(action_to_value).collect())).collect()).to_json()
+    days_to_value(days).to_json()
 }
 
-/// The inverse of `encode_days`. Rejects anything that isn't "array of
-/// arrays of action objects" - the same "never panic on malformed input"
-/// discipline `archipelago_sim::json`/`action_from_value` already apply,
-/// since a `--replay` file is just as untrusted as any other input this
-/// workspace reads from disk.
-pub fn decode_days(text: &str) -> Result<Vec<Vec<Action>>, String> {
-    let value = json::parse(text, 32).map_err(|e| e.to_string())?;
-    let days = value.as_array().ok_or("recording must be a top-level JSON array (one entry per day)")?;
+fn days_to_value(days: &[Vec<Action>]) -> Value {
+    Value::arr(days.iter().map(|day| Value::arr(day.iter().map(action_to_value).collect())).collect())
+}
+
+fn days_from_value(value: &Value) -> Result<Vec<Vec<Action>>, String> {
+    let days = value.as_array().ok_or("expected a JSON array of days")?;
     let mut out = Vec::with_capacity(days.len());
     for (i, day) in days.iter().enumerate() {
         let actions_v = day.as_array().ok_or_else(|| format!("day {i}: expected an array of actions"))?;
@@ -346,18 +352,107 @@ pub fn decode_days(text: &str) -> Result<Vec<Vec<Action>>, String> {
     Ok(out)
 }
 
+/// The inverse of `encode_days`. Rejects anything that isn't "array of
+/// arrays of action objects" - the same "never panic on malformed input"
+/// discipline `archipelago_sim::json`/`action_from_value` already apply,
+/// since a `--replay` file is just as untrusted as any other input this
+/// workspace reads from disk.
+pub fn decode_days(text: &str) -> Result<Vec<Vec<Action>>, String> {
+    let value = json::parse(text, 32).map_err(|e| e.to_string())?;
+    days_from_value(&value).map_err(|e| format!("recording must be a top-level JSON array (one entry per day): {e}"))
+}
+
 /// Writes a full recording to `path` (overwriting it) - `--record`'s file
-/// format. Called after every tick with the recording accumulated so far
-/// (Stage 7B has no other flush point; the client doesn't shut down
-/// cleanly), so a recording on disk is always at most one day stale.
+/// format, and the *full-scope* half of `--replay`'s file format (see
+/// `decode_replay`'s own doc): a bare JSON array of days, exactly as before
+/// layer-scoped replay existed. Called after every tick with the recording
+/// accumulated so far (Stage 7B has no other flush point; the client
+/// doesn't shut down cleanly), so a recording on disk is always at most one
+/// day stale.
 pub fn write_record(path: &Path, days: &[Vec<Action>]) -> std::io::Result<()> {
     std::fs::write(path, encode_days(days))
 }
 
-/// Reads and decodes a `--replay <path>` recording.
+/// Reads and decodes a `--replay <path>` recording written by
+/// `write_record` (full-scope only, no `layers` field to speak of). Kept
+/// alongside `read_replay` (which accepts *either* shape) purely because
+/// every existing full-scope-only call site - `--record`'s own round-trip
+/// tests, and anything that only ever wrote via `write_record` - has no
+/// reason to start handling a `layers` field it never asked for.
 pub fn read_record(path: &Path) -> Result<Vec<Vec<Action>>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
     decode_days(&text)
+}
+
+/// Encodes a *layer-scoped* recording: `{"layers": [...key strings...],
+/// "days": [...]}`. `layers` is the set of `Layer`s this recording's
+/// author declares it drives for the played faction - see
+/// `crate::sim_driver::Replay`'s own doc for why this has to be declared
+/// explicitly rather than inferred from which actions happen to appear on
+/// any given day.
+pub fn encode_scoped_days(layers: &[Layer], days: &[Vec<Action>]) -> String {
+    Value::obj(vec![
+        ("layers", Value::arr(layers.iter().map(|&l| Value::str(layer_key(l))).collect())),
+        ("days", days_to_value(days)),
+    ])
+    .to_json()
+}
+
+/// Writes a layer-scoped recording (`encode_scoped_days`'s own doc) to
+/// `path`, overwriting it - the format `--replay` reads back a `layers`
+/// field out of, distinct from `write_record`'s bare-array, always-full-scope
+/// format.
+pub fn write_scoped_record(path: &Path, layers: &[Layer], days: &[Vec<Action>]) -> std::io::Result<()> {
+    std::fs::write(path, encode_scoped_days(layers, days))
+}
+
+/// Decodes a `--replay <path>` recording in *either* of the two shapes
+/// `--replay` accepts:
+///
+/// - a bare JSON array of days (`decode_days`'s own format, everything
+///   `write_record`/`--record` has ever produced) - the replay claims
+///   `ALL_LAYERS`, reproducing today's "the whole faction is scripted"
+///   behavior with no change at all;
+/// - an object `{"layers": [...], "days": [...]}` (`encode_scoped_days`) -
+///   the replay claims exactly the declared `layers` and nothing else, for
+///   `crate::sim_driver::SimDriver` to hand every other `Layer` to a fresh
+///   AI agent instead (see that module's own doc).
+///
+/// The `layers` field is never optional on the object shape and never
+/// inferred from the recorded actions themselves - a scripted faction that
+/// happens not to touch a layer on any given day must stay distinguishable
+/// from one that never owned that layer at all, which is exactly the
+/// distinction an inferred scope could never make (docs/conventions.md's
+/// no-fallback principle: a missing/absent declaration is reported as
+/// missing, not silently guessed at from data that cannot express it).
+pub fn decode_replay(text: &str) -> Result<(Vec<Layer>, Vec<Vec<Action>>), String> {
+    let value = json::parse(text, 32).map_err(|e| e.to_string())?;
+    match &value {
+        Value::Array(_) => Ok((ALL_LAYERS.to_vec(), days_from_value(&value)?)),
+        Value::Object(_) => {
+            let layers_v = value.get("layers").and_then(Value::as_array).ok_or("scoped replay needs an array `layers` field")?;
+            let mut layers = Vec::with_capacity(layers_v.len());
+            for l in layers_v {
+                let key = l.as_str().ok_or("`layers` entries must be strings")?;
+                let layer = layer_from_key(key)?;
+                if layers.contains(&layer) {
+                    return Err(format!("`layers` names `{key}` more than once"));
+                }
+                layers.push(layer);
+            }
+            let days_v = value.get("days").ok_or("scoped replay needs a `days` field")?;
+            let days = days_from_value(days_v)?;
+            Ok((layers, days))
+        }
+        _ => Err("replay must be either a JSON array of days, or an object with `layers` and `days`".to_string()),
+    }
+}
+
+/// Reads and decodes a `--replay <path>` recording - see `decode_replay`'s
+/// own doc for the two shapes accepted.
+pub fn read_replay(path: &Path) -> Result<(Vec<Layer>, Vec<Vec<Action>>), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    decode_replay(&text)
 }
 
 #[cfg(test)]
@@ -420,5 +515,42 @@ mod tests {
         let encoded = encode_days(&days);
         let decoded = decode_days(&encoded).unwrap();
         assert_eq!(decoded, days, "an empty day must still occupy a slot, not collapse away");
+    }
+
+    /// `decode_replay` on a bare array (everything `write_record` has ever
+    /// produced) must report `ALL_LAYERS` - a full-scope replay file, read
+    /// through the new dual-shape decoder, must mean exactly what it always
+    /// meant.
+    #[test]
+    fn decode_replay_treats_a_bare_array_as_full_scope() {
+        let days: Vec<Vec<Action>> = vec![vec![Action::SetConscription(0.4)]];
+        let (layers, decoded) = decode_replay(&encode_days(&days)).unwrap();
+        assert_eq!(layers, ALL_LAYERS.to_vec(), "a bare-array replay file must claim every layer");
+        assert_eq!(decoded, days);
+    }
+
+    /// `encode_scoped_days`/`decode_replay` must round-trip a declared
+    /// layer subset exactly, in whatever order it was given - the whole
+    /// point of the new format is that this set is read back verbatim, not
+    /// normalized or inferred.
+    #[test]
+    fn scoped_replay_round_trips_its_declared_layers() {
+        let layers = vec![Layer::Economy, Layer::Diplomacy];
+        let days: Vec<Vec<Action>> = vec![vec![Action::SetConscription(0.1)], vec![]];
+        let encoded = encode_scoped_days(&layers, &days);
+        let (decoded_layers, decoded_days) = decode_replay(&encoded).unwrap();
+        assert_eq!(decoded_layers, layers, "the declared layer set must come back exactly as written");
+        assert_eq!(decoded_days, days);
+    }
+
+    #[test]
+    fn decode_replay_rejects_a_scoped_file_missing_layers_or_days() {
+        assert!(decode_replay("{\"days\":[]}").is_err(), "a scoped object with no `layers` field must be rejected, not defaulted to full scope");
+        assert!(decode_replay("{\"layers\":[\"economy\"]}").is_err(), "a scoped object with no `days` field must be rejected");
+        assert!(decode_replay("{\"layers\":[\"not_a_real_layer\"],\"days\":[]}").is_err(), "an unknown layer key must be rejected");
+        assert!(
+            decode_replay("{\"layers\":[\"economy\",\"economy\"],\"days\":[]}").is_err(),
+            "a layer named twice in `layers` must be rejected rather than silently deduplicated"
+        );
     }
 }
