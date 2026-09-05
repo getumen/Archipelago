@@ -44,6 +44,16 @@ pub struct PlayConfig {
     /// `--replay <path>`, already parsed - `Some` means `player` is driven
     /// by this recording instead of live input.
     pub replay: Option<Vec<Vec<Action>>>,
+    /// `--delegate-military` (docs/design.md §14, `main.rs`'s own doc): a
+    /// real, player-facing way to play "I run the economy, the AI runs the
+    /// war" from the very first frame, with no keyboard input required at
+    /// all - `run` calls `SimDriver::delegate_military()` once at startup
+    /// when this is `true`. Not tied to `--screenshot` (an earlier,
+    /// screenshot-only debug flag did that instead, and consequently had no
+    /// effect without `--screenshot` too - see `main.rs`'s own history
+    /// note): this is a first-class way to play, not a verification
+    /// convenience.
+    pub delegate_military: bool,
 }
 
 /// Wraps the Bevy-free `SimDriver` as a Bevy `Resource` - the seam between
@@ -525,20 +535,16 @@ pub fn run(
     } else {
         BTreeSet::new()
     };
-    // `--debug-delegate-units` (`ScreenshotConfig::delegate_units`'s own
-    // doc): computed from `world` here for the same reason
-    // `debug_selected_units` is - `world` moves into `SimDriver::
-    // new_with_player` right below, and delegation itself has to happen
-    // against the constructed `SimDriver` (`SimDriver::delegate_unit`),
-    // not `World`, so this only captures *which* units to delegate.
-    let debug_delegate_units: bool = screenshot.as_ref().is_some_and(|c| c.delegate_units);
-
     let mut sim_driver = SimDriver::new_with_player(world, seed, player_faction, replay_days);
-    if debug_delegate_units && let Some(p) = player_faction {
-        let units: Vec<UnitId> = sim_driver.sim.world.units.iter().filter(|u| u.alive && u.owner == p).map(|u| u.id).collect();
-        for unit in units {
-            sim_driver.delegate_unit(unit);
-        }
+    // `--delegate-military` (`PlayConfig::delegate_military`'s own doc):
+    // one `SimDriver::delegate_military()` call at startup hands the entire
+    // `Layer::Military` decision domain - recruitment included - to the AI,
+    // covering every unit the player currently owns *and* every one it
+    // raises later, with no per-unit loop of any kind needed here (that was
+    // the bug this flag's own history fixed: a per-unit snapshot at startup
+    // never grew past whatever force existed the moment delegation began).
+    if play.as_ref().is_some_and(|p| p.delegate_military) {
+        sim_driver.delegate_military();
     }
 
     app.insert_resource(ClearColor(Color::srgb(0.07, 0.08, 0.10)))

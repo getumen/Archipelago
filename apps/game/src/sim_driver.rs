@@ -25,17 +25,22 @@
 //! path, per docs/design.md §14's "人間も AI と同じ入口から世界に触る".
 //!
 //! **Military delegation** (docs/design.md §14): `delegate_unit`/
-//! `undelegate_unit`/`is_delegated` forward straight to the live
-//! `HumanAgent` controller (a no-op / `false` for every other `Controller`
-//! variant, same shape as `push_human_action`). Nothing here needs to know
-//! *how* a delegated unit gets ordered - `HumanAgent::decide` already folds
-//! those orders into the exact same `Vec<Action>` a player's own queued
-//! orders come back in, so this file's own invariant above (`tick` just
-//! applies whatever `decide()` returns) already covers it, and so does
-//! `--record`/`--replay`: a delegated unit's AI-issued orders land in
-//! `last_human_actions` like any other action, get written to the
-//! recording, and a `--replay` run reproduces them from that recording via
-//! `ReplayAgent` with no delegation-specific replay logic at all - see
+//! `undelegate_unit`/`is_delegated` (per-unit) and `delegate_military`/
+//! `undelegate_military`/`is_military_delegated` (the whole `Layer::
+//! Military` decision domain, recruitment included - the operation
+//! `--delegate-military` actually performs, see `main.rs`'s own doc) all
+//! forward straight to the live `HumanAgent` controller (a no-op / `false`
+//! for every other `Controller` variant, same shape as
+//! `push_human_action`). Nothing here needs to know *how* a delegated unit
+//! gets ordered or how large the delegated army grows - `HumanAgent::
+//! decide` already folds those orders into the exact same `Vec<Action>` a
+//! player's own queued orders come back in, so this file's own invariant
+//! above (`tick` just applies whatever `decide()` returns) already covers
+//! it, and so does `--record`/`--replay`: a delegated faction's AI-issued
+//! orders (including its own `RecruitUnit`s) land in `last_human_actions`
+//! like any other action, get written to the recording, and a `--replay`
+//! run reproduces them from that recording via `ReplayAgent` with no
+//! delegation-specific replay logic at all - see
 //! `tests::delegated_play_replays_identically`.
 
 use archipelago_agents::HumanAgent;
@@ -200,6 +205,42 @@ impl SimDriver {
             && let Controller::Human(agent) = &mut self.controllers[i]
         {
             agent.undelegate(unit);
+        }
+    }
+
+    /// Hands the entire `Layer::Military` decision domain - every unit's
+    /// orders *and* recruitment - to the same `HeuristicAgent` logic the AI
+    /// factions run (`archipelago_agents::HumanAgent::delegate_military`'s
+    /// own doc: this, not a per-unit loop, is what "the AI runs the war"
+    /// actually means, since recruitment has no existing unit a per-unit
+    /// call could ever name). A no-op with no live `HumanAgent` controller,
+    /// mirroring `push_human_action`'s own doc for why.
+    pub fn delegate_military(&mut self) {
+        if let Some(i) = self.human_index
+            && let Controller::Human(agent) = &mut self.controllers[i]
+        {
+            agent.delegate_military();
+        }
+    }
+
+    /// Takes the whole military back under direct player control - see
+    /// `delegate_military` and `archipelago_agents::HumanAgent::undelegate_military`.
+    pub fn undelegate_military(&mut self) {
+        if let Some(i) = self.human_index
+            && let Controller::Human(agent) = &mut self.controllers[i]
+        {
+            agent.undelegate_military();
+        }
+    }
+
+    /// Whether the entire military is currently delegated - `false` with no
+    /// live `HumanAgent` controller. Read by `apps/game`'s policy panel to
+    /// show "AI runs the war" state distinctly from individual delegated
+    /// units.
+    pub fn is_military_delegated(&self) -> bool {
+        match self.human_index.map(|i| &self.controllers[i]) {
+            Some(Controller::Human(agent)) => agent.is_military_delegated(),
+            _ => false,
         }
     }
 
@@ -487,12 +528,15 @@ mod tests {
     }
 
     /// Military delegation's own determinism guard, alongside
-    /// `recorded_play_replays_identically` above: delegates every one of
-    /// the player faction's units to `HeuristicAgent` logic at day 0 (no
-    /// other player input at all - the point of delegation is to let the
-    /// AI run the whole army), records the resulting play, and checks a
+    /// `recorded_play_replays_identically` above: hands the player
+    /// faction's entire military over to `HeuristicAgent` logic via a
+    /// single `delegate_military()` call at day 0 - the real player-facing
+    /// operation (`--delegate-military`'s own doc in `main.rs`), not a
+    /// per-tick re-delegation loop standing in for it - and no other player
+    /// input at all (the point of delegation is to let the AI run the whole
+    /// army, recruitment included). Records the resulting play and checks a
     /// fresh `SimDriver` replaying that recording (with **no** delegation
-    /// call made against it at all - `delegate_unit`'s own doc says the
+    /// call made against it at all - `delegate_military`'s own doc says the
     /// recorded `Action`s are all a replay ever needs) reaches byte-identical
     /// final state.
     ///
@@ -515,9 +559,11 @@ mod tests {
         let starting_units: Vec<archipelago_sim::ids::UnitId> =
             driver.sim.world.units.iter().filter(|u| u.owner == player && u.alive).map(|u| u.id).collect();
         assert!(!starting_units.is_empty(), "faction 0 must start with at least one living unit to delegate");
+
+        driver.delegate_military();
+        assert!(driver.is_military_delegated(), "delegate_military must be reflected by is_military_delegated immediately");
         for &unit in &starting_units {
-            driver.delegate_unit(unit);
-            assert!(driver.is_delegated(unit), "delegate_unit must be reflected by is_delegated immediately");
+            assert!(driver.is_delegated(unit), "delegate_military must delegate every existing unit, not just future ones");
         }
 
         let mut recorded: Vec<Vec<Action>> = Vec::new();
@@ -525,13 +571,11 @@ mod tests {
             if driver.outcome(DAYS) != Outcome::Ongoing {
                 break;
             }
-            // Every later-recruited unit is delegated too, the moment it
-            // appears - a player who has handed over "the military" would
-            // expect a freshly raised unit to join the delegated pool, not
-            // sit idle under nobody's orders.
-            for unit in driver.sim.world.units.iter().filter(|u| u.owner == player && u.alive).map(|u| u.id).collect::<Vec<_>>() {
-                driver.delegate_unit(unit);
-            }
+            // No further delegation calls of any kind below - a freshly
+            // recruited unit must already be covered by the single
+            // `delegate_military()` call above, or this test can't tell
+            // the whole-layer fix apart from the old per-unit-only
+            // mechanism it replaced.
             driver.tick();
             recorded.push(driver.last_human_actions().to_vec());
         }
@@ -541,6 +585,10 @@ mod tests {
         assert!(
             recorded.iter().any(|day| !day.is_empty()),
             "a fully-delegated faction must actually receive unit orders over 120 days with no player input at all"
+        );
+        assert!(
+            recorded.iter().any(|day| day.iter().any(|a| matches!(a, Action::RecruitUnit { .. }))),
+            "a whole-military-delegated faction must actually recruit new units over 120 days, not just reorder its starting force"
         );
 
         let path = std::env::temp_dir().join(format!("archipelago-game-delegated-record-test-{}.json", std::process::id()));
@@ -565,6 +613,47 @@ mod tests {
             format!("{:?}", replay_driver.sim.world),
             final_state,
             "the delegated replay must reach byte-identical final state to the original delegated run"
+        );
+    }
+
+    /// The per-unit carve-out through `SimDriver` itself - the exact API
+    /// surface `apps/game`'s unit panel calls (`app::panels`'s own doc) -
+    /// on top of whole-military delegation (`--delegate-military`,
+    /// `main.rs`'s own doc): delegating everything and then taking one unit
+    /// back must stop that unit's AI orders while every other unit keeps
+    /// receiving them, on the exact same tick.
+    #[test]
+    fn delegate_military_then_taking_one_unit_back_only_stops_that_unit() {
+        let player = FactionId(0);
+        let mut driver = SimDriver::new_with_player(scenario::build_world(), 1, Some(player), None);
+
+        driver.delegate_military();
+        assert!(driver.is_military_delegated());
+
+        let units: Vec<archipelago_sim::ids::UnitId> =
+            driver.sim.world.units.iter().filter(|u| u.owner == player && u.alive).map(|u| u.id).collect();
+        assert!(units.len() >= 2, "faction 0 must start with at least two living units for this test to distinguish carve-out from the rest");
+        let (carved_out, rest) = (units[0], units[1..].to_vec());
+        for &u in &units {
+            assert!(driver.is_delegated(u), "everything must start delegated once the whole military is");
+        }
+
+        driver.undelegate_unit(carved_out);
+        assert!(!driver.is_delegated(carved_out), "the carved-out unit must stop being delegated");
+        assert!(driver.is_military_delegated(), "carving out one unit must not turn off whole-layer delegation itself");
+        for &u in &rest {
+            assert!(driver.is_delegated(u), "every other unit must remain delegated");
+        }
+
+        driver.tick();
+        let orders = driver.last_human_actions();
+        assert!(
+            orders.iter().all(|a| a.target_unit() != Some(carved_out)),
+            "the carved-out unit must receive no AI order this tick: {orders:?}"
+        );
+        assert!(
+            rest.iter().any(|&u| orders.iter().any(|a| a.target_unit() == Some(u))),
+            "at least one non-carved-out unit must still receive an AI order this tick: {orders:?}"
         );
     }
 }

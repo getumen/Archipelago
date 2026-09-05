@@ -70,14 +70,6 @@ pub struct ScreenshotConfig {
     /// faction owns, so Stage 8B's unit panel renders in a `--screenshot`
     /// run with nothing to click a unit marker. No effect without `--play`.
     pub select_units: bool,
-    /// `--debug-delegate-units` (docs/design.md §14, military delegation):
-    /// delegates every living unit the `--play`ed faction owns, via
-    /// `SimDriver::delegate_unit`, before the first frame - so a
-    /// `--screenshot` run can show delegated units marked as such (the
-    /// unit panel's "[AI操作中]" row marker and the map's gold-tinted
-    /// markers, `visuals::sync_unit_visuals`) with nothing at the keyboard
-    /// to press `U` first. No effect without `--play`.
-    pub delegate_units: bool,
     /// `--debug-camera-region <index>`: center the camera on this region
     /// instead of the whole-map fit `camera_fit::fit_camera_to_map` computes
     /// by default - a dense map (japan47's 47 prefectures) can render a

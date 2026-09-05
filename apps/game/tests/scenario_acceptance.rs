@@ -49,7 +49,7 @@
 use archipelago_agents::default_heuristic_agent;
 use archipelago_game::action_codec;
 use archipelago_game::sim_driver::SimDriver;
-use archipelago_sim::action::Action;
+use archipelago_sim::action::{Action, Layer};
 use archipelago_sim::agent::Agent;
 use archipelago_sim::focus::NationalFocus;
 use archipelago_sim::good::Good;
@@ -203,15 +203,19 @@ fn scripted_opening_replay_is_deterministic_end_to_end() {
 // Military delegation (docs/design.md §14)
 // ---------------------------------------------------------------------
 
-/// Whether `action` orders an existing unit rather than setting policy,
-/// diplomacy, recruitment, or construction - mirrors `archipelago_agents::
-/// human`'s own private `ordered_unit` (not reusable across crates: it's
-/// not `pub`, by design - see that module's own doc for why delegation's
-/// unit/non-unit split belongs to `HumanAgent` alone). Used only by this
-/// test's harness below to decide which of a stand-in policy agent's
-/// recommendations a "player" would still issue by hand.
+/// Whether `action` orders an existing unit, as opposed to creating one
+/// (`RecruitUnit`) or setting policy/diplomacy/construction - used only to
+/// report *which kind* of `Layer::Military` order a fully-delegated faction
+/// actually received below, not to decide what a "player" issues by hand
+/// (that split is now `Action::layer`/`archipelago_agents::HumanAgent`'s own
+/// job entirely - see this test's own doc for why the harness no longer
+/// hand-rolls it).
 fn is_unit_order(action: &Action) -> bool {
     matches!(action, Action::MoveUnit { .. } | Action::HoldUnit { .. } | Action::DisbandUnit { .. } | Action::ReinforceUnit { .. })
+}
+
+fn is_recruit_order(action: &Action) -> bool {
+    matches!(action, Action::RecruitUnit { .. })
 }
 
 fn kanto_faction(world: &World) -> FactionId {
@@ -222,18 +226,23 @@ fn land_unit_count(world: &World, faction: FactionId) -> usize {
     world.units.iter().filter(|u| u.alive && u.owner == faction && u.station.domain() == Domain::Land).count()
 }
 
-/// Military delegation's scenario-scale check: hands 関東府's entire army
-/// over to `HumanAgent` delegation (every starting unit, plus every later
-/// recruit the moment it's raised - a player who has delegated "the
-/// military" expects a freshly built unit to join the delegated pool
-/// automatically, not sit idle under nobody's orders), while a second,
-/// independent `HeuristicAgent` instance stands in for "the player's own
-/// economic/diplomatic play" by supplying every *non*-unit action (policy,
-/// diplomacy, recruitment, construction) each day - the same playbook the
-/// AI itself would use, since this test has no actual human at the
-/// keyboard. This isolates the property under test to "do delegated *unit
-/// orders* specifically reproduce AI-quality play", not "is this test's
-/// author a good `japan_hex` player".
+/// Military delegation's scenario-scale check, exercised through the exact
+/// operation a player performs: **one** `driver.delegate_military()` call
+/// before play starts (mirroring `--delegate-military`, `main.rs`'s own
+/// doc), not a per-tick loop re-delegating whatever units happen to exist
+/// that day. That distinction is the whole point of this test's own
+/// history - see "Confirmed this can actually fail" below. Everything
+/// `Layer::Military` produces from then on (moving, reinforcing,
+/// disbanding, *and recruiting* units) comes from `HumanAgent`'s own
+/// wrapped `HeuristicAgent`, exactly as a real delegated game would; a
+/// second, independent `HeuristicAgent` instance stands in for "the
+/// player's own economic/diplomatic play" by supplying every *non*-Military
+/// action (policy, diplomacy, construction - `Action::layer` again, not a
+/// hand-rolled unit/non-unit split) each day, the same playbook the AI
+/// itself would use, since this test has no actual human at the keyboard.
+/// This isolates the property under test to "does whole-military delegation
+/// specifically reproduce AI-quality play", not "is this test's author a
+/// good `japan_hex` player".
 ///
 /// Driven through the real `--record`/`--replay` file format
 /// (`action_codec::write_record`/`read_record`, `SimDriver::
@@ -248,8 +257,8 @@ fn land_unit_count(world: &World, faction: FactionId) -> usize {
 /// independently via `cargo run --release -p archipelago-headless --
 /// --scenario scenarios/japan_hex.json --seed 1 --days 720 --json`):
 /// "same league", not bit-identical. Two independent `HeuristicAgent`
-/// instances stand in for 関東府 here (one inside `HumanAgent` ordering
-/// delegated units, one standalone supplying policy) where the baseline
+/// instances stand in for 関東府 here (one inside `HumanAgent` ordering the
+/// delegated military, one standalone supplying policy) where the baseline
 /// uses a single evolving instance for both roles, and this harness's
 /// policy agent sees each day's *start-of-day* world rather than
 /// whatever partially-advanced state the baseline's own single agent
@@ -259,13 +268,23 @@ fn land_unit_count(world: &World, faction: FactionId) -> usize {
 /// delegation lets 関東府 keep playing in the AI's own weight class, not
 /// that it retraces the AI's exact game.
 ///
-/// Confirmed this can actually fail: temporarily made the delegation loop
-/// below call `driver.undelegate_unit` instead of `delegate_unit` (i.e.
-/// nothing ever gets delegated, so `HumanAgent` only ever applies this
-/// test's own policy actions, no military orders at all) and re-ran - final
-/// territory/units collapsed far below the assertions' floors (関東府 was
-/// reduced to a handful of regions with no army fielding any offensive at
-/// all), failing the territory assertion. Reverted before committing.
+/// Confirmed this can actually fail *before this test itself was rewritten*:
+/// the previous version of this test drove delegation through a per-tick
+/// `for unit in ... { driver.delegate_unit(unit) }` loop and had its own
+/// stand-in policy agent push `RecruitUnit` by hand (since `RecruitUnit`
+/// wasn't classified a "unit order" by this file's old, private
+/// `is_unit_order`-based split) - a path a real player delegating "the
+/// military" through `--delegate-military` never takes at all. That version
+/// passed even while the real bug (`HumanAgent::decide` could never let a
+/// delegated faction's `military` sub-agent recruit at all - see
+/// `archipelago_agents::human`'s own doc) was live in production, because
+/// it never actually exercised `HumanAgent`'s own recruitment path. Rewriting
+/// the harness to call `delegate_military()` once, with recruitment left
+/// entirely to `HumanAgent`/`military`, reproduces that exact bug: with
+/// `HumanAgent::decide`'s fix reverted (recruitment actions unconditionally
+/// dropped), 関東府 never grows past its starting handful of units and this
+/// test's `units`/`territory` assertions below fail immediately. Reverted
+/// before committing.
 #[test]
 #[ignore]
 fn delegated_military_matches_ai_baseline_for_kanto() {
@@ -275,16 +294,20 @@ fn delegated_military_matches_ai_baseline_for_kanto() {
     let faction = kanto_faction(&world);
 
     let mut driver = SimDriver::new_with_player(world, SEED_KANTO, Some(faction), None);
+    driver.delegate_military();
+    assert!(driver.is_military_delegated(), "delegate_military must be reflected by is_military_delegated immediately");
     let mut policy_ai = default_heuristic_agent(faction.index());
     let mut recorded: Vec<Vec<Action>> = Vec::new();
 
     while driver.outcome(DAYS) == Outcome::Ongoing {
-        for unit in driver.sim.world.units.iter().filter(|u| u.owner == faction && u.alive).map(|u| u.id).collect::<Vec<_>>() {
-            driver.delegate_unit(unit);
-        }
+        // No delegation call of any kind here - the single
+        // `delegate_military()` call above must already cover every unit
+        // 関東府 raises for the rest of the game, or this test can't tell
+        // the whole-layer fix apart from the bespoke per-tick loop it
+        // replaced (see this test's own "Confirmed this can actually fail").
         let obs = Observation { faction, world: driver.world() };
         for action in policy_ai.decide(&obs) {
-            if !is_unit_order(&action) {
+            if action.layer() != Layer::Military {
                 driver.push_human_action(action);
             }
         }
@@ -296,6 +319,11 @@ fn delegated_military_matches_ai_baseline_for_kanto() {
     assert!(
         recorded.iter().any(|day| day.iter().any(is_unit_order)),
         "a fully-delegated 関東府 must receive at least one unit order somewhere over 720 days with no player micromanagement at all"
+    );
+    assert!(
+        recorded.iter().any(|day| day.iter().any(is_recruit_order)),
+        "a whole-military-delegated 関東府 must actually recruit new units over 720 days, not just reorder its starting force - \
+         this is the exact property the old per-unit-only delegation broke"
     );
 
     let path = std::env::temp_dir().join(format!(
@@ -318,6 +346,7 @@ fn delegated_military_matches_ai_baseline_for_kanto() {
     let territory = world.region_count(faction);
     let units = land_unit_count(world, faction);
     let munitions_final = munitions(world, faction);
+    println!("delegated 関東府 via --delegate-military: territory={territory} units={units} munitions={munitions_final:.1} (AI baseline: 101/32/~5516)");
 
     // "Same league" as the all-AI baseline (territory 101 / units 32 /
     // munitions ≈5516) - loose bounds, not a tight regression guard: the

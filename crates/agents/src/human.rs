@@ -13,44 +13,70 @@
 //! queued action is legal, so it cannot pre-filter anything even by
 //! accident.
 //!
-//! **Military delegation** (docs/design.md §14): a player can hand a unit's
-//! day-to-day orders to the same `HeuristicAgent` logic the AI factions run,
-//! at per-unit granularity - `delegate`/`undelegate` add/remove a `UnitId`
-//! from `delegated`, and `decide()` folds in whatever `military` (a
-//! `crate::composite::CompositeAgent` wrapping a `HeuristicAgent` for this
-//! same faction, composed - not inherited from, per docs/conventions.md §1)
-//! would have ordered for exactly those units. This is why `decide()` now
-//! reads `obs`: it did not before, since there was nothing here that needed
-//! it. That is still not a privileged path - the wrapped `HeuristicAgent`'s
-//! `decide` is the exact same trait method every AI faction's agent runs,
-//! and every action it produces still goes through `Simulation::apply`
-//! unchanged, whether it targets a delegated unit or came from the player's
-//! own queue.
+//! **Military delegation** (docs/design.md §14): a player can hand
+//! `Layer::Military` - the entire force-structure decision domain, not just
+//! orders to whichever units happen to exist right now - to the same
+//! `HeuristicAgent` logic the AI factions run. `decide()` folds in whatever
+//! `military` (a `crate::composite::CompositeAgent` wrapping a
+//! `HeuristicAgent` for this same faction, composed - not inherited from,
+//! per docs/conventions.md §1) would have ordered. This is why `decide()`
+//! now reads `obs`: it did not before, since there was nothing here that
+//! needed it. That is still not a privileged path - the wrapped
+//! `HeuristicAgent`'s `decide` is the exact same trait method every AI
+//! faction's agent runs, and every action it produces still goes through
+//! `Simulation::apply` unchanged, whether it came from `military` or the
+//! player's own queue.
 //!
 //! `military` is a `CompositeAgent` routed to `Layer::Military` alone
 //! (`archipelago_sim::action::Layer`) rather than a bare `HeuristicAgent` -
 //! this *is* delegation expressed as the same layer-routing mechanism every
 //! other pluggable-agent composition in this crate now uses (see
-//! `crate::composite`), not a separate, ad-hoc concept. What `Layer` alone
-//! cannot express is *which* units: delegation is deliberately per-unit
-//! rather than per-army, per-front, or "the whole Military layer" -
-//! `docs/design.md §14`'s promise is that the player always keeps *some*
-//! units under direct control while the rest fight themselves, and a
-//! coarser knob (all-or-nothing, or "this front only" with no map-level
-//! notion of fronts in `crates/sim`) can't express "hold these three elite
-//! corps back, delegate everyone else" - exactly the workflow `apps/game`'s
-//! unit panel's own "select all, then carve out exceptions" flow is built
-//! around. `decide()` therefore adds one more filter on top of
-//! `CompositeAgent`'s own layer routing: `Action::target_unit`, the same
-//! exhaustive, compiler-checked classification `Action::layer` is (see
-//! `archipelago_sim::action`), which is what replaces the old hand-rolled
-//! `ordered_unit` match against `MoveUnit | HoldUnit | DisbandUnit |
-//! ReinforceUnit` this module used to carry - `RecruitUnit` is `Military`
-//! but targets no existing unit, so `target_unit` already excludes it
-//! without this module needing to special-case it by name.
+//! `crate::composite`), not a separate, ad-hoc concept.
 //!
-//! `delegated` is never pruned when a unit dies or changes hands - a stale
-//! `UnitId` left in the set is inert (`Observation::own_units` never
+//! **Whole-layer delegation with per-unit carve-outs, not a static unit
+//! set.** An earlier version of this module expressed delegation purely as
+//! an opt-in `BTreeSet<UnitId>`: `military`'s output was kept only for
+//! units already in that set. That broke the one operation a player who
+//! says "the AI runs the war" actually performs - handing over the whole
+//! army - because `RecruitUnit` (`Layer::Military`, `Action::target_unit`
+//! `None`: it *creates* a unit, so there is no existing id to have been
+//! added to the set) could never appear in the kept output no matter what
+//! was delegated. The army could be moved and reinforced by the AI but
+//! never grown or replaced - a played game silently stalls at whatever
+//! force existed the moment delegation started (see the regression guard,
+//! `tests::delegating_the_whole_military_lets_it_recruit`).
+//!
+//! `military_delegated` is the fix: when `true`, the *entire* `Layer::
+//! Military` decision domain - recruitment included - is delegated, which
+//! is what "hand over the military" has to mean if it is to cover force
+//! structure at all (an agent that could march and reinforce units but
+//! never raise or retire one couldn't meaningfully "be the military" -
+//! `Layer::Military`'s own doc in `archipelago_sim::action` makes the same
+//! call for the identical reason). Per-unit control is not lost to this -
+//! `docs/design.md §14`'s promise that the player can always keep *some*
+//! units under direct control is kept by `unit_overrides`, which under
+//! whole-layer delegation acts as a carve-out set: `undelegate(unit)` holds
+//! that one unit back even though everything else, recruitment included,
+//! is the AI's. `delegate`/`undelegate`/`is_delegated` are exactly the same
+//! three calls `apps/game`'s unit panel already used for pure per-unit
+//! delegation (its "select all, then carve out exceptions" flow), so
+//! turning that flow into "delegate the whole military, then carve out
+//! exceptions" needed no new UI concept, only `delegate_military` added
+//! ahead of it. `unit_overrides` still supports the original, narrower mode
+//! too - `military_delegated == false` with a few units individually
+//! `delegate`d - for a player who wants to hand off *only* those units and
+//! keep everything else, recruitment included, under direct control; see
+//! `decide`'s own doc for exactly how the two modes route.
+//!
+//! Switching `military_delegated` either direction (`delegate_military`/
+//! `undelegate_military`) clears `unit_overrides`: the set means opposite
+//! things in the two modes (carve-out vs. opt-in), so carrying entries
+//! across a mode switch would silently repurpose them into whichever
+//! meaning the new mode gives that same `UnitId`, not what the player
+//! actually asked for when they added it.
+//!
+//! `unit_overrides` is never pruned when a unit dies or changes hands - a
+//! stale `UnitId` left in the set is inert (`Observation::own_units` never
 //! produces it again, `Action`s are only ever emitted for ids currently
 //! owned by this faction, and `UnitId`s are never reused - see
 //! `military::Unit` construction - so a stale entry can never later
@@ -82,13 +108,27 @@ pub struct HumanAgent {
     /// unit in the same paused day has both applied in that order, matching
     /// what they clicked/typed.
     queue: Vec<Action>,
-    /// Units currently delegated to `military` - see this module's own doc
-    /// under "Military delegation". A plain `BTreeSet` (not a `HashSet`):
-    /// iteration order never actually matters for correctness here (lookups
-    /// are all by `contains`), but this crate follows docs/conventions.md
-    /// §5's "never iterate a HashMap/HashSet" rule structurally rather than
-    /// re-litigating it per call site.
-    delegated: BTreeSet<UnitId>,
+    /// Whether the entire `Layer::Military` decision domain is delegated to
+    /// `military` - the primary delegation mode, see this module's own doc
+    /// under "Military delegation". `false` until `delegate_military` is
+    /// called.
+    military_delegated: bool,
+    /// Per-unit overrides against whichever mode `military_delegated` is
+    /// currently in - see this module's own doc under "Military
+    /// delegation" for why the same set means opposite things depending on
+    /// that flag:
+    /// - while `military_delegated`: a *carve-out* - units named here stay
+    ///   under direct player control even though the rest of the army
+    ///   (recruitment included) is the AI's.
+    /// - while not `military_delegated`: the *only* units delegated,
+    ///   opt-in, additively - the original per-unit-only mode.
+    ///
+    /// A plain `BTreeSet` (not a `HashSet`): iteration order never actually
+    /// matters for correctness here (lookups are all by `contains`), but
+    /// this crate follows docs/conventions.md §5's "never iterate a
+    /// HashMap/HashSet" rule structurally rather than re-litigating it per
+    /// call site.
+    unit_overrides: BTreeSet<UnitId>,
     /// The same `HeuristicAgent` logic every AI-controlled faction runs
     /// (`crate::default_heuristic_agent`), wrapped in a `CompositeAgent`
     /// routed to `Layer::Military` alone, composed here rather than
@@ -103,7 +143,8 @@ impl HumanAgent {
         HumanAgent {
             faction,
             queue: Vec::new(),
-            delegated: BTreeSet::new(),
+            military_delegated: false,
+            unit_overrides: BTreeSet::new(),
             military: CompositeAgent::new(faction)
                 .route([Layer::Military], Box::new(crate::default_heuristic_agent(faction.index()))),
         }
@@ -130,32 +171,78 @@ impl HumanAgent {
         &self.queue
     }
 
-    /// Hands `unit`'s orders to `military` from the next `decide()` call
-    /// onward. Idempotent - delegating an already-delegated unit changes
-    /// nothing.
-    pub fn delegate(&mut self, unit: UnitId) {
-        self.delegated.insert(unit);
+    /// Hands the entire `Layer::Military` decision domain - every unit's
+    /// day-to-day orders *and* recruitment - to `military` from the next
+    /// `decide()` call onward, clearing any per-unit carve-out/opt-in state
+    /// (see this module's own doc for why a mode switch clears
+    /// `unit_overrides`). Idempotent - calling this while already
+    /// whole-layer delegated only clears `unit_overrides` again (dropping
+    /// any carve-outs), it does not toggle anything off.
+    pub fn delegate_military(&mut self) {
+        self.military_delegated = true;
+        self.unit_overrides.clear();
     }
 
-    /// Takes `unit` back under direct player control. Idempotent - taking
-    /// back a unit that isn't delegated changes nothing. `military` simply
+    /// Takes the whole military back under direct player control -
+    /// `military` is no longer consulted at all until `delegate_military`
+    /// or `delegate` is called again. Clears `unit_overrides` for the same
+    /// reason `delegate_military` does. Idempotent - a no-op if the whole
+    /// military wasn't delegated (any pure per-unit delegations from
+    /// `delegate` are cleared too, matching "take the whole military back"
+    /// meaning exactly that).
+    pub fn undelegate_military(&mut self) {
+        self.military_delegated = false;
+        self.unit_overrides.clear();
+    }
+
+    /// Whether the entire `Layer::Military` decision domain is currently
+    /// delegated - read by `apps/game`'s policy panel to show "AI runs the
+    /// war" state distinctly from individual delegated units.
+    pub fn is_military_delegated(&self) -> bool {
+        self.military_delegated
+    }
+
+    /// Hands `unit`'s orders to `military` from the next `decide()` call
+    /// onward: while the whole military is delegated, this removes `unit`
+    /// from the carve-out set (it goes back to following delegation like
+    /// everything else); otherwise it adds `unit` to the per-unit opt-in
+    /// set. Idempotent either way - delegating an already-delegated unit
+    /// changes nothing.
+    pub fn delegate(&mut self, unit: UnitId) {
+        if self.military_delegated {
+            self.unit_overrides.remove(&unit);
+        } else {
+            self.unit_overrides.insert(unit);
+        }
+    }
+
+    /// Takes `unit` back under direct player control: while the whole
+    /// military is delegated, this carves `unit` out (every *other* unit,
+    /// and recruitment, stays the AI's); otherwise it removes `unit` from
+    /// the per-unit opt-in set. Idempotent either way - taking back a unit
+    /// that isn't currently delegated changes nothing. `military` simply
     /// stops being asked to order this unit; any move already under way
     /// (`Unit::movement`) is untouched, exactly as taking direct control of
     /// an AI faction's unit via `Simulation` never resets its progress.
     pub fn undelegate(&mut self, unit: UnitId) {
-        self.delegated.remove(&unit);
+        if self.military_delegated {
+            self.unit_overrides.insert(unit);
+        } else {
+            self.unit_overrides.remove(&unit);
+        }
     }
 
     /// Whether `unit` is currently delegated - read by `apps/game`'s unit
-    /// panel/map visuals to mark AI-controlled units.
+    /// panel/map visuals to mark AI-controlled units. Under whole-layer
+    /// delegation this is `true` for every unit *except* an explicit
+    /// carve-out; otherwise it is `true` only for units explicitly
+    /// `delegate`d.
     pub fn is_delegated(&self, unit: UnitId) -> bool {
-        self.delegated.contains(&unit)
-    }
-
-    /// Every currently-delegated unit, for UI code that wants to list or
-    /// count them without a unit-by-unit `is_delegated` scan.
-    pub fn delegated_units(&self) -> &BTreeSet<UnitId> {
-        &self.delegated
+        if self.military_delegated {
+            !self.unit_overrides.contains(&unit)
+        } else {
+            self.unit_overrides.contains(&unit)
+        }
     }
 }
 
@@ -165,27 +252,46 @@ impl Agent for HumanAgent {
     }
 
     /// Drains whatever `push` accumulated since the last call, then - only
-    /// while at least one unit is delegated - asks `military` (a
+    /// while there is *something* to delegate at all (the whole military,
+    /// or at least one individually-opted-in unit) - asks `military` (a
     /// `CompositeAgent` routed to `Layer::Military` alone, wrapping the same
     /// `HeuristicAgent` an AI-controlled faction of this index would run)
     /// what it would order this tick, and appends whichever of those orders
-    /// target a delegated unit (`Action::target_unit`/`delegated`). Every
-    /// other Military-layer action `military` produces (`RecruitUnit` has no
-    /// existing unit to target, so `target_unit` already excludes it) is
-    /// discarded here, and everything outside `Layer::Military` was already
-    /// discarded by `military` itself (`CompositeAgent`'s own layer
-    /// filtering) - none of it is a `unit` order, and `docs/design.md §14`
-    /// leaves all of that to the player. The wrapped `HeuristicAgent` still
-    /// only actually decides once every `period` days - identical cadence to
-    /// an AI-controlled faction of the same index - so most calls here cost
-    /// nothing beyond that early return.
+    /// `is_action_delegated` keeps. Everything outside `Layer::Military` was
+    /// already discarded by `military` itself (`CompositeAgent`'s own layer
+    /// filtering) - `docs/design.md §14` leaves all of that to the player.
+    /// The wrapped `HeuristicAgent` still only actually decides once every
+    /// `period` days - identical cadence to an AI-controlled faction of the
+    /// same index - so most calls here cost nothing beyond that early
+    /// return.
     fn decide(&mut self, obs: &Observation) -> Vec<Action> {
         let mut actions = std::mem::take(&mut self.queue);
-        if !self.delegated.is_empty() {
+        if self.military_delegated || !self.unit_overrides.is_empty() {
             let ai_actions = self.military.decide(obs);
-            actions.extend(ai_actions.into_iter().filter(|a| a.target_unit().is_some_and(|u| self.delegated.contains(&u))));
+            actions.extend(ai_actions.into_iter().filter(|a| self.is_action_delegated(a)));
         }
         actions
+    }
+}
+
+impl HumanAgent {
+    /// Whether one of `military`'s own `Layer::Military` outputs should
+    /// actually reach the player's faction this tick. Routes on
+    /// `Action::target_unit` (the same exhaustive, compiler-checked
+    /// classification `Action::layer` is, see `archipelago_sim::action`):
+    /// an action that targets an existing unit follows `is_delegated` for
+    /// that unit exactly as before; an action that targets no unit at all
+    /// (today, only `RecruitUnit`, which *creates* a unit rather than
+    /// commanding one that already exists, so there is no per-unit
+    /// carve-out/opt-in it could possibly be checked against) is kept only
+    /// under whole-layer delegation, since deciding how large the army is
+    /// and where is a force-structure decision, not an order to some unit
+    /// that does or doesn't happen to be in a set.
+    fn is_action_delegated(&self, action: &Action) -> bool {
+        match action.target_unit() {
+            Some(unit) => self.is_delegated(unit),
+            None => self.military_delegated,
+        }
     }
 }
 
@@ -196,6 +302,7 @@ mod tests {
     use archipelago_sim::scenario;
     use archipelago_sim::sim::Simulation;
     use archipelago_sim::world::Station;
+    use crate::HeuristicAgent;
 
     #[test]
     fn queue_drains_in_push_order_and_empties() {
@@ -391,6 +498,138 @@ mod tests {
             after.iter().all(|a| a.target_unit() != Some(target)),
             "taking control back must stop the AI from ordering this unit, even on the same tick: got {after:?}"
         );
+    }
+
+    /// Per-unit-only delegation (`delegate(unit)` without ever calling
+    /// `delegate_military`) must never authorize `RecruitUnit`, even while
+    /// `military` is actively running for other reasons - it targets no
+    /// existing unit, so there is no per-unit opt-in it could possibly
+    /// satisfy. Force structure is a whole-layer decision (this module's
+    /// own doc), not something a handful of individually-delegated units
+    /// can imply.
+    #[test]
+    fn per_unit_delegation_alone_never_recruits() {
+        let mut sim = Simulation::with_world(scenario::build_world(), 1);
+        let player = FactionId(0);
+        let n = sim.world.factions.len();
+
+        let obs = Observation { faction: player, world: &sim.world };
+        let would_order = units_a_fresh_heuristic_would_order(player, &obs);
+        let mut agent = HumanAgent::new(player);
+        for &unit in &would_order {
+            agent.delegate(unit);
+        }
+        assert!(!agent.is_military_delegated(), "delegate(unit) alone must never flip on whole-layer delegation");
+
+        let mut ai: Vec<HeuristicAgent> = (1..n).map(crate::default_heuristic_agent).collect();
+        for _ in 0..300 {
+            if sim.world.day >= 300 {
+                break;
+            }
+            for i in 0..n {
+                if !sim.world.factions[i].alive {
+                    continue;
+                }
+                let faction = FactionId(i as u32);
+                let o = Observation { faction, world: &sim.world };
+                let actions = if faction == player { agent.decide(&o) } else { ai[i - 1].decide(&o) };
+                assert!(
+                    faction != player || actions.iter().all(|a| !matches!(a, Action::RecruitUnit { .. })),
+                    "per-unit delegation alone must never produce a RecruitUnit action, got {actions:?}"
+                );
+                sim.apply(faction, &actions);
+            }
+            sim.step();
+        }
+    }
+
+    /// The regression guard for this module's central fix (see this
+    /// module's own doc under "Whole-layer delegation with per-unit
+    /// carve-outs, not a static unit set"): delegating the whole military
+    /// must let it actually grow the army over time via `RecruitUnit`, not
+    /// only reshuffle whatever units existed the moment delegation started.
+    ///
+    /// Confirmed this can actually fail: temporarily made `is_action_delegated`
+    /// return `false` for every action with no `target_unit` (i.e. restored
+    /// this module's pre-fix behaviour, where `RecruitUnit` could never pass
+    /// the filter) and re-ran - `recruits` stayed `0` for the full 300 days
+    /// even with the whole military delegated. Reverted before committing.
+    #[test]
+    fn delegating_the_whole_military_lets_it_recruit() {
+        let mut sim = Simulation::with_world(scenario::build_world(), 1);
+        let player = FactionId(0);
+        let n = sim.world.factions.len();
+
+        let mut human = HumanAgent::new(player);
+        human.delegate_military();
+        let mut ai: Vec<HeuristicAgent> = (1..n).map(crate::default_heuristic_agent).collect();
+
+        let mut recruits = 0u32;
+        const DAYS: u32 = 300;
+        while sim.world.day < DAYS {
+            for i in 0..n {
+                if !sim.world.factions[i].alive {
+                    continue;
+                }
+                let faction = FactionId(i as u32);
+                let obs = Observation { faction, world: &sim.world };
+                let actions = if faction == player { human.decide(&obs) } else { ai[i - 1].decide(&obs) };
+                if faction == player {
+                    recruits += actions.iter().filter(|a| matches!(a, Action::RecruitUnit { .. })).count() as u32;
+                }
+                sim.apply(faction, &actions);
+            }
+            sim.step();
+        }
+        assert!(
+            recruits > 0,
+            "a whole-military-delegated faction must actually recruit new units over {DAYS} days, got {recruits} RecruitUnit actions"
+        );
+    }
+
+    /// The carve-out half of whole-layer delegation: delegating the entire
+    /// military, then taking one unit back, must stop the AI from ordering
+    /// *that* unit while everything else - including recruitment - stays
+    /// delegated.
+    #[test]
+    fn whole_military_delegation_supports_a_per_unit_carve_out() {
+        let world = scenario::build_world();
+        let obs = Observation { faction: FactionId(0), world: &world };
+        let would_order = units_a_fresh_heuristic_would_order(FactionId(0), &obs);
+        let carved_out = *would_order.first().expect("mvp's faction 0 must get at least one unit order on day 0");
+        let other = obs
+            .world
+            .units
+            .iter()
+            .find(|u| u.owner == FactionId(0) && u.alive && u.id != carved_out)
+            .map(|u| u.id)
+            .expect("mvp fields more than one unit per faction");
+
+        let mut agent = HumanAgent::new(FactionId(0));
+        agent.delegate_military();
+        assert!(agent.is_delegated(carved_out), "everything must start delegated once the whole military is");
+        assert!(agent.is_delegated(other));
+
+        agent.undelegate(carved_out);
+        assert!(!agent.is_delegated(carved_out), "an explicit carve-out must stop being delegated");
+        assert!(agent.is_delegated(other), "carving out one unit must not affect any other unit");
+        assert!(agent.is_military_delegated(), "carving out one unit must not turn off whole-layer delegation itself");
+
+        let actions = agent.decide(&obs);
+        assert!(
+            actions.iter().all(|a| a.target_unit() != Some(carved_out)),
+            "the carved-out unit must receive no AI order: got {actions:?}"
+        );
+        assert!(
+            would_order.iter().filter(|&&u| u != carved_out).any(|&u| actions.iter().any(|a| a.target_unit() == Some(u))),
+            "every other unit must still be ordered by the AI: got {actions:?}"
+        );
+
+        // Re-delegating the carved-out unit explicitly must fold it back
+        // in, exactly like the panel's "select all, then carve out
+        // exceptions, then change your mind about one" flow.
+        agent.delegate(carved_out);
+        assert!(agent.is_delegated(carved_out));
     }
 
     /// Stage 7B's Bevy-free guard (docs/phase7-spec.md "Stage 7B の受け入れ

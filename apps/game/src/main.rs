@@ -1,9 +1,21 @@
 //! Entry point: parses `--scenario <path>`/`--seed <n>`/`--days <n>`,
 //! Stage 7B's `--play <faction>`/`--record <path>`/`--replay <path>`
-//! (docs/phase7-spec.md "Stage 7B — 遊ぶ"), and `--screenshot`, loads the
-//! map, and hands off to `archipelago_game::app::run` for everything
-//! Bevy-side.
-
+//! (docs/phase7-spec.md "Stage 7B — 遊ぶ"), `--delegate-military`
+//! (docs/design.md §14), and `--screenshot`, loads the map, and hands off
+//! to `archipelago_game::app::run` for everything Bevy-side.
+//!
+//! **`--delegate-military`'s history**: this used to be `--debug-delegate-units`,
+//! a screenshot-only verification convenience wired through
+//! `ScreenshotConfig` - and, because it was wired *only* that way, it had
+//! no effect at all unless `--screenshot <path>` was also given, despite
+//! looking like an ordinary standalone flag. "The AI runs the war while I
+//! run the economy" is a legitimate, entirely ordinary way to play - not
+//! achievable by hand (`apps/game`'s unit panel delegates one unit per
+//! click) and not a debug/verification concern - so it is now parsed like
+//! `--play`/`--record`/`--replay`, requires `--play` the same way `--record`/
+//! `--replay` do, applies to a live game with no `--screenshot` in sight,
+//! and is listed in the ordinary usage line below rather than the
+//! debug/screenshot block.
 use archipelago_game::app::{PlayConfig, ScreenshotConfig, ScreenshotTrigger};
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::world::World;
@@ -13,7 +25,10 @@ fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!(
         "usage: archipelago-game [--scenario <path>] [--seed <n>] [--days <n>] \
          [--play <faction index or name>] [--record <path>] [--replay <path>] \
-         [--cjk-font <path>]\n\
+         [--delegate-military] [--cjk-font <path>]\n\
+         \n\
+         --delegate-military: hand the entire military (orders and recruitment) to the AI \
+         for the whole game, so you can just run the economy/diplomacy - requires --play.\n\
          \n\
          debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames> | --screenshot-at-day <day>] \
@@ -31,6 +46,9 @@ struct Args {
     play: Option<String>,
     record: Option<String>,
     replay: Option<String>,
+    /// `--delegate-military` (this module's own doc): requires `--play`,
+    /// same as `--record`/`--replay` do.
+    delegate_military: bool,
     screenshot: Option<String>,
     screenshot_after: u32,
     /// `--screenshot-at-day <day>`: overrides `screenshot_after` entirely
@@ -49,12 +67,6 @@ struct Args {
     debug_open_policy: bool,
     debug_select_region: Option<String>,
     debug_select_units: bool,
-    /// `--debug-delegate-units`: military delegation's own verification
-    /// convenience (docs/design.md §14, `ScreenshotConfig::delegate_units`'s
-    /// own doc) - delegates every living unit the `--play`ed faction owns
-    /// at startup, so a `--screenshot` run can show delegated units marked
-    /// as such with nothing at the keyboard to press `U` first.
-    debug_delegate_units: bool,
     debug_camera_region: Option<String>,
     debug_camera_zoom: f32,
     /// `--cjk-font <path>`: overrides `apps/game/src/app/fonts.rs`'s
@@ -82,6 +94,7 @@ fn parse_args() -> Args {
     let mut play = None;
     let mut record = None;
     let mut replay = None;
+    let mut delegate_military = false;
     let mut screenshot = None;
     let mut screenshot_after = DEFAULT_SCREENSHOT_AFTER_FRAMES;
     let mut screenshot_at_day = None;
@@ -91,7 +104,6 @@ fn parse_args() -> Args {
     let mut debug_open_policy = false;
     let mut debug_select_region = None;
     let mut debug_select_units = false;
-    let mut debug_delegate_units = false;
     let mut debug_camera_region = None;
     let mut debug_camera_zoom = DEFAULT_DEBUG_CAMERA_ZOOM;
     let mut cjk_font = None;
@@ -118,6 +130,7 @@ fn parse_args() -> Args {
             "--replay" => {
                 replay = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--replay expects a value")));
             }
+            "--delegate-military" => delegate_military = true,
             "--screenshot" => {
                 screenshot = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--screenshot expects a value")));
             }
@@ -137,7 +150,6 @@ fn parse_args() -> Args {
                 debug_select_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-select-region expects a region index or name")));
             }
             "--debug-select-units" => debug_select_units = true,
-            "--debug-delegate-units" => debug_delegate_units = true,
             "--debug-camera-region" => {
                 debug_camera_region = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-region expects a region index or name")));
             }
@@ -182,6 +194,7 @@ fn parse_args() -> Args {
         play,
         record,
         replay,
+        delegate_military,
         screenshot,
         screenshot_after,
         screenshot_at_day,
@@ -191,7 +204,6 @@ fn parse_args() -> Args {
         debug_open_policy,
         debug_select_region,
         debug_select_units,
-        debug_delegate_units,
         debug_camera_region,
         debug_camera_zoom,
         cjk_font,
@@ -266,6 +278,9 @@ fn main() {
     if args.record.is_some() && args.play.is_none() {
         print_usage_and_exit("--record requires --play <faction> to say which faction to record");
     }
+    if args.delegate_military && args.play.is_none() {
+        print_usage_and_exit("--delegate-military requires --play <faction> to say which faction's military to delegate");
+    }
 
     let play = args.play.as_deref().map(|v| resolve_faction(&world, v));
     let replay_days = args.replay.as_deref().map(|path| {
@@ -275,7 +290,8 @@ fn main() {
         })
     });
 
-    let play_config = play.map(|player| PlayConfig { player, record: args.record.clone(), replay: replay_days });
+    let play_config =
+        play.map(|player| PlayConfig { player, record: args.record.clone(), replay: replay_days, delegate_military: args.delegate_military });
 
     let debug_camera_region = args.debug_camera_region.as_deref().map(|v| resolve_region(&world, v));
     let debug_select_region = args.debug_select_region.as_deref().map(|v| resolve_region(&world, v));
@@ -297,7 +313,6 @@ fn main() {
         supply_overlay: args.debug_supply_overlay,
         select_region: debug_select_region,
         select_units: args.debug_select_units,
-        delegate_units: args.debug_delegate_units,
         camera_focus_region: debug_camera_region,
         camera_zoom: args.debug_camera_zoom,
     });
