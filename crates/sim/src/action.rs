@@ -102,6 +102,172 @@ pub enum Action {
     RespondToNaturalLanguageProposal { from: FactionId, terms: Vec<TreatyTerm>, accept: bool },
 }
 
+/// One of the four decision domains every `Action` belongs to (design.md
+/// §14/§22: Human/Heuristic/LLM/RL agents interchangeable, and users writing
+/// their own). A `Layer` is a coarser routing key than the concrete `Action`
+/// variant - an external RL policy, or an internal `archipelago-agents`
+/// `CompositeAgent`, decides per layer rather than per variant, so this
+/// needs to partition every current *and future* `Action` variant into
+/// exactly one bucket. `Action::layer` is where that partition is enforced;
+/// this type intentionally carries no behaviour of its own.
+///
+/// The four boundaries, and the judgement calls behind them:
+///
+/// - **`Military`** — orders that move, raise, or stand down force
+///   structure: `MoveUnit`/`HoldUnit`/`DisbandUnit`/`ReinforceUnit`, and
+///   `RecruitUnit` alongside them even though it spends `Faction::manpower`
+///   and `Good::Arms` (economic resources, same as `ReinforceUnit`). The
+///   decision `RecruitUnit` represents — how large the army is, and where —
+///   is inseparable from the other four force-structure actions: a policy
+///   that could march and reinforce units but never raise or retire one
+///   couldn't meaningfully "be the military" at all. Resource cost was
+///   deliberately not used as the classifying property, or `ReinforceUnit`
+///   (uncontroversially military) would have to move to `Economy` too.
+/// - **`Economy`** — national resource policy: `SetConscription`,
+///   `SetCivilianRation`, `SetIndustryPriority`, `SetLogisticsPriority`,
+///   `SetImportPlan`, plus `Build`/`CancelBuild`. Construction is design.md
+///   §9's own economic system listing "建設" alongside food/steel/energy as
+///   one of the industries a national economy runs, and every project it
+///   funds (`crate::construction::Project`) draws on the same
+///   Machinery/Steel stock `SetIndustryPriority` allocates between goods —
+///   a separate "infrastructure" layer would isolate two variants that
+///   share every input and every constraint with the rest of economic
+///   planning, for no distinct policy surface of their own.
+/// - **`GrandStrategy`** — `SetNationalFocus` alone, deliberately not folded
+///   into `Economy` or `Military` even though a given focus's effects land
+///   on one of them (or on diplomacy): a `NationalFocus` is the one
+///   decision that reshapes multipliers *across* every other layer at once
+///   (military caution, economic priorities, treaty-seeking — see
+///   `crate::focus::active`'s call sites throughout `archipelago-agents`),
+///   so it sits above all three rather than inside any one of them. It is
+///   also the lowest-frequency, highest-leverage action in the whole
+///   vocabulary — exactly the shape an RL curriculum wants to isolate into
+///   its own tiny (six-focus) action space rather than bury inside a larger
+///   `Economy` or `Military` one.
+/// - **`Diplomacy`** — every treaty and natural-language action:
+///   `ProposeTreaty`/`AcceptTreaty`/`RejectTreaty`/`DeclareWar`/
+///   `BreakTreaty`/`ProposeInNaturalLanguage`/
+///   `RespondToNaturalLanguageProposal`. None of these touch a unit,
+///   resource, or region directly; every one of them mutates only
+///   `World::diplomacy` state.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Layer {
+    Military,
+    Economy,
+    GrandStrategy,
+    Diplomacy,
+}
+
+pub const LAYER_COUNT: usize = 4;
+
+/// Every `Layer`, in a fixed order - iterate this instead of hand-rolling
+/// one, the same convention `good::ALL_GOODS`/`diplomacy::ALL_TREATIES`/
+/// `focus::ALL_FOCI` already follow, so nothing here ever depends on a
+/// `HashMap`/`HashSet` iteration order (docs/conventions.md §5).
+pub const ALL_LAYERS: [Layer; LAYER_COUNT] =
+    [Layer::Military, Layer::Economy, Layer::GrandStrategy, Layer::Diplomacy];
+
+impl Layer {
+    pub const fn index(self) -> usize {
+        match self {
+            Layer::Military => 0,
+            Layer::Economy => 1,
+            Layer::GrandStrategy => 2,
+            Layer::Diplomacy => 3,
+        }
+    }
+
+    /// Lowercase English key, for the API `/schema` response and the
+    /// Python env - mirrors `Good::key`/`Treaty::key`/`NationalFocus::key`.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Layer::Military => "military",
+            Layer::Economy => "economy",
+            Layer::GrandStrategy => "grand_strategy",
+            Layer::Diplomacy => "diplomacy",
+        }
+    }
+}
+
+impl Action {
+    /// Which `Layer` this action belongs to - see `Layer`'s own doc for the
+    /// boundaries and the reasoning behind each judgement call.
+    ///
+    /// Exhaustive with no wildcard arm: a new `Action` variant fails to
+    /// compile here until it is explicitly placed in a layer, rather than
+    /// silently landing nowhere (or everywhere) the way a catch-all arm
+    /// would let it - this is what makes the classification total and
+    /// compiler-checked rather than a convention someone has to remember.
+    pub fn layer(&self) -> Layer {
+        match self {
+            Action::MoveUnit { .. }
+            | Action::HoldUnit { .. }
+            | Action::DisbandUnit { .. }
+            | Action::ReinforceUnit { .. }
+            | Action::RecruitUnit { .. } => Layer::Military,
+
+            Action::SetConscription(_)
+            | Action::SetCivilianRation(_)
+            | Action::SetIndustryPriority { .. }
+            | Action::SetLogisticsPriority { .. }
+            | Action::SetImportPlan { .. }
+            | Action::Build { .. }
+            | Action::CancelBuild { .. } => Layer::Economy,
+
+            Action::SetNationalFocus(_) => Layer::GrandStrategy,
+
+            Action::ProposeTreaty { .. }
+            | Action::AcceptTreaty { .. }
+            | Action::RejectTreaty { .. }
+            | Action::DeclareWar { .. }
+            | Action::BreakTreaty { .. }
+            | Action::ProposeInNaturalLanguage { .. }
+            | Action::RespondToNaturalLanguageProposal { .. } => Layer::Diplomacy,
+        }
+    }
+
+    /// The existing unit this action orders, if it orders one at all - a
+    /// finer routing key than `Layer`, for a caller that needs to route
+    /// *within* `Military` rather than merely to it (`archipelago-agents`'
+    /// `HumanAgent` per-unit delegation is the one user today: a delegated
+    /// unit's `MoveUnit`/`HoldUnit`/`DisbandUnit`/`ReinforceUnit` should
+    /// reach the wrapped agent, but nothing else should, unit-targeted or
+    /// not).
+    ///
+    /// `RecruitUnit` returns `None` alongside every non-`Military` action -
+    /// it *creates* a unit rather than commanding one that already exists,
+    /// so there is no existing `UnitId` to route by (see `Layer::Military`'s
+    /// own doc for why it is still classified `Military`). Exhaustive for
+    /// the same reason `layer` is: a future action that does target a unit
+    /// must be added here explicitly rather than silently falling through a
+    /// wildcard into "does not target a unit".
+    pub fn target_unit(&self) -> Option<UnitId> {
+        match self {
+            Action::MoveUnit { unit, .. }
+            | Action::HoldUnit { unit }
+            | Action::DisbandUnit { unit }
+            | Action::ReinforceUnit { unit } => Some(*unit),
+
+            Action::RecruitUnit { .. }
+            | Action::SetConscription(_)
+            | Action::SetCivilianRation(_)
+            | Action::SetIndustryPriority { .. }
+            | Action::SetLogisticsPriority { .. }
+            | Action::SetImportPlan { .. }
+            | Action::Build { .. }
+            | Action::CancelBuild { .. }
+            | Action::SetNationalFocus(_)
+            | Action::ProposeTreaty { .. }
+            | Action::AcceptTreaty { .. }
+            | Action::RejectTreaty { .. }
+            | Action::DeclareWar { .. }
+            | Action::BreakTreaty { .. }
+            | Action::ProposeInNaturalLanguage { .. }
+            | Action::RespondToNaturalLanguageProposal { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActionError {
     NotOwner,

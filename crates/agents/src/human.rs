@@ -16,23 +16,38 @@
 //! **Military delegation** (docs/design.md §14): a player can hand a unit's
 //! day-to-day orders to the same `HeuristicAgent` logic the AI factions run,
 //! at per-unit granularity - `delegate`/`undelegate` add/remove a `UnitId`
-//! from `delegated`, and `decide()` folds in whatever `military` (an
-//! internal `HeuristicAgent` for this same faction, composed - not
-//! inherited from, per docs/conventions.md §1) would have ordered for
-//! exactly those units. This is why `decide()` now reads `obs`: it did not
-//! before, since there was nothing here that needed it. That is still not a
-//! privileged path - `military.decide_for_llm` is the identical call
-//! `LlmAgent::decide` makes on its own wrapped `HeuristicAgent`
-//! (`crate::llm`), and every action it produces still goes through
-//! `Simulation::apply` unchanged, whether it targets a delegated unit or
-//! came from the player's own queue. Delegation is deliberately per-unit
-//! rather than per-army or per-front: `docs/design.md §14`'s promise is
-//! that the player always keeps *some* units under direct control while
-//! the rest fight themselves, and a coarser knob (all-or-nothing, or "this
-//! front only" with no map-level notion of fronts in `crates/sim`) can't
-//! express "hold these three elite corps back, delegate everyone else" -
-//! exactly the workflow `apps/game`'s unit panel's own "select all, then
-//! carve out exceptions" flow is built around.
+//! from `delegated`, and `decide()` folds in whatever `military` (a
+//! `crate::composite::CompositeAgent` wrapping a `HeuristicAgent` for this
+//! same faction, composed - not inherited from, per docs/conventions.md §1)
+//! would have ordered for exactly those units. This is why `decide()` now
+//! reads `obs`: it did not before, since there was nothing here that needed
+//! it. That is still not a privileged path - the wrapped `HeuristicAgent`'s
+//! `decide` is the exact same trait method every AI faction's agent runs,
+//! and every action it produces still goes through `Simulation::apply`
+//! unchanged, whether it targets a delegated unit or came from the player's
+//! own queue.
+//!
+//! `military` is a `CompositeAgent` routed to `Layer::Military` alone
+//! (`archipelago_sim::action::Layer`) rather than a bare `HeuristicAgent` -
+//! this *is* delegation expressed as the same layer-routing mechanism every
+//! other pluggable-agent composition in this crate now uses (see
+//! `crate::composite`), not a separate, ad-hoc concept. What `Layer` alone
+//! cannot express is *which* units: delegation is deliberately per-unit
+//! rather than per-army, per-front, or "the whole Military layer" -
+//! `docs/design.md §14`'s promise is that the player always keeps *some*
+//! units under direct control while the rest fight themselves, and a
+//! coarser knob (all-or-nothing, or "this front only" with no map-level
+//! notion of fronts in `crates/sim`) can't express "hold these three elite
+//! corps back, delegate everyone else" - exactly the workflow `apps/game`'s
+//! unit panel's own "select all, then carve out exceptions" flow is built
+//! around. `decide()` therefore adds one more filter on top of
+//! `CompositeAgent`'s own layer routing: `Action::target_unit`, the same
+//! exhaustive, compiler-checked classification `Action::layer` is (see
+//! `archipelago_sim::action`), which is what replaces the old hand-rolled
+//! `ordered_unit` match against `MoveUnit | HoldUnit | DisbandUnit |
+//! ReinforceUnit` this module used to carry - `RecruitUnit` is `Military`
+//! but targets no existing unit, so `target_unit` already excludes it
+//! without this module needing to special-case it by name.
 //!
 //! `delegated` is never pruned when a unit dies or changes hands - a stale
 //! `UnitId` left in the set is inert (`Observation::own_units` never
@@ -52,12 +67,12 @@
 
 use std::collections::BTreeSet;
 
-use archipelago_sim::action::Action;
+use archipelago_sim::action::{Action, Layer};
 use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::{FactionId, UnitId};
 use archipelago_sim::observation::Observation;
 
-use crate::HeuristicAgent;
+use crate::composite::CompositeAgent;
 
 pub struct HumanAgent {
     faction: FactionId,
@@ -75,10 +90,12 @@ pub struct HumanAgent {
     /// re-litigating it per call site.
     delegated: BTreeSet<UnitId>,
     /// The same `HeuristicAgent` logic every AI-controlled faction runs
-    /// (`crate::default_heuristic_agent`), composed here rather than
+    /// (`crate::default_heuristic_agent`), wrapped in a `CompositeAgent`
+    /// routed to `Layer::Military` alone, composed here rather than
     /// reimplemented, so a delegated unit is ordered by the literal same
-    /// code path - see `decide`'s own doc.
-    military: HeuristicAgent,
+    /// code path - see `decide`'s own doc and this module's "Military
+    /// delegation" doc.
+    military: CompositeAgent,
 }
 
 impl HumanAgent {
@@ -87,7 +104,8 @@ impl HumanAgent {
             faction,
             queue: Vec::new(),
             delegated: BTreeSet::new(),
-            military: crate::default_heuristic_agent(faction.index()),
+            military: CompositeAgent::new(faction)
+                .route([Layer::Military], Box::new(crate::default_heuristic_agent(faction.index()))),
         }
     }
 
@@ -141,48 +159,31 @@ impl HumanAgent {
     }
 }
 
-/// Whether `action` orders an existing unit (as opposed to a whole-faction
-/// policy/diplomacy/construction/recruitment decision) - `HumanAgent::
-/// decide` keeps only these from `military`'s output, and only for units in
-/// `delegated`. Every other `Action` variant `HeuristicAgent::decide_for_llm`
-/// can produce (`SetConscription`, `RecruitUnit`, `Build`, `ProposeTreaty`,
-/// ...) stays the player's own call per docs/design.md §14 - delegation is
-/// unit orders only, never economy, diplomacy, or force composition.
-fn ordered_unit(action: &Action) -> Option<UnitId> {
-    match *action {
-        Action::MoveUnit { unit, .. }
-        | Action::HoldUnit { unit }
-        | Action::DisbandUnit { unit }
-        | Action::ReinforceUnit { unit } => Some(unit),
-        _ => None,
-    }
-}
-
 impl Agent for HumanAgent {
     fn name(&self) -> &str {
         "HumanAgent"
     }
 
     /// Drains whatever `push` accumulated since the last call, then - only
-    /// while at least one unit is delegated - asks `military` (the same
-    /// `HeuristicAgent::decide_for_llm` call `LlmAgent::decide` makes on its
-    /// own wrapped agent) what it would order this tick, and appends
-    /// whichever of those orders target a delegated unit
-    /// (`ordered_unit`/`delegated`). Every other action `military` produces
-    /// (policy, diplomacy, recruitment, construction) is discarded - it was
-    /// computed (the same monolithic `decide_for_llm` runs all of it in one
-    /// call, precisely so no piece of the AI's unit-ordering logic is
-    /// forked out into a copy) but never applied, since none of it is a
-    /// `unit` order and `docs/design.md §14` leaves all of that to the
-    /// player. `military` still only actually decides once every
-    /// `HeuristicAgent`-internal `period` days - identical cadence to an
-    /// AI-controlled faction of the same index - so most calls here cost
-    /// nothing beyond the early return inside `decide_for_llm` itself.
+    /// while at least one unit is delegated - asks `military` (a
+    /// `CompositeAgent` routed to `Layer::Military` alone, wrapping the same
+    /// `HeuristicAgent` an AI-controlled faction of this index would run)
+    /// what it would order this tick, and appends whichever of those orders
+    /// target a delegated unit (`Action::target_unit`/`delegated`). Every
+    /// other Military-layer action `military` produces (`RecruitUnit` has no
+    /// existing unit to target, so `target_unit` already excludes it) is
+    /// discarded here, and everything outside `Layer::Military` was already
+    /// discarded by `military` itself (`CompositeAgent`'s own layer
+    /// filtering) - none of it is a `unit` order, and `docs/design.md §14`
+    /// leaves all of that to the player. The wrapped `HeuristicAgent` still
+    /// only actually decides once every `period` days - identical cadence to
+    /// an AI-controlled faction of the same index - so most calls here cost
+    /// nothing beyond that early return.
     fn decide(&mut self, obs: &Observation) -> Vec<Action> {
         let mut actions = std::mem::take(&mut self.queue);
         if !self.delegated.is_empty() {
-            let ai_actions = self.military.decide_for_llm(obs, None);
-            actions.extend(ai_actions.into_iter().filter(|a| ordered_unit(a).is_some_and(|u| self.delegated.contains(&u))));
+            let ai_actions = self.military.decide(obs);
+            actions.extend(ai_actions.into_iter().filter(|a| a.target_unit().is_some_and(|u| self.delegated.contains(&u))));
         }
         actions
     }
@@ -278,13 +279,13 @@ mod tests {
     /// previously called) as this standalone peek agent, so for the very
     /// first `decide()` call against the same `obs` the two are guaranteed
     /// to produce byte-identical output - this predicts a fresh
-    /// `HumanAgent`'s first decision without ever calling `decide_for_llm`
-    /// on the `HumanAgent` under test itself (which would advance its
-    /// internal counters and make the test's own peek interfere with what
-    /// it's trying to observe).
+    /// `HumanAgent`'s first decision without ever calling `decide()` on the
+    /// `HumanAgent` under test itself (which would advance its internal
+    /// counters and make the test's own peek interfere with what it's
+    /// trying to observe).
     fn units_a_fresh_heuristic_would_order(faction: FactionId, obs: &Observation) -> Vec<UnitId> {
         let mut peek = crate::default_heuristic_agent(faction.index());
-        peek.decide_for_llm(obs, None).iter().filter_map(ordered_unit).collect()
+        peek.decide(obs).iter().filter_map(Action::target_unit).collect()
     }
 
     /// A delegated unit must receive an order from `decide()` even though
@@ -315,7 +316,7 @@ mod tests {
         // `military`.
         let actions = agent.decide(&obs);
         assert!(
-            would_order.iter().any(|&u| actions.iter().any(|a| ordered_unit(a) == Some(u))),
+            would_order.iter().any(|&u| actions.iter().any(|a| a.target_unit() == Some(u))),
             "a delegated unit must be ordered by decide() with no player action queued: got {actions:?}"
         );
     }
@@ -351,7 +352,7 @@ mod tests {
         agent.delegate(other);
         let actions = agent.decide(&obs);
         assert!(
-            actions.iter().all(|a| ordered_unit(a) != Some(target)),
+            actions.iter().all(|a| a.target_unit() != Some(target)),
             "an undelegated unit must never appear in decide()'s output, even though a fresh heuristic would \
              have ordered it if it were delegated: got {actions:?}"
         );
@@ -379,7 +380,7 @@ mod tests {
         assert!(agent.is_delegated(target));
         let before = agent.decide(&obs);
         assert!(
-            before.iter().any(|a| ordered_unit(a) == Some(target)),
+            before.iter().any(|a| a.target_unit() == Some(target)),
             "delegating the unit must produce an order for it: got {before:?}"
         );
 
@@ -387,7 +388,7 @@ mod tests {
         assert!(!agent.is_delegated(target));
         let after = agent.decide(&obs);
         assert!(
-            after.iter().all(|a| ordered_unit(a) != Some(target)),
+            after.iter().all(|a| a.target_unit() != Some(target)),
             "taking control back must stop the AI from ordering this unit, even on the same tick: got {after:?}"
         );
     }

@@ -12,7 +12,7 @@
 //! refused" are the same kind of event (a rejection with a reason), so both
 //! flow into the same response array.
 
-use archipelago_sim::action::{Action, ActionError};
+use archipelago_sim::action::{Action, ActionError, Layer, ALL_LAYERS};
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
@@ -213,20 +213,24 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
 // brief, one that has already bitten this codebase twice. Two different
 // defences against that drift are used here, at two different strengths:
 //
-// - The *enum vocabularies* (`good`, `treaty`, `focus`) are built by
-//   mapping the exact same `ALL_GOODS`/`ALL_TREATIES`/`ALL_FOCI` arrays and
-//   `key()` methods `good_from_key`/`treaty_from_key`/`focus_from_key`
-//   above already use to decode those same strings - so those three
-//   vocabularies literally cannot list a name the decoder doesn't accept,
-//   or omit one it does; they're the same data, not a copy of it.
+// - The *enum vocabularies* (`good`, `treaty`, `focus`, `layer`) are built
+//   by mapping the exact same `ALL_GOODS`/`ALL_TREATIES`/`ALL_FOCI`/
+//   `ALL_LAYERS` arrays and `key()` methods `good_from_key`/
+//   `treaty_from_key`/`focus_from_key`/`Layer::key` above already use (or,
+//   for `layer`, that `action_entry` uses) - so those four vocabularies
+//   literally cannot list a name the decoder doesn't accept/produce, or
+//   omit one it does; they're the same data, not a copy of it.
 // - The action list itself (names, required/optional fields, nested object
-//   shapes) has no such mechanical link - a hand-written `match` has no
-//   runtime type to introspect without a proc-macro or build-script this
-//   workspace doesn't have (§0: zero external dependencies). Instead,
-//   `tests::schema_matches_decoder` decodes a synthesized sample of every
-//   action type this function advertises and asserts `action_from_value`
-//   accepts it - so an entry added here that doesn't match the decoder (or
-//   a decoder change this table falls behind) fails a test, not silently.
+//   shapes, and now each entry's `layer`) has no such mechanical link for
+//   the *shape* - a hand-written `match` has no runtime type to introspect
+//   without a proc-macro or build-script this workspace doesn't have (§0:
+//   zero external dependencies). Instead, `tests::schema_matches_decoder`
+//   decodes a synthesized sample of every action type this function
+//   advertises, asserts `action_from_value` accepts it, *and* asserts the
+//   decoded `Action`'s own `Action::layer()` matches the `layer` this table
+//   claims for it - so an entry added here that doesn't match the decoder
+//   (or a decoder change this table falls behind, on either its fields or
+//   its declared layer) fails a test, not silently.
 
 fn field(name: &str, ty: &str, required: bool) -> Value {
     Value::obj(vec![("name", Value::str(name)), ("type", Value::str(ty)), ("required", Value::Bool(required))])
@@ -259,53 +263,89 @@ fn field_array(name: &str, item_object_name: &str, required: bool) -> Value {
     ])
 }
 
-fn action_entry(kind: &str, fields: Vec<Value>) -> Value {
-    Value::obj(vec![("type", Value::str(kind)), ("fields", Value::arr(fields))])
+/// `layer` names the `Layer` (`archipelago_sim::action::Layer`) this action
+/// kind's decoded `Action::layer()` reports - `tests::schema_matches_decoder`
+/// decodes a sample of every entry below and asserts the two agree, so this
+/// can't silently drift from the real classification the way a second,
+/// unchecked copy of it could.
+fn action_entry(kind: &str, layer: Layer, fields: Vec<Value>) -> Value {
+    Value::obj(vec![("type", Value::str(kind)), ("layer", Value::str(layer.key())), ("fields", Value::arr(fields))])
 }
 
 /// One entry per `action_from_value` match arm, in the same order, each
-/// naming exactly the fields that arm reads off `v`.
+/// naming exactly the fields that arm reads off `v` plus which `Layer`
+/// (docs task "make agents pluggable per decision layer", see
+/// `Layer`'s own doc for the boundaries) it belongs to - the routing key an
+/// external agent (an RL policy, most concretely) targets one decision
+/// layer through.
 fn actions_schema() -> Value {
     Value::arr(vec![
-        action_entry("move_unit", vec![field("unit", "integer", true), field_object("to", "station", true)]),
-        action_entry("hold_unit", vec![field("unit", "integer", true)]),
-        action_entry("disband_unit", vec![field("unit", "integer", true)]),
+        action_entry(
+            "move_unit",
+            Layer::Military,
+            vec![field("unit", "integer", true), field_object("to", "station", true)],
+        ),
+        action_entry("hold_unit", Layer::Military, vec![field("unit", "integer", true)]),
+        action_entry("disband_unit", Layer::Military, vec![field("unit", "integer", true)]),
         action_entry(
             "recruit_unit",
+            Layer::Military,
             vec![field("region", "integer", true), field_enum("domain", "domain", false)],
         ),
-        action_entry("reinforce_unit", vec![field("unit", "integer", true)]),
-        action_entry("set_conscription", vec![field("value", "number", true)]),
+        action_entry("reinforce_unit", Layer::Military, vec![field("unit", "integer", true)]),
+        action_entry("set_conscription", Layer::Economy, vec![field("value", "number", true)]),
         action_entry(
             "set_industry_priority",
+            Layer::Economy,
             vec![field_enum("good", "good", true), field("weight", "number", true)],
         ),
-        action_entry("set_civilian_ration", vec![field("value", "number", true)]),
-        action_entry("build", vec![field("region", "integer", true), field_object("project", "project", true)]),
-        action_entry("cancel_build", vec![field("region", "integer", true)]),
+        action_entry("set_civilian_ration", Layer::Economy, vec![field("value", "number", true)]),
+        action_entry(
+            "build",
+            Layer::Economy,
+            vec![field("region", "integer", true), field_object("project", "project", true)],
+        ),
+        action_entry("cancel_build", Layer::Economy, vec![field("region", "integer", true)]),
         action_entry(
             "set_import_plan",
+            Layer::Economy,
             vec![field_enum("good", "good", true), field("rate", "number", true)],
         ),
         action_entry(
             "set_logistics_priority",
+            Layer::Economy,
             vec![field_enum("good", "good", true), field("weight", "number", true)],
         ),
-        action_entry("propose_treaty", vec![field("to", "integer", true), field_enum("treaty", "treaty", true)]),
-        action_entry("accept_treaty", vec![field("from", "integer", true), field_enum("treaty", "treaty", true)]),
-        action_entry("reject_treaty", vec![field("from", "integer", true), field_enum("treaty", "treaty", true)]),
-        action_entry("declare_war", vec![field("to", "integer", true)]),
+        action_entry(
+            "propose_treaty",
+            Layer::Diplomacy,
+            vec![field("to", "integer", true), field_enum("treaty", "treaty", true)],
+        ),
+        action_entry(
+            "accept_treaty",
+            Layer::Diplomacy,
+            vec![field("from", "integer", true), field_enum("treaty", "treaty", true)],
+        ),
+        action_entry(
+            "reject_treaty",
+            Layer::Diplomacy,
+            vec![field("from", "integer", true), field_enum("treaty", "treaty", true)],
+        ),
+        action_entry("declare_war", Layer::Diplomacy, vec![field("to", "integer", true)]),
         action_entry(
             "break_treaty",
+            Layer::Diplomacy,
             vec![field("with", "integer", true), field_enum("treaty", "treaty", true)],
         ),
-        action_entry("set_national_focus", vec![field_enum("focus", "focus", true)]),
+        action_entry("set_national_focus", Layer::GrandStrategy, vec![field_enum("focus", "focus", true)]),
         action_entry(
             "propose_in_natural_language",
+            Layer::Diplomacy,
             vec![field("to", "integer", true), field("text", "string", true)],
         ),
         action_entry(
             "respond_to_natural_language_proposal",
+            Layer::Diplomacy,
             vec![
                 field("from", "integer", true),
                 field("accept", "boolean", true),
@@ -327,6 +367,7 @@ fn enums_schema() -> Value {
         ("good", Value::arr(ALL_GOODS.iter().map(|g| Value::str(g.key())).collect())),
         ("treaty", Value::arr(ALL_TREATIES.iter().map(|t| Value::str(t.key())).collect())),
         ("focus", Value::arr(ALL_FOCI.iter().map(|f| Value::str(f.key())).collect())),
+        ("layer", Value::arr(ALL_LAYERS.iter().map(|l| Value::str(l.key())).collect())),
         ("domain", Value::arr(vec![Value::str("land"), Value::str("sea")])),
         ("station_kind", Value::arr(vec![Value::str("region"), Value::str("sea")])),
         (

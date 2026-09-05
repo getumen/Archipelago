@@ -482,10 +482,18 @@ fn schema_matches_decoder() {
         }
     };
 
+    let layers = enums.get("layer").and_then(Value::as_array).expect("schema.enums.layer");
+    assert_eq!(layers.len(), 4, "every Layer variant must be listed exactly once");
+
     let actions = schema.get("actions").and_then(Value::as_array).expect("schema.actions");
     assert!(!actions.is_empty());
     for entry in actions {
         let kind = entry.get("type").and_then(Value::as_str).expect("action entry has `type`");
+        let declared_layer = entry.get("layer").and_then(Value::as_str).expect("action entry has `layer`");
+        assert!(
+            layers.iter().any(|l| l.as_str() == Some(declared_layer)),
+            "`{kind}` declares layer `{declared_layer}`, which isn't one of schema.enums.layer"
+        );
         let fields = entry.get("fields").and_then(Value::as_array).expect("action entry has `fields`");
         let mut sample = vec![("type".to_string(), Value::str(kind))];
         for f in fields {
@@ -493,8 +501,14 @@ fn schema_matches_decoder() {
             sample.push((name, sample_field_value(f)));
         }
         let sample_value = Value::Object(sample.into_iter().collect());
-        crate::action_codec::action_from_value(&sample_value)
+        let decoded = crate::action_codec::action_from_value(&sample_value)
             .unwrap_or_else(|e| panic!("schema advertises `{kind}` but a schema-derived sample failed to decode: {e}"));
+        assert_eq!(
+            decoded.layer().key(),
+            declared_layer,
+            "`{kind}` declares layer `{declared_layer}` but its decoded Action::layer() is `{}`",
+            decoded.layer().key(),
+        );
     }
 
     let reported_len = schema.get("observation").and_then(|o| o.get("length")).and_then(Value::as_u64).expect("observation.length");

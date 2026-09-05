@@ -44,17 +44,29 @@ class ActionEntry:
     otherwise it's the exact JSON object `POST /action`'s `actions[]` expects
     (see `crates/api/src/action_codec.rs::action_from_value`). `label` is a
     short human-readable description, useful for logging/debugging a
-    trained policy's action choices.
+    trained policy's action choices. `layer` is the decision layer
+    (`archipelago_sim::action::Layer`'s key - "military", "economy",
+    "grand_strategy" or "diplomacy") this action's `payload["type"]` belongs
+    to per `GET /schema`'s `actions[].layer`, or `None` for the no-op, which
+    belongs to every layer equally rather than one in particular.
     """
 
     label: str
     payload: Optional[dict[str, Any]]
+    layer: Optional[str] = None
 
 
 class ActionTable:
     """The flattened action vocabulary described in docs/phase5-spec.md
     Stage 5B: "部隊移動 / 徴募 / 補充 / 建設 / 政策変更 / 条約提案 / 何もし
     ない" as one `Discrete(len(table))`.
+
+    Every entry also carries which `Layer` (`archipelago_sim::action::Layer`,
+    exposed as `schema["enums"]["layer"]`/`schema["actions"][i]["layer"]`) its
+    action type belongs to - `layers`/`indices_for_layer` let a caller build a
+    *per-layer* policy (e.g. a military-only RL agent) that only ever sees
+    the slice of this table its layer actually needs, instead of the full
+    flattened space.
     """
 
     def __init__(self, schema: dict[str, Any], max_unit_slots: int = DEFAULT_MAX_UNIT_SLOTS,
@@ -68,13 +80,26 @@ class ActionTable:
         self.treaties: list[str] = enums["treaty"]
         self.foci: list[str] = enums["focus"]
         self.domains: list[str] = enums["domain"]
+        self.layers: list[str] = enums["layer"]
 
         scenario = schema["scenario"]
         self.region_count: int = scenario["region_count"]
         self.sea_zone_count: int = scenario["sea_zone_count"]
         self.faction_count: int = scenario["faction_count"]
 
-        self.entries: list[ActionEntry] = list(self._build())
+        # Read off the same per-type `layer` the server's `/schema` already
+        # reports for the actions this table's payloads use (`crates/api/src
+        # /action_codec.rs::actions_schema`), rather than re-declaring the
+        # military/economy/grand_strategy/diplomacy split a second time on
+        # the Python side - a type this table doesn't otherwise reference
+        # (e.g. one only `Layer::Diplomacy`'s `declare_war`/`break_treaty`
+        # ever needs) simply never gets looked up.
+        type_to_layer: dict[str, str] = {entry["type"]: entry["layer"] for entry in schema["actions"]}
+
+        self.entries: list[ActionEntry] = [
+            ActionEntry(label, payload, None if payload is None else type_to_layer[payload["type"]])
+            for label, payload in self._build()
+        ]
 
     # -- table construction -------------------------------------------------
 
@@ -91,27 +116,27 @@ class ActionTable:
             yield f"capacity:{good}", {"type": "build", "project": {"capacity": good}}
 
     def _build(self):
-        yield ActionEntry("no_op", None)
+        yield "no_op", None
 
         for unit in range(self.max_unit_slots):
-            yield ActionEntry(f"hold_unit(unit={unit})", {"type": "hold_unit", "unit": unit})
+            yield f"hold_unit(unit={unit})", {"type": "hold_unit", "unit": unit}
 
         for unit in range(self.max_unit_slots):
             for station in self._stations():
-                yield ActionEntry(
+                yield (
                     f"move_unit(unit={unit}, to={station['kind']}:{station['id']})",
                     {"type": "move_unit", "unit": unit, "to": station},
                 )
 
         for unit in range(self.max_unit_slots):
-            yield ActionEntry(f"reinforce_unit(unit={unit})", {"type": "reinforce_unit", "unit": unit})
+            yield f"reinforce_unit(unit={unit})", {"type": "reinforce_unit", "unit": unit}
 
         for unit in range(self.max_unit_slots):
-            yield ActionEntry(f"disband_unit(unit={unit})", {"type": "disband_unit", "unit": unit})
+            yield f"disband_unit(unit={unit})", {"type": "disband_unit", "unit": unit}
 
         for region in range(self.region_count):
             for domain in self.domains:
-                yield ActionEntry(
+                yield (
                     f"recruit_unit(region={region}, domain={domain})",
                     {"type": "recruit_unit", "region": region, "domain": domain},
                 )
@@ -119,55 +144,78 @@ class ActionTable:
         for region in range(self.region_count):
             for label, payload in self._projects():
                 payload = dict(payload, region=region)
-                yield ActionEntry(f"build(region={region}, project={label})", payload)
-            yield ActionEntry(f"cancel_build(region={region})", {"type": "cancel_build", "region": region})
+                yield f"build(region={region}, project={label})", payload
+            yield f"cancel_build(region={region})", {"type": "cancel_build", "region": region}
 
         for level in self.value_levels:
-            yield ActionEntry(f"set_conscription({level})", {"type": "set_conscription", "value": level})
+            yield f"set_conscription({level})", {"type": "set_conscription", "value": level}
         for level in self.value_levels:
-            yield ActionEntry(f"set_civilian_ration({level})", {"type": "set_civilian_ration", "value": level})
+            yield f"set_civilian_ration({level})", {"type": "set_civilian_ration", "value": level}
         for good in self.goods:
             for level in self.value_levels:
-                yield ActionEntry(
+                yield (
                     f"set_industry_priority(good={good}, weight={level})",
                     {"type": "set_industry_priority", "good": good, "weight": level},
                 )
         for good in self.goods:
             for level in self.value_levels:
-                yield ActionEntry(
+                yield (
                     f"set_import_plan(good={good}, rate={level})",
                     {"type": "set_import_plan", "good": good, "rate": level},
                 )
         for good in self.goods:
             for level in self.value_levels:
-                yield ActionEntry(
+                yield (
                     f"set_logistics_priority(good={good}, weight={level})",
                     {"type": "set_logistics_priority", "good": good, "weight": level},
                 )
         for focus in self.foci:
-            yield ActionEntry(f"set_national_focus({focus})", {"type": "set_national_focus", "focus": focus})
+            yield f"set_national_focus({focus})", {"type": "set_national_focus", "focus": focus}
 
         for to in range(self.faction_count):
             for treaty in self.treaties:
-                yield ActionEntry(
+                yield (
                     f"propose_treaty(to={to}, treaty={treaty})",
                     {"type": "propose_treaty", "to": to, "treaty": treaty},
                 )
         for frm in range(self.faction_count):
             for treaty in self.treaties:
-                yield ActionEntry(
+                yield (
                     f"accept_treaty(from={frm}, treaty={treaty})",
                     {"type": "accept_treaty", "from": frm, "treaty": treaty},
                 )
         for frm in range(self.faction_count):
             for treaty in self.treaties:
-                yield ActionEntry(
+                yield (
                     f"reject_treaty(from={frm}, treaty={treaty})",
                     {"type": "reject_treaty", "from": frm, "treaty": treaty},
                 )
 
     def __len__(self) -> int:
         return len(self.entries)
+
+    # -- per-layer views ------------------------------------------------
+
+    def indices_for_layer(self, layer: str, include_no_op: bool = True) -> list[int]:
+        """Every index in this table whose action belongs to `layer`
+        (one of `self.layers`), for building a per-layer `Discrete` a
+        single-layer policy actually needs instead of the full table - the
+        Python-side counterpart of `archipelago_agents::CompositeAgent`
+        routing a `Layer` to one `Agent` on the Rust side. `no_op` belongs to
+        no one layer in particular (see `ActionEntry.layer`'s doc) but is
+        included by default since every policy, single-layer or not, needs
+        a legal way to do nothing on a tick it has no order to give.
+
+        Raises `ValueError` if `layer` isn't one of `self.layers` - a typo
+        here should fail loudly, not silently return an empty table that
+        looks like "this layer has no actions".
+        """
+        if layer not in self.layers:
+            raise ValueError(f"unknown layer {layer!r}, expected one of {self.layers}")
+        return [
+            i for i, entry in enumerate(self.entries)
+            if entry.layer == layer or (include_no_op and entry.layer is None)
+        ]
 
     def decode(self, action: int) -> ActionEntry:
         if not isinstance(action, (int,)) or isinstance(action, bool):

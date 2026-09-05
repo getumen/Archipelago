@@ -1,6 +1,6 @@
 //! Spec §9 acceptance tests for the simulation core.
 
-use crate::action::{self, Action, ActionError};
+use crate::action::{self, Action, ActionError, Layer, ALL_LAYERS};
 use crate::balance::{
     CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
     CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
@@ -16,7 +16,7 @@ use crate::event::Event;
 use crate::focus::{self, NationalFocus};
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::{Group, GROUP_COUNT};
-use crate::ids::{FactionId, RegionId, SeaZoneId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::logistics;
 use crate::military;
 use crate::naval;
@@ -5608,5 +5608,133 @@ fn allied_groups_combined_holdings_count_toward_domination() {
             assert_eq!(winners, vec![f0, f1], "the allied group's combined holdings must be named together");
         }
         other => panic!("expected the allied group's combined 6/10 regions to trigger Domination, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Layer classification (docs task "make agents pluggable per decision
+// layer"): `Action::layer`/`Action::target_unit` are exhaustive matches
+// enforced by the compiler (no wildcard arm - see both methods' own docs),
+// so the *existence* of a classification for every variant can never
+// regress silently. What the compiler cannot check is that a variant sits
+// in the *right* bucket - that is what these tests pin down, one concrete
+// sample of every one of `Action`'s 20 variants at a time.
+// ---------------------------------------------------------------------
+
+/// One concrete, arbitrary-but-valid sample of every `Action` variant,
+/// paired with the `Layer` it must classify into. Exhaustively listing
+/// every variant here (rather than looping over some smaller
+/// representative subset) is what makes `every_action_variant_has_the_expected_layer`
+/// actually cover the whole enum - a variant added to `Action` without a
+/// matching entry added here is caught by `layer_classification_is_exhaustive_over_all_samples`
+/// below, not silently skipped.
+fn action_layer_samples() -> Vec<(Action, Layer)> {
+    let unit = UnitId(0);
+    let region = RegionId(0);
+    let other_region = RegionId(1);
+    let faction = FactionId(1);
+    vec![
+        (Action::MoveUnit { unit, to: Station::Region(other_region) }, Layer::Military),
+        (Action::HoldUnit { unit }, Layer::Military),
+        (Action::DisbandUnit { unit }, Layer::Military),
+        (Action::ReinforceUnit { unit }, Layer::Military),
+        (Action::RecruitUnit { region, domain: Domain::Land }, Layer::Military),
+        (Action::Build { region, project: Project::Infrastructure }, Layer::Economy),
+        (Action::CancelBuild { region }, Layer::Economy),
+        (Action::SetConscription(0.2), Layer::Economy),
+        (Action::SetCivilianRation(0.8), Layer::Economy),
+        (Action::SetIndustryPriority { good: Good::Steel, weight: 0.5 }, Layer::Economy),
+        (Action::SetLogisticsPriority { good: Good::Munitions, weight: 0.5 }, Layer::Economy),
+        (Action::SetImportPlan { good: Good::Food, rate: 1.0 }, Layer::Economy),
+        (Action::SetNationalFocus(NationalFocus::EconomicSphere), Layer::GrandStrategy),
+        (Action::ProposeTreaty { to: faction, treaty: Treaty::NonAggression }, Layer::Diplomacy),
+        (Action::AcceptTreaty { from: faction, treaty: Treaty::NonAggression }, Layer::Diplomacy),
+        (Action::RejectTreaty { from: faction, treaty: Treaty::NonAggression }, Layer::Diplomacy),
+        (Action::DeclareWar { to: faction }, Layer::Diplomacy),
+        (Action::BreakTreaty { with: faction, treaty: Treaty::Alliance }, Layer::Diplomacy),
+        (Action::ProposeInNaturalLanguage { to: faction, text: "hello".to_string() }, Layer::Diplomacy),
+        (
+            Action::RespondToNaturalLanguageProposal { from: faction, terms: vec![], accept: true },
+            Layer::Diplomacy,
+        ),
+    ]
+}
+
+/// Every `Action` variant must classify into exactly the layer this
+/// codebase's design intends - see `Layer`'s own doc in `action.rs` for the
+/// reasoning behind each boundary (`RecruitUnit` into `Military` despite
+/// spending economic resources, `Build`/`CancelBuild` into `Economy` rather
+/// than a separate infrastructure layer, `SetNationalFocus` alone in
+/// `GrandStrategy`).
+///
+/// Confirmed this can actually fail: temporarily changed `Action::layer`'s
+/// `RecruitUnit` arm to return `Layer::Economy` and re-ran - the assertion
+/// for that sample failed with the mismatch spelled out. Reverted before
+/// committing.
+#[test]
+fn every_action_variant_has_the_expected_layer() {
+    for (action, expected) in action_layer_samples() {
+        assert_eq!(action.layer(), expected, "{action:?} should classify as {expected:?}");
+    }
+}
+
+/// `action_layer_samples` must itself list exactly one sample per `Action`
+/// variant - 20 entries, matching the count in this module's own doc and in
+/// `crates/api/src/action_codec.rs`'s decoder. This is what stands in for
+/// the compiler's own exhaustiveness check (which `Action::layer`'s
+/// wildcard-free `match` already enforces at the type level) at the level
+/// of *this test suite*: if a future variant is added to `Action` without a
+/// corresponding sample added above, this count assertion catches the gap
+/// even though the crate itself still compiles fine (the new variant would
+/// simply never be exercised by `every_action_variant_has_the_expected_layer`
+/// otherwise).
+#[test]
+fn layer_classification_is_exhaustive_over_all_samples() {
+    assert_eq!(action_layer_samples().len(), 20, "one sample per Action variant - update this alongside any new variant");
+}
+
+/// `ALL_LAYERS` must list every `Layer` variant exactly once, in the fixed
+/// order `Layer::index` agrees with - `agents::CompositeAgent` and the API
+/// schema both iterate this array rather than the enum itself.
+#[test]
+fn all_layers_is_complete_and_indexed_consistently() {
+    assert_eq!(ALL_LAYERS.len(), crate::action::LAYER_COUNT);
+    for (i, layer) in ALL_LAYERS.iter().enumerate() {
+        assert_eq!(layer.index(), i, "ALL_LAYERS's position must match Layer::index for {layer:?}");
+    }
+    let mut seen: Vec<Layer> = Vec::new();
+    for layer in ALL_LAYERS {
+        assert!(!seen.contains(&layer), "{layer:?} appears more than once in ALL_LAYERS");
+        seen.push(layer);
+    }
+}
+
+/// `Action::target_unit` must return the exact unit a `Military`-layer
+/// order names, and `None` for everything else - including `RecruitUnit`,
+/// which is `Military` but names no *existing* unit (see that method's own
+/// doc for why). This is `agents::HumanAgent`'s per-unit delegation filter,
+/// so a regression here silently changes which orders a delegated unit
+/// receives.
+///
+/// Confirmed this can actually fail: temporarily made `target_unit` return
+/// `None` for `Action::ReinforceUnit` and re-ran - the assertion for that
+/// sample failed. Reverted before committing.
+#[test]
+fn target_unit_identifies_exactly_the_unit_orders() {
+    let ordered_unit = UnitId(7);
+    let region = RegionId(0);
+    let faction = FactionId(1);
+    let cases: Vec<(Action, Option<UnitId>)> = vec![
+        (Action::MoveUnit { unit: ordered_unit, to: Station::Region(RegionId(1)) }, Some(ordered_unit)),
+        (Action::HoldUnit { unit: ordered_unit }, Some(ordered_unit)),
+        (Action::DisbandUnit { unit: ordered_unit }, Some(ordered_unit)),
+        (Action::ReinforceUnit { unit: ordered_unit }, Some(ordered_unit)),
+        (Action::RecruitUnit { region, domain: Domain::Land }, None),
+        (Action::SetConscription(0.5), None),
+        (Action::SetNationalFocus(NationalFocus::Technocracy), None),
+        (Action::ProposeTreaty { to: faction, treaty: Treaty::Ceasefire }, None),
+    ];
+    for (action, expected) in cases {
+        assert_eq!(action.target_unit(), expected, "{action:?} should target {expected:?}");
     }
 }

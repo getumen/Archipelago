@@ -908,6 +908,23 @@ where
 /// plain `HeuristicAgent::decide` - so a backend that fails every single
 /// call produces a run byte-identical to using `HeuristicAgent` directly
 /// (see the `llm_failure_falls_back_to_heuristic` test).
+///
+/// ## Relationship to `crate::composite::CompositeAgent`
+///
+/// Every layer's `Action`s here come from the *same* wrapped `fallback` -
+/// the degenerate "route every layer to one agent" case `CompositeAgent`
+/// also expresses (`CompositeAgent::route(ALL_LAYERS, ...)` is exactly
+/// this). `LlmAgent::decide` does not actually build a `CompositeAgent`
+/// around `fallback`, though, and that is a real limit of the mechanism,
+/// not an oversight: `decide_for_llm` needs the extra `Option<&Doctrine>`
+/// parameter that `Agent::decide`'s fixed signature has no room for, so
+/// `fallback` cannot be boxed as a plain `dyn Agent` and routed without
+/// losing the one thing that makes this an *LLM* agent rather than a second
+/// `HeuristicAgent`. The one genuine second decision source here -
+/// answering a pending natural-language proposal - is layered on top
+/// instead (see `decide`'s own doc), which *is* a `Layer::Diplomacy`-only
+/// contribution in spirit, just not one built through `CompositeAgent`'s
+/// API.
 pub struct LlmAgent<B: LlmBackend> {
     backend: B,
     fallback: HeuristicAgent,
@@ -1011,7 +1028,16 @@ impl<B: LlmBackend> Agent for LlmAgent<B> {
 
     fn decide(&mut self, obs: &Observation) -> Vec<Action> {
         self.consult(obs);
+        // Every layer, from the one wrapped `fallback` - see this struct's
+        // own doc under "Relationship to CompositeAgent" for why that is
+        // still true even though nothing here literally builds one.
         let mut actions = self.fallback.decide_for_llm(obs, self.doctrine.as_ref());
+        // The one place this agent's own `Layer::Diplomacy` decision is a
+        // second source layered on top of `fallback`, rather than coming
+        // from it: an incoming natural-language proposal is answered using
+        // the LLM's own interpretation (`interpret_nl`) instead of the
+        // honest "no" a plain `HeuristicAgent::decide` would give it via
+        // `crate::cannot_interpret_nl` - see that impl for the contrast.
         respond_to_pending_nl_proposals(obs, |from, text| self.interpret_nl(obs, from, text), &mut actions);
         actions
     }
