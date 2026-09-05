@@ -31,6 +31,7 @@
 //! file already says or, if the two disagreed, be silently unable to do
 //! anything at all (see the rejection below).
 use archipelago_game::app::{MapMode, PlayConfig, ScreenshotConfig, ScreenshotTrigger};
+use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::world::World;
 
@@ -52,10 +53,15 @@ fn print_usage_and_exit(msg: &str) -> ! {
          \n\
          debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames> | --screenshot-at-day <day>] \
-         [--debug-map-mode <political|terrain|population|industry|unrest|supply>] \
+         [--debug-map-mode <political|terrain|population|industry[:<good>]|unrest|supply>] \
          [--debug-open-diplomacy] [--debug-open-newspaper] \
          [--debug-open-policy] [--debug-select-region <region index or name>] [--debug-select-units] \
-         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]"
+         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]\n\
+         \n\
+         --debug-map-mode industry[:<good>]: industry mode shows exactly one commodity's own map; \
+         <good> selects which one (food|energy|steel|machinery|munitions|arms), e.g. \
+         `--debug-map-mode industry:machinery`. Omitting `:<good>` (bare `industry`) keeps whatever \
+         ActiveGood already is (steel by default). No other mode accepts a `:<good>` suffix."
     );
     std::process::exit(1);
 }
@@ -83,6 +89,11 @@ struct Args {
     // already open, for `--screenshot` runs where nothing is at the
     // keyboard to press `M`/`D`/`N` first. No effect without `--screenshot`.
     debug_map_mode: Option<MapMode>,
+    /// `--debug-map-mode industry:<good>`'s own `:<good>` suffix, parsed
+    /// alongside `debug_map_mode` by `parse_map_mode` (`ScreenshotConfig::
+    /// industry_good`'s own doc). `None` for a bare `industry` or any other
+    /// mode.
+    debug_industry_good: Option<Good>,
     debug_open_diplomacy: bool,
     debug_open_newspaper: bool,
     debug_open_policy: bool,
@@ -120,6 +131,7 @@ fn parse_args() -> Args {
     let mut screenshot_after = DEFAULT_SCREENSHOT_AFTER_FRAMES;
     let mut screenshot_at_day = None;
     let mut debug_map_mode = None;
+    let mut debug_industry_good = None;
     let mut debug_open_diplomacy = false;
     let mut debug_open_newspaper = false;
     let mut debug_open_policy = false;
@@ -165,7 +177,9 @@ fn parse_args() -> Args {
             }
             "--debug-map-mode" => {
                 let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-map-mode expects a value"));
-                debug_map_mode = Some(parse_map_mode(&v));
+                let (mode, good) = parse_map_mode(&v);
+                debug_map_mode = Some(mode);
+                debug_industry_good = good;
             }
             "--debug-open-diplomacy" => debug_open_diplomacy = true,
             "--debug-open-newspaper" => debug_open_newspaper = true,
@@ -206,7 +220,9 @@ fn parse_args() -> Args {
                 } else if let Some(v) = other.strip_prefix("--cjk-font=") {
                     cjk_font = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--debug-map-mode=") {
-                    debug_map_mode = Some(parse_map_mode(v));
+                    let (mode, good) = parse_map_mode(v);
+                    debug_map_mode = Some(mode);
+                    debug_industry_good = good;
                 } else {
                     print_usage_and_exit(&format!("unknown argument: {other}"));
                 }
@@ -225,6 +241,7 @@ fn parse_args() -> Args {
         screenshot_after,
         screenshot_at_day,
         debug_map_mode,
+        debug_industry_good,
         debug_open_diplomacy,
         debug_open_newspaper,
         debug_open_policy,
@@ -276,13 +293,49 @@ fn resolve_region(world: &World, value: &str) -> archipelago_sim::ids::RegionId 
     std::process::exit(1);
 }
 
-/// Resolves `--debug-map-mode <value>` against `MapMode::from_key` - a hard
-/// error naming every valid key on a miss, following docs/conventions.md's
-/// fail-fast rule the same way every other malformed flag in this file
-/// does, rather than silently falling back to `MapMode::default()`.
-fn parse_map_mode(value: &str) -> MapMode {
-    MapMode::from_key(value)
-        .unwrap_or_else(|| print_usage_and_exit(&format!("--debug-map-mode {value}: unknown mode, expected one of: {}", MapMode::ALL_KEYS.join(", "))))
+/// Resolves `--debug-map-mode <value>` against `MapMode::from_key`, plus -
+/// for `industry` alone - an optional `:<good>` suffix against `Good::key`.
+/// `Good` has no `from_key` of its own in `crates/sim` (only `key()` - see
+/// `Terrain::from_key`/`LinkKind::from_key` there for the same reverse-lookup
+/// pattern this function borrows), and this CLI flag's own compound syntax
+/// is exactly the kind of thing docs/conventions.md §1 asks not to be added
+/// to a zero-external-dependency, deterministic simulation crate that has
+/// never needed to parse anything - so the lookup lives here, in the one
+/// file that already owns `--debug-map-mode`'s parsing, instead.
+///
+/// A hard error naming every valid key on a miss, in either half - following
+/// docs/conventions.md's fail-fast rule the same way every other malformed
+/// flag in this file does, rather than silently falling back to
+/// `MapMode::default()`/some default good. Same for a `:<good>` suffix on
+/// any mode other than `industry`: that's a malformed flag, not a synonym
+/// for the mode with the suffix quietly ignored.
+fn parse_map_mode(value: &str) -> (MapMode, Option<Good>) {
+    let (mode_key, good_key) = match value.split_once(':') {
+        Some((m, g)) => (m, Some(g)),
+        None => (value, None),
+    };
+    let mode = MapMode::from_key(mode_key)
+        .unwrap_or_else(|| print_usage_and_exit(&format!("--debug-map-mode {value}: unknown mode, expected one of: {}", MapMode::ALL_KEYS.join(", "))));
+    let good = good_key.map(|g| {
+        if mode != MapMode::Industry {
+            print_usage_and_exit(&format!(
+                "--debug-map-mode {value}: only `industry` accepts a `:<good>` suffix, not `{mode_key}`"
+            ));
+        }
+        good_from_key(g).unwrap_or_else(|| {
+            print_usage_and_exit(&format!(
+                "--debug-map-mode {value}: unknown good `{g}`, expected one of: {}",
+                ALL_GOODS.iter().map(|good| good.key()).collect::<Vec<_>>().join(", ")
+            ))
+        })
+    });
+    (mode, good)
+}
+
+/// Reverse lookup for `Good::key()` - see `parse_map_mode`'s own doc for why
+/// this lives here rather than as a `Good::from_key` in `crates/sim`.
+fn good_from_key(key: &str) -> Option<Good> {
+    ALL_GOODS.iter().copied().find(|g| g.key() == key)
 }
 
 fn main() {
@@ -363,6 +416,7 @@ fn main() {
         open_newspaper: args.debug_open_newspaper,
         open_policy: args.debug_open_policy,
         map_mode: args.debug_map_mode,
+        industry_good: args.debug_industry_good,
         select_region: debug_select_region,
         select_units: args.debug_select_units,
         camera_focus_region: debug_camera_region,

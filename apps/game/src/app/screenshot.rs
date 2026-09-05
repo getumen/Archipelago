@@ -16,6 +16,7 @@ use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 
+use archipelago_sim::good::Good;
 use archipelago_sim::ids::RegionId;
 
 use super::{MainCamera, MapMode, RegionLayout, SimRes};
@@ -68,6 +69,14 @@ pub struct ScreenshotConfig {
     /// ordinary `MapMode::default()` (`Political`) a live run always starts
     /// in.
     pub map_mode: Option<MapMode>,
+    /// `--debug-map-mode industry:<good>`: which `Good` an `Industry`-mode
+    /// screenshot run starts showing (`main.rs`'s own `good_from_key`) -
+    /// `MapMode` alone has no room to carry this (it names a *mode*, not a
+    /// mode-plus-commodity), so it rides alongside `map_mode` as its own
+    /// field instead. `None` (a bare `industry`, or any other mode) keeps
+    /// `ActiveGood::default()` (`Steel`) - the same defined default a live
+    /// run always starts with, `--debug-map-mode` given or not.
+    pub industry_good: Option<Good>,
     /// `--debug-select-region <region>`: pre-selects a region so Stage 8B's
     /// region panel (action buttons included) renders in a `--screenshot`
     /// run with nothing to click it open.

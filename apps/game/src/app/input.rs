@@ -123,6 +123,24 @@ pub(super) fn keyboard_input(
     if keys.just_pressed(KeyCode::KeyM) {
         map_mode.0 = map_mode.0.next();
     }
+    // `G` cycles `ActiveGood` - originally only meaningful once a faction
+    // was `--play`ed (it picks the target good for the build menu's
+    // "生産設備建設（対象品目）" item and the policy panel's industry/
+    // logistics-priority/import-plan keys, all below). It now works here,
+    // globally, for a second reason that has nothing to do with playing at
+    // all: `MapMode::Industry` shows exactly one commodity at a time, picked
+    // by this same `ActiveGood`, and that mode must be usable in observer
+    // mode too (`cargo run ... --scenario japan_hex.json` with no `--play`
+    // is this crate's own primary "watch AI vs AI" use case). Moving this
+    // above the menu/diplomacy branches below, right alongside `M`/`N`, is
+    // what makes both true: it also means `G` now works while the build
+    // menu is open (previously impossible - the menu branch below returns
+    // before ever reaching this), letting a player pick which good to build
+    // capacity for without first closing the menu.
+    if keys.just_pressed(KeyCode::KeyG) {
+        let cur = active_good.0.index();
+        active_good.0 = ALL_GOODS[(cur + 1) % GOOD_COUNT];
+    }
     if keys.just_pressed(KeyCode::KeyN) {
         newspaper.open = !newspaper.open;
     }
@@ -264,10 +282,6 @@ pub(super) fn keyboard_input(
                 sim.0.delegate_unit(unit);
             }
         }
-    }
-    if keys.just_pressed(KeyCode::KeyG) {
-        let cur = active_good.0.index();
-        active_good.0 = ALL_GOODS[(cur + 1) % GOOD_COUNT];
     }
     if keys.just_pressed(KeyCode::KeyF) {
         let cur = sim.0.world().faction(player_faction).national_focus;
@@ -955,6 +969,32 @@ mod tests {
         system.run((), &mut world).unwrap();
 
         assert_eq!(world.resource::<MapModeRes>().0, MapMode::Terrain, "M must cycle from the default Political mode to Terrain");
+    }
+
+    /// Regression guard for `G` cycling `ActiveGood` in observer mode
+    /// (`PlayerFaction(None)`, `keyboard_input_world`'s own default) - the
+    /// keyboard half of `MapMode::Industry`'s commodity picker
+    /// (`map_mode::handle_legend_row_clicks` is the clickable other half),
+    /// which must work without a `--play`ed faction the same way `M` itself
+    /// already does (this crate's own primary "watch AI vs AI" use case has
+    /// no player at all). Checked this fails when broken: temporarily left
+    /// `G`'s binding at its old position, after the `let Some(player_faction)
+    /// = player.0 else { return }` gate - this test then fails with
+    /// `ActiveGood` still at its default `Steel`.
+    #[test]
+    fn g_key_cycles_active_good_even_in_observer_mode() {
+        let mut world = keyboard_input_world(KeyCode::KeyG);
+        assert_eq!(world.resource::<PlayerFaction>().0, None, "this must exercise the observer-mode path (no --play)");
+
+        let mut system = IntoSystem::into_system(keyboard_input);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        assert_eq!(
+            world.resource::<ActiveGood>().0,
+            ALL_GOODS[(ActiveGood::default().0.index() + 1) % GOOD_COUNT],
+            "G must cycle ActiveGood to the next good even with no faction being played"
+        );
     }
 
     /// External code review fix A1 (P1): pressing `T` to enter natural-

@@ -523,6 +523,12 @@ pub fn run(
     // wheel to press `M` first) - defaults to `MapMode::Political`, exactly
     // as a live run always has, when not given at all.
     let debug_map_mode = screenshot.as_ref().and_then(|c| c.map_mode).unwrap_or_default();
+    // `--debug-map-mode industry:<good>` (`ScreenshotConfig::industry_good`'s
+    // own doc): which `Good` an `Industry`-mode screenshot run starts
+    // showing. `None` (every other `--debug-map-mode` value, or a bare
+    // `industry` with no `:<good>` suffix) keeps `ActiveGood::default()`
+    // (`Steel`) - exactly what a live run always starts with.
+    let debug_industry_good = screenshot.as_ref().and_then(|c| c.industry_good);
     // Computed from `world` here, before it moves into `SimDriver::new_with_player`
     // below - same "lowest-id other living faction" default `input::
     // keyboard_input`'s own `D` binding picks.
@@ -586,7 +592,7 @@ pub fn run(
         .insert_resource(MenuRegion::default())
         .insert_resource(DiplomacyPanel { open: debug_open_diplomacy, target: debug_diplomacy_target })
         .insert_resource(PolicyPanel(debug_open_policy))
-        .insert_resource(ActiveGood::default())
+        .insert_resource(debug_industry_good.map(ActiveGood).unwrap_or_default())
         .insert_resource(LastRejection::default())
         .insert_resource(map_mode::MapModeRes(debug_map_mode))
         .insert_resource(NlCompose::default())
@@ -614,6 +620,7 @@ pub fn run(
                 // like a keypress does.
                 panels::handle_speed_button_clicks,
                 panels::handle_map_mode_button_clicks,
+                map_mode::handle_legend_row_clicks,
                 panels::handle_region_action_clicks,
                 panels::handle_unit_action_clicks,
                 panels::handle_unit_delegate_clicks,

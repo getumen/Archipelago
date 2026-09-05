@@ -799,9 +799,9 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
 /// ending at `770`) and the player panel (`right: 10, width: 320`, starting
 /// at `950`) - a 180px budget. `LEGEND_PANEL_WIDTH` uses as much of it as
 /// fits with a 2px margin on each side (`left: 772`, ending at `948`), wide
-/// enough that `map_mode::header_description`'s longest line no longer wraps
-/// (it used to, at this panel's old 170px width, into a ragged 2-3 line
-/// block that visually collided with the `controls:` rows above it).
+/// enough that `map_mode::legend_header`'s longest line no longer wraps (it
+/// used to, at this panel's old 170px width, into a ragged 2-3 line block
+/// that visually collided with the `controls:` rows above it).
 const LEGEND_PANEL_WIDTH: f32 = 176.0;
 
 fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
@@ -835,6 +835,7 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             row("select/order: left click", label_color);
             row("region menu: right click", label_color);
             row("map mode: M button/key", label_color);
+            row("industry good: click row / G", label_color);
             row("policy panel: P button/key", label_color);
             row("diplomacy panel: D button/key", label_color);
             row("unit hold/reinforce: buttons or H/J", label_color);
@@ -852,7 +853,22 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             // every other mode now shares).
             parent.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(header_color), ModeLegendHeader));
             for i in 0..MODE_LEGEND_ROWS {
-                parent.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(label_color), Visibility::Hidden, ModeLegendRow(i)));
+                // `Interaction`/`BackgroundColor`: `Industry` mode's own
+                // rows double as its commodity picker (`map_mode::
+                // ModeLegendRow`'s own doc) - every row gets both
+                // unconditionally, from this one shared pool, since a
+                // `Visibility::Hidden` row in every other mode is never
+                // reported as clicked at all and never shows a highlight
+                // either.
+                parent.spawn((
+                    Text::new(String::new()),
+                    text_font(10.0, font),
+                    TextColor(label_color),
+                    BackgroundColor(Color::NONE),
+                    Interaction::None,
+                    Visibility::Hidden,
+                    ModeLegendRow(i),
+                ));
             }
         });
 }

@@ -25,8 +25,8 @@ use super::map_mode::{self, MapMode, MapModeRes};
 use super::palette::{faction_color, Unit01, NEUTRAL};
 use super::setup::station_position;
 use super::{
-    MainCamera, OwnerBorderMarker, RegionLabelMarker, RegionLayout, RegionMarker, SeaZoneCenters,
-    SeaZoneMarker, SelectedRegion, SimRes, UnitMarker,
+    ActiveGood, MainCamera, OwnerBorderMarker, RegionLabelMarker, RegionLayout, RegionMarker,
+    SeaZoneCenters, SeaZoneMarker, SelectedRegion, SimRes, UnitMarker,
 };
 
 /// Scorched-earth tone `sync_region_visuals` mixes a devastated region's
@@ -83,23 +83,26 @@ pub(super) fn political_fill_color(region: &Region) -> Color {
 /// computed once per frame, not once per region, since they depend on every
 /// region's own value (`map_mode::population_thresholds`/`industry_thresholds`'s
 /// own "no invented thresholds" doc) rather than the one region being
-/// painted.
+/// painted. `industry_cuts` is recomputed from `active_good` every frame
+/// too - a different selected commodity means a different distribution to
+/// band against, not just a different hue to paint it in.
 pub(super) fn sync_region_visuals(
     sim: Res<SimRes>,
     mode: Res<MapModeRes>,
+    active_good: Res<ActiveGood>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     query: Query<(&RegionMarker, &MeshMaterial2d<ColorMaterial>)>,
 ) {
     let world = sim.0.world();
     let population_cuts = map_mode::population_thresholds(world);
-    let industry_cuts = map_mode::industry_thresholds(world);
+    let industry_cuts = map_mode::industry_thresholds(world, active_good.0);
     for (marker, material_handle) in &query {
         let region = world.region(marker.0);
         let color = match mode.0 {
             MapMode::Political | MapMode::Supply => political_fill_color(region),
             MapMode::Terrain => map_mode::terrain_fill(region.terrain),
             MapMode::Population => map_mode::population_fill(region.population, population_cuts),
-            MapMode::Industry => map_mode::industry_fill(region, industry_cuts),
+            MapMode::Industry => map_mode::industry_fill(region, active_good.0, industry_cuts),
             MapMode::Unrest => map_mode::unrest_fill(region),
         };
         if let Some(mut mat) = materials.get_mut(&material_handle.0)
@@ -334,9 +337,11 @@ mod tests {
         let sim_world = scenario::build_world();
         let region = sim_world.regions[0].clone();
         let region_id = region.id;
+        let active_good = ActiveGood::default().0;
         let population_cuts = map_mode::population_thresholds(&sim_world);
-        let industry_cuts = map_mode::industry_thresholds(&sim_world);
+        let industry_cuts = map_mode::industry_thresholds(&sim_world, active_good);
         world.insert_resource(SimRes(SimDriver::new(sim_world, 1)));
+        world.insert_resource(ActiveGood(active_good));
 
         let handle = world.resource_mut::<Assets<ColorMaterial>>().add(ColorMaterial::from_color(Color::NONE));
         world.spawn((RegionMarker(region_id), MeshMaterial2d(handle.clone())));
@@ -349,7 +354,7 @@ mod tests {
                 MapMode::Political | MapMode::Supply => political_fill_color(&region),
                 MapMode::Terrain => map_mode::terrain_fill(region.terrain),
                 MapMode::Population => map_mode::population_fill(region.population, population_cuts),
-                MapMode::Industry => map_mode::industry_fill(&region, industry_cuts),
+                MapMode::Industry => map_mode::industry_fill(&region, active_good, industry_cuts),
                 MapMode::Unrest => map_mode::unrest_fill(&region),
             };
             assert_eq!(got, expected, "mode {mode:?} did not paint the color its own function computes");
