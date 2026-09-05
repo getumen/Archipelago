@@ -71,7 +71,8 @@ use super::input::MENU_ITEMS;
 use super::map_mode::MapModeRes;
 use super::setup::text_font;
 use super::{
-    ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
+    ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion, SelectedUnits, SimRes,
+    SpeedRes,
 };
 use crate::action_codec::action_error_ja;
 use crate::sim_driver::Speed;
@@ -90,6 +91,41 @@ pub(super) fn mark_pointer_over_ui(mut pointer: ResMut<PointerOverUi>, interacti
 }
 
 // ---------------------------------------------------------------------
+// Right column: keyboard scroll (`setup::spawn_right_column`'s own doc has
+// the overflow policy this implements)
+// ---------------------------------------------------------------------
+
+/// `ScrollPosition` units-per-second while `PageUp`/`PageDown` is held -
+/// fast enough that a full panel's worth of overflow clears in well under a
+/// second, slow enough not to read as a jump cut. Deliberately *not* driven
+/// by the mouse wheel: `input::mouse_pan_zoom` already claims the wheel
+/// unconditionally for camera pan/zoom (it doesn't check `PointerOverUi`
+/// today), and this crate's `SCROLL_PAN_SPEED`-style constants live with
+/// that system, not this one - reusing the wheel here would either fight
+/// that binding or need it re-plumbed to gate on hover, neither of which
+/// this fix's own scope calls for.
+const RIGHT_COLUMN_SCROLL_SPEED: f32 = 600.0;
+
+/// The right column's own overflow policy (`setup::spawn_right_column`'s own
+/// doc, "Overflow policy"): content taller than the column's fixed,
+/// window-relative height clips (`Overflow::scroll_y()`) rather than
+/// spilling past the window's bottom edge - this is what makes that content
+/// reachable again rather than silently lost. `ScrollPosition` is clamped to
+/// the valid scrollable range by `bevy_ui`'s own layout system every frame
+/// (`ScrollPosition`'s own doc), so holding either key past the actual
+/// content's end is a no-op, not a bug needing its own clamp here.
+pub(super) fn handle_right_column_scroll(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Query<&mut ScrollPosition, With<RightColumnRoot>>) {
+    let Ok(mut scroll) = query.single_mut() else { return };
+    let delta = RIGHT_COLUMN_SCROLL_SPEED * time.delta_secs();
+    if keys.pressed(KeyCode::PageDown) {
+        scroll.0.y += delta;
+    }
+    if keys.pressed(KeyCode::PageUp) {
+        scroll.0.y = (scroll.0.y - delta).max(0.0);
+    }
+}
+
+// ---------------------------------------------------------------------
 // Shared styling
 // ---------------------------------------------------------------------
 
@@ -100,6 +136,22 @@ const TEXT_ENABLED: Color = Color::srgb(0.92, 0.95, 0.92);
 const TEXT_DISABLED: Color = Color::srgba(0.65, 0.65, 0.68, 0.8);
 const TEXT_REASON: Color = Color::srgb(0.85, 0.45, 0.40);
 const PANEL_BG: Color = Color::srgba(0.05, 0.06, 0.08, 0.88);
+
+/// Shared by `sync_region_action_buttons`/`sync_policy_panel`/
+/// `sync_diplomacy_panel`'s own root-visibility toggle: these three panels
+/// are now flex children of `setup::spawn_right_column`'s shared column
+/// (that function's own doc has the full rationale), so hiding one has to
+/// mean *both* "don't render" (`Visibility::Hidden`, unchanged from before
+/// this fix - still what keeps a closed panel's buttons reporting
+/// `Interaction::None`, per `bevy_ui`'s own documented guarantee this
+/// module's doc already cites) and "don't reserve flex space" (`Node::display
+/// = Display::None`, new) - without the second half, a closed panel would
+/// still occupy its full content height as permanent dead space in the
+/// column even while invisible.
+fn set_panel_shown(visibility: &mut Visibility, node: &mut Node, showing: bool) {
+    *visibility = if showing { Visibility::Visible } else { Visibility::Hidden };
+    node.display = if showing { Display::Flex } else { Display::None };
+}
 
 fn button_node() -> Node {
     Node { padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)), ..default() }
@@ -331,13 +383,21 @@ fn recruit_reason(world: &SimWorld, faction: FactionId) -> Option<&'static str> 
     None
 }
 
-pub(super) fn spawn_region_action_panel(commands: &mut Commands, font: &Handle<Font>) {
-    commands
+/// A child of `setup::spawn_right_column`'s shared flex column - not
+/// independently positioned (`setup::spawn_right_column`'s own doc has the
+/// full rationale). `width: Val::Px(340.0)` still fixes this panel's own
+/// width (the widest of the column's children, and the width the column
+/// itself is sized to - `setup::spawn_right_column`'s own `WIDTH`); it no
+/// longer needs `position_type`/`top`/`right` since the column places it.
+/// Starts `display: Display::None` (as well as `Visibility::Hidden`,
+/// unchanged) so a closed panel also reserves no space in the column -
+/// `sync_region_action_buttons` keeps both in sync with `showing` every
+/// frame from here on.
+pub(super) fn spawn_region_action_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
+    parent
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(230.0),
-                right: Val::Px(10.0),
+                display: Display::None,
                 width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(3.0),
@@ -375,14 +435,14 @@ pub(super) fn sync_region_action_buttons(
     diplomacy: Res<DiplomacyPanel>,
     policy: Res<PolicyPanel>,
     active_good: Res<ActiveGood>,
-    mut root: Query<&mut Visibility, With<RegionActionPanelRoot>>,
+    mut root: Query<(&mut Visibility, &mut Node), With<RegionActionPanelRoot>>,
     mut buttons: Query<(&RegionActionKind, &mut BackgroundColor)>,
     mut labels: Query<(&RegionActionLabel, &mut Text, &mut TextColor)>,
     mut reasons: Query<(&RegionActionReason, &mut Text), Without<RegionActionLabel>>,
 ) {
-    let Ok(mut visibility) = root.single_mut() else { return };
+    let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && selected.0.is_some() && !diplomacy.open && !policy.0;
-    *visibility = if showing { Visibility::Visible } else { Visibility::Hidden };
+    set_panel_shown(&mut visibility, &mut node, showing);
     if !showing {
         return;
     }
@@ -852,13 +912,15 @@ pub(super) struct PolicyFocusReasonText;
 #[derive(Component, Clone, Copy)]
 pub(super) struct FocusButton(NationalFocus);
 
-pub(super) fn spawn_policy_panel(commands: &mut Commands, font: &Handle<Font>) {
-    commands
+/// A child of `setup::spawn_right_column`'s shared flex column - see
+/// `spawn_region_action_panel`'s own doc for why `position_type`/`top`/
+/// `right` are gone and `display: Display::None` was added alongside the
+/// pre-existing `Visibility::Hidden`.
+pub(super) fn spawn_policy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
+    parent
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(46.0),
-                right: Val::Px(10.0),
+                display: Display::None,
                 width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
@@ -920,7 +982,7 @@ pub(super) fn sync_policy_panel(
     diplomacy: Res<DiplomacyPanel>,
     active_good: Res<ActiveGood>,
     rejection: Res<LastRejection>,
-    mut root: Query<&mut Visibility, With<PolicyPanelRoot>>,
+    mut root: Query<(&mut Visibility, &mut Node), With<PolicyPanelRoot>>,
     mut good_tabs: Query<(&GoodTabButton, &mut BackgroundColor)>,
     mut value_texts: Query<(&PolicyValueText, &mut Text, &mut TextColor), (Without<PolicyRejectionText>, Without<PolicyFocusReasonText>)>,
     mut step_buttons: Query<(&PolicyStepButton, &mut BackgroundColor), Without<GoodTabButton>>,
@@ -928,9 +990,9 @@ pub(super) fn sync_policy_panel(
     mut focus_reason: Query<&mut Text, (With<PolicyFocusReasonText>, Without<PolicyValueText>, Without<PolicyRejectionText>)>,
     mut rejection_text: Query<&mut Text, (With<PolicyRejectionText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>)>,
 ) {
-    let Ok(mut visibility) = root.single_mut() else { return };
+    let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && policy.0 && !diplomacy.open;
-    *visibility = if showing { Visibility::Visible } else { Visibility::Hidden };
+    set_panel_shown(&mut visibility, &mut node, showing);
     if !showing {
         return;
     }
@@ -1110,13 +1172,15 @@ pub(super) fn stance_label_ja(stance: Stance) -> &'static str {
 /// faction other than `player` that exists at scenario-load time - the
 /// faction roster is fixed for the life of a run (only `Faction::alive`
 /// changes), so this needs no pool/respawn (`mod.rs`'s own doc pattern).
-pub(super) fn spawn_diplomacy_panel(commands: &mut Commands, font: &Handle<Font>, world: &SimWorld, player: FactionId) {
-    commands
+/// A child of `setup::spawn_right_column`'s shared flex column - see
+/// `spawn_region_action_panel`'s own doc for why `position_type`/`top`/
+/// `right` are gone and `display: Display::None` was added alongside the
+/// pre-existing `Visibility::Hidden`.
+pub(super) fn spawn_diplomacy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>, world: &SimWorld, player: FactionId) {
+    parent
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(46.0),
-                right: Val::Px(10.0),
+                display: Display::None,
                 width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
@@ -1190,16 +1254,16 @@ pub(super) fn sync_diplomacy_panel(
     diplomacy: Res<DiplomacyPanel>,
     nl_compose: Res<NlCompose>,
     rejection: Res<LastRejection>,
-    mut root: Query<&mut Visibility, With<DiplomacyPanelRoot>>,
+    mut root: Query<(&mut Visibility, &mut Node), With<DiplomacyPanelRoot>>,
     mut target_buttons: Query<(&DiplomacyTargetButton, &mut BackgroundColor)>,
     mut treaty_buttons: Query<(&TreatyProposeButton, &mut BackgroundColor), Without<DiplomacyTargetButton>>,
     mut treaty_reasons: Query<(&TreatyReasonText, &mut Text)>,
     mut action_buttons: Query<(&DiplomacyAction, &mut BackgroundColor), (Without<TreatyProposeButton>, Without<DiplomacyTargetButton>)>,
     mut text_slots: Query<(&DiplomacyTextSlot, &mut Text), Without<TreatyReasonText>>,
 ) {
-    let Ok(mut visibility) = root.single_mut() else { return };
+    let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && diplomacy.open;
-    *visibility = if showing { Visibility::Visible } else { Visibility::Hidden };
+    set_panel_shown(&mut visibility, &mut node, showing);
     if !showing {
         return;
     }

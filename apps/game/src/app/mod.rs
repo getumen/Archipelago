@@ -417,6 +417,20 @@ pub(crate) struct InspectText;
 #[derive(Component)]
 pub(crate) struct PlayerPanelText;
 
+/// The right-hand column's shared flex container (`setup::spawn_right_column`):
+/// `InspectText`, whichever of `panels::RegionActionPanelRoot`/
+/// `PolicyPanelRoot`/`DiplomacyPanelRoot` is currently shown, and
+/// `PlayerPanelText` are all children of this one node, stacked top-to-bottom
+/// by `bevy_ui`'s own flex layout rather than each independently anchored to
+/// an edge - see `spawn_right_column`'s own doc for why (it replaces a real,
+/// reproducible collision between independently-`PositionType::Absolute`
+/// panels that shared this edge and knew nothing about each other).
+/// `panels::handle_right_column_scroll` is the only system that reads this
+/// marker directly (to find the `ScrollPosition` to adjust); every panel's
+/// own visibility/content is still owned by its usual sync system.
+#[derive(Component)]
+pub(crate) struct RightColumnRoot;
+
 /// Stage 7C's newspaper panel (`N` to toggle) - see `ui::update_newspaper_panel`.
 #[derive(Component)]
 pub(crate) struct NewspaperPanelText;
@@ -690,7 +704,11 @@ pub fn run(
         .add_systems(
             Update,
             screenshot::maybe_capture_screenshot.after(panels::sync_diplomacy_panel),
-        );
+        )
+        // Independent of every chain above (reads only keyboard/time, writes
+        // only the right column's own `ScrollPosition`) - `panels::
+        // spawn_right_column`'s own doc has the overflow policy this serves.
+        .add_systems(Update, panels::handle_right_column_scroll);
 
     if let Some(path) = record_path {
         app.insert_resource(RecordConfig { path, days: Vec::new() });

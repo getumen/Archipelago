@@ -15,8 +15,8 @@ use super::overlay;
 use super::palette::faction_color;
 use super::{
     EventLogText, FactionPanelText, InspectText, MainCamera, OwnerBorderMarker, PlayerPanelText,
-    RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii, SeaZoneCenters, SeaZoneMarker,
-    SimRes, TopBarText, UnitMarker,
+    RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii, RightColumnRoot, SeaZoneCenters,
+    SeaZoneMarker, SimRes, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -463,13 +463,160 @@ pub(super) fn setup(
     // spawned once here, alongside every other static UI node above - see
     // each spawn function's own doc for why it's safe to pre-spawn
     // (region/policy/diplomacy actions are a fixed set; the unit panel is a
-    // fixed-size pool).
-    super::panels::spawn_region_action_panel(&mut commands, &font.0);
+    // fixed-size pool). The unit panel sits on the *left* (`spawn_unit_panel`'s
+    // own `left: Val::Px(10.0)`) so it never competes with the right column
+    // below; region-action/policy/diplomacy do share that column and are
+    // spawned as its children instead.
     super::panels::spawn_unit_panel(&mut commands, &font.0);
-    super::panels::spawn_policy_panel(&mut commands, &font.0);
-    if let Some(player_faction) = player.0 {
-        super::panels::spawn_diplomacy_panel(&mut commands, &font.0, world, player_faction);
-    }
+    spawn_right_column(&mut commands, &font.0, world, player.0);
+}
+
+/// The right column's own fixed width and its margin from the window's
+/// right edge (`spawn_right_column`'s own `Node`) - lifted to module scope,
+/// not kept as locals inside that function alone, so every panel that must
+/// stay clear of the column (`spawn_ui`'s newspaper panel, `spawn_legend`,
+/// and the event log width that panel is in turn derived from) reads the
+/// exact same numbers the column is actually drawn at, rather than each
+/// restating its own guess at where the column starts. That drift is
+/// exactly what caused two real collisions (`codex review`, and this task's
+/// own reproduction): the column's own box grew from an effective 320px-wide
+/// right-anchored area to this 340px one - needed so `panels::
+/// spawn_region_action_panel`/`spawn_policy_panel`/`spawn_diplomacy_panel`
+/// (all 340px) fit inside it without clipping - and neither the newspaper
+/// panel's width nor the legend's width/position had been re-derived against
+/// the new, 20px-further-left boundary that produced.
+pub(super) const RIGHT_COLUMN_WIDTH: f32 = 340.0;
+pub(super) const RIGHT_COLUMN_RIGHT_MARGIN: f32 = 10.0;
+/// Left edge (window-relative x) of the right column's own box - the single
+/// horizontal boundary every neighbouring panel below stays clear of.
+pub(super) const RIGHT_COLUMN_LEFT_EDGE: f32 = super::WINDOW_WIDTH - RIGHT_COLUMN_RIGHT_MARGIN - RIGHT_COLUMN_WIDTH;
+
+/// Minimum horizontal gap a panel keeps from a neighbour it must not overlap
+/// - shared by every derived width/position below (the newspaper panel, the
+/// legend, and the event log it in turn makes room for) so the fix is one
+/// uniform relationship rather than each panel picking its own margin.
+const PANEL_GAP: f32 = 10.0;
+
+/// Everything that used to be four independent `PositionType::Absolute`
+/// nodes anchored to the same right edge (`InspectText` from the top,
+/// `PlayerPanelText` from the bottom, and whichever of `panels::
+/// RegionActionPanelRoot`/`PolicyPanelRoot`/`DiplomacyPanelRoot` happened to
+/// be open, both pinned near the top) - each one sized only by its own
+/// content, with no idea any of the others existed. Long region-inspect text
+/// (occupied-region/construction detail) growing down could and did collide,
+/// pixel for pixel, with the diplomacy panel's own buttons growing from a
+/// `top` that started only 6px below `InspectText`'s own `top` (reproduced
+/// with `--debug-open-diplomacy --debug-select-region`, confirmed by
+/// screenshot) - and, separately, with `PlayerPanelText` growing up from the
+/// bottom whenever *its own* content (a long unit list, an open menu, several
+/// rejections) ran long too.
+///
+/// Fixed by construction rather than by re-tuning offsets (a hand-picked gap
+/// only holds until someone's text is one line longer): every one of those
+/// nodes is now a child of *one* `FlexDirection::Column` container
+/// (`RightColumnRoot`), in reading order - `InspectText` first (region detail
+/// stays nearest the top, exactly where it always was), then whichever
+/// action/policy/diplomacy panel is open (`panels::sync_region_action_buttons`/
+/// `sync_policy_panel`/`sync_diplomacy_panel` now toggle each root's own
+/// `Node::display` between `Flex`/`None` alongside their existing
+/// `Visibility` toggle, so a hidden panel also stops reserving flex space -
+/// without that, the other two's height would sit as permanent dead space
+/// even while closed), then `PlayerPanelText` last (player controls stay
+/// below region detail, exactly as before). Flex layout stacks them
+/// top-to-bottom unconditionally - two children can no longer occupy the same
+/// vertical span no matter how long either one's text gets.
+///
+/// **Overflow policy** (explicitly decided, not left to chance): the column
+/// is `Overflow::scroll_y()` - if the combined content is ever taller than
+/// its own box (a long region, a long unit list, and an open panel, all at
+/// once), it clips and scrolls rather than spilling past the window's own
+/// bottom edge (invisible, and not recoverable by any player action - the
+/// one outcome docs/conventions.md's "state has a recovery path" rule and
+/// this task's own "content must never be silently lost" ask both rule out)
+/// or being cut off with no way back. `panels::handle_right_column_scroll`
+/// (`PageUp`/`PageDown`, documented in the on-screen legend) is that
+/// recovery path - `ScrollPosition` is clamped to the valid range by
+/// `bevy_ui`'s own layout system every frame, so no manual bounds-checking
+/// is needed here to keep a short frame's worth of content from "scrolling"
+/// into empty space.
+///
+/// **The box's own height tracks the window, not a startup sample of it**
+/// (CLAUDE.md's "発令時点の値を焼き込まない" - never bake in a value that
+/// should keep tracking current state): an earlier version pinned `height`
+/// to `Val::Px(window_height - TOP - BOTTOM_MARGIN)` using the window height
+/// the process happened to start with, so shrinking a resizable window (or a
+/// window manager overriding the requested startup size) left the column
+/// extending past the window's real bottom edge - content clipped by the
+/// *window* there is unreachable by any amount of `PageDown`, since
+/// `bevy_ui`'s scroll clamp only ever knows about the column's own
+/// (stale-height) box, not the window around it.
+///
+/// Fixed with no sampling at all, rather than a system re-reading the
+/// window's size every frame: `top`/`bottom` are both set and `height` is
+/// left `Val::Auto`. `bevy_ui`'s own layout (`taffy`'s absolute-positioning
+/// rule for a box with both opposing insets set and no explicit size on that
+/// axis - the same rule every other `bottom: Val::Px(_)`-anchored panel in
+/// this module already relies on to track the window's actual bottom edge,
+/// e.g. the event log/legend below) fills the height in from whatever the
+/// *current* window/viewport size is, every time `bevy_ui`'s layout system
+/// runs - which is every frame a window resize (a drag, or a WM overriding
+/// the requested startup size) actually changes it. See
+/// `right_column_tests::right_column_height_is_window_relative_not_a_baked_constant`
+/// for the regression this pins, and its own doc for how it was confirmed to
+/// fail against the pre-fix `Val::Px` version before the fix went in.
+fn spawn_right_column(commands: &mut Commands, font: &Handle<Font>, world: &SimWorld, player_faction: Option<archipelago_sim::ids::FactionId>) {
+    const TOP: f32 = 40.0;
+    const BOTTOM_MARGIN: f32 = 6.0;
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(TOP),
+                bottom: Val::Px(BOTTOM_MARGIN),
+                right: Val::Px(RIGHT_COLUMN_RIGHT_MARGIN),
+                width: Val::Px(RIGHT_COLUMN_WIDTH),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                overflow: Overflow::scroll_y(),
+                // The container itself is `RIGHT_COLUMN_WIDTH` (340, the
+                // widest child - `panels::spawn_region_action_panel`/
+                // `spawn_policy_panel`/`spawn_diplomacy_panel` all size
+                // themselves to exactly that). `InspectText`/`PlayerPanelText`
+                // keep their own original, narrower widths below rather than
+                // stretching to fill it (`AlignItems::End`'s own doc on this
+                // same struct literal explains why that still lines their
+                // right edge up with `right: RIGHT_COLUMN_RIGHT_MARGIN`
+                // unchanged from before this fix).
+                align_items: AlignItems::End,
+                ..default()
+            },
+            ScrollPosition::default(),
+            RightColumnRoot,
+        ))
+        .with_children(|col| {
+            col.spawn((
+                Node { width: Val::Px(300.0), ..default() },
+                Text::new(String::new()),
+                text_font(14.0, font),
+                TextColor(Color::srgb(0.92, 0.92, 0.95)),
+                InspectText,
+            ));
+
+            super::panels::spawn_region_action_panel(col, font);
+            super::panels::spawn_policy_panel(col, font);
+            if let Some(player_faction) = player_faction {
+                super::panels::spawn_diplomacy_panel(col, font, world, player_faction);
+            }
+
+            col.spawn((
+                Node { width: Val::Px(320.0), ..default() },
+                Text::new(String::new()),
+                text_font(13.0, font),
+                TextColor(Color::srgb(1.0, 0.82, 0.45)),
+                PlayerPanelText,
+            ));
+        });
 }
 
 pub(super) fn station_position(station: Station, region_pos: &[[f32; 2]], sea_pos: &[[f32; 2]]) -> [f32; 2] {
@@ -639,6 +786,20 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
     // stability, war support, shortage" at a glance, not buried in the
     // faction browser). Empty (no text) whenever no faction was `--play`ed -
     // `ui::update_top_bar_player_stats`.
+    //
+    // `japanese_label_layout()` (`NoWrap`), same as `TopBarText` above and
+    // every region/sea-zone label: this is a one-line status readout by
+    // design, exactly like those, but was missing the `NoWrap` that actually
+    // enforces it - `update_top_bar_player_stats` joins every `Good`'s own
+    // stock figure onto one line, and with six goods plus manpower/
+    // stability/war-support/shortage that line can run past `width: 900`,
+    // wrapping onto a second line that then collides with `FactionPanelText`
+    // and the right column, both starting at `top: 40` just 14px below this
+    // node's own `top: 26` (this task's own review). `NoWrap` removes the
+    // possibility outright rather than re-tuning `width`/`top` against
+    // today's good count - a wider stock line (more goods, a longer faction
+    // name) would only need to grow `width`'s own footprint sideways, never
+    // fall back to wrapping downward into a neighbour.
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -649,6 +810,7 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
         },
         Text::new(String::new()),
         text_font(13.0, font),
+        japanese_label_layout(),
         TextColor(Color::srgb(1.0, 0.82, 0.45)),
         super::TopBarPlayerStatsText,
     ));
@@ -712,13 +874,19 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
         FactionPanelText,
     ));
 
-    // Bottom panel: event log, most recent first.
+    // Bottom panel: event log, most recent first. Width derived (`EVENT_LOG_PANEL_WIDTH`'s
+    // own doc) from wherever the legend actually starts, not restated
+    // independently - the legend already sits in "the one gap this crate's
+    // layout leaves free" right after this panel (`spawn_legend`'s own
+    // doc), so the two have always shared this boundary; deriving it keeps
+    // them sharing it by construction instead of by two constants that
+    // happen to agree today.
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(6.0),
-            left: Val::Px(10.0),
-            width: Val::Px(760.0),
+            left: Val::Px(EVENT_LOG_PANEL_LEFT),
+            width: Val::Px(EVENT_LOG_PANEL_WIDTH),
             ..default()
         },
         Text::new(String::new()),
@@ -727,48 +895,31 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
         EventLogText,
     ));
 
-    // Right panel: click-to-inspect region detail.
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(40.0),
-            right: Val::Px(10.0),
-            width: Val::Px(300.0),
-            ..default()
-        },
-        Text::new(String::new()),
-        text_font(14.0, font),
-        TextColor(Color::srgb(0.92, 0.92, 0.95)),
-        InspectText,
-    ));
-
-    // Bottom-right panel: Stage 7B player controls - selection state, the
-    // recruit/build menu, the diplomacy panel, current policy values, and
-    // the most recent rejection reasons. Empty (no text spawned) whenever
-    // there is no `--play`ed faction - see `ui::update_player_panel`.
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(6.0),
-            right: Val::Px(10.0),
-            width: Val::Px(320.0),
-            ..default()
-        },
-        Text::new(String::new()),
-        text_font(13.0, font),
-        TextColor(Color::srgb(1.0, 0.82, 0.45)),
-        PlayerPanelText,
-    ));
+    // The right column - `InspectText` (click-to-inspect region detail),
+    // whichever of `panels::RegionActionPanelRoot`/`PolicyPanelRoot`/
+    // `DiplomacyPanelRoot` is currently open, and `PlayerPanelText` (Stage
+    // 7B player controls - selection state, the recruit/build menu, and the
+    // most recent rejection reasons; empty whenever there is no `--play`ed
+    // faction, see `ui::update_player_panel`) - is spawned together, as one
+    // flex container, by `spawn_right_column` (called from `setup` alongside
+    // this function, not from here - it needs `SimWorld`/`PlayerFaction`,
+    // which this function doesn't take). See that function's own doc for why
+    // these can no longer be four independent `PositionType::Absolute` nodes.
 
     // Center panel: Stage 7C's newspaper (`N` to toggle) -
     // `ui::update_newspaper_panel`. Empty text whenever the panel is closed
     // or no issue has been published yet - never a placeholder.
+    //
+    // Width is `NEWSPAPER_PANEL_WIDTH`, derived from the right column's own
+    // left edge rather than the independent `600.0` this used to be - fixes
+    // the 10px overlap `codex review` found (this panel used to reach
+    // `x=940`, the right column's own box now starts at `x=930`).
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(90.0),
-            left: Val::Px(340.0),
-            width: Val::Px(600.0),
+            left: Val::Px(NEWSPAPER_PANEL_LEFT),
+            width: Val::Px(NEWSPAPER_PANEL_WIDTH),
             ..default()
         },
         Text::new(String::new()),
@@ -794,15 +945,44 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
 /// shown/hidden every frame by `map_mode::sync_mode_legend` according to
 /// whichever mode is current - including the supply overlay's own rows,
 /// now one mode among the rest rather than a separately-toggled block. Sits
-/// in the one gap the rest of this crate's UI layout leaves free at the
-/// bottom of the window, between the event log (`left: 10, width: 760`,
-/// ending at `770`) and the player panel (`right: 10, width: 320`, starting
-/// at `950`) - a 180px budget. `LEGEND_PANEL_WIDTH` uses as much of it as
-/// fits with a 2px margin on each side (`left: 772`, ending at `948`), wide
-/// enough that `map_mode::legend_header`'s longest line no longer wraps (it
-/// used to, at this panel's old 170px width, into a ragged 2-3 line block
-/// that visually collided with the `controls:` rows above it).
+/// in the gap between the event log and the right column.
+///
+/// `LEGEND_PANEL_WIDTH` is this panel's one genuinely content-driven
+/// constant, not derived from a neighbour - sized to fit `map_mode::
+/// legend_header`'s longest line (`供給路と詰まり箇所（旧Lキー表示）`,
+/// ~165px measured against the bundled font at this row's own font size)
+/// without wrapping into a second line (it used to, at an older, narrower
+/// width, into a ragged 2-3 line block that visually collided with the
+/// `controls:` rows above it) - so this stays fixed and everything else
+/// here is arranged around it instead.
+///
+/// `LEGEND_PANEL_LEFT` is what actually moves (`codex review`, and this
+/// task's own 18px-overlap finding): it used to be an independent `772.0`,
+/// picked back when the right column's own box started at `x=950` (an
+/// effectively-320px-wide right-anchored area) - that box is now
+/// `RIGHT_COLUMN_LEFT_EDGE` (`x=930`, `panels::
+/// spawn_region_action_panel`/friends all being 340px wide), so this is
+/// derived from that boundary instead: `RIGHT_COLUMN_LEFT_EDGE -
+/// LEGEND_PANEL_WIDTH - PANEL_GAP`. `EVENT_LOG_PANEL_WIDTH` (`spawn_ui`'s
+/// own event-log `Node`) is in turn derived from *this* - the event log and
+/// the legend have always shared that boundary by design (this doc's own
+/// "the gap between the event log and the right column"), so deriving one
+/// from the other keeps them sharing it by construction rather than by two
+/// independently hand-picked constants that happen to agree today.
 const LEGEND_PANEL_WIDTH: f32 = 176.0;
+const LEGEND_PANEL_LEFT: f32 = RIGHT_COLUMN_LEFT_EDGE - LEGEND_PANEL_WIDTH - PANEL_GAP;
+
+/// `spawn_ui`'s event log `Node`'s own `left`/`width` - `EVENT_LOG_PANEL_WIDTH`'s
+/// own doc (on `LEGEND_PANEL_LEFT` above) has the derivation.
+const EVENT_LOG_PANEL_LEFT: f32 = 10.0;
+const EVENT_LOG_PANEL_WIDTH: f32 = LEGEND_PANEL_LEFT - EVENT_LOG_PANEL_LEFT - PANEL_GAP;
+
+/// `spawn_ui`'s newspaper panel's own `left`/`width` - derived the same way
+/// (`RIGHT_COLUMN_LEFT_EDGE`'s own doc): `NEWSPAPER_PANEL_LEFT` stays fixed
+/// (it never competed with the event log/legend, only the right column), so
+/// only the width moves.
+const NEWSPAPER_PANEL_LEFT: f32 = 340.0;
+const NEWSPAPER_PANEL_WIDTH: f32 = RIGHT_COLUMN_LEFT_EDGE - NEWSPAPER_PANEL_LEFT - PANEL_GAP;
 
 fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
     let label_color = Color::srgba(0.85, 0.87, 0.90, 0.95);
@@ -812,7 +992,7 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
         .spawn(Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(6.0),
-            left: Val::Px(772.0),
+            left: Val::Px(LEGEND_PANEL_LEFT),
             width: Val::Px(LEGEND_PANEL_WIDTH),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(1.0),
@@ -839,6 +1019,11 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             row("政策パネル: P ボタン/キー", label_color);
             row("外交パネル: D ボタン/キー", label_color);
             row("部隊待機/補充: ボタン/H/J", label_color);
+            // `panels::handle_right_column_scroll` - the right column's own
+            // overflow policy (`setup::spawn_right_column`'s own doc,
+            // "Overflow policy") needs a discoverable way to actually reach
+            // clipped content, not just a mechanism nobody knows exists.
+            row("右パネル: PageUp/PageDown", label_color);
 
             row("凡例", label_color);
             row("■ 港湾封鎖中", overlay::BLOCKADE_MARKER_COLOR);
@@ -871,4 +1056,151 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
                 ));
             }
         });
+}
+
+#[cfg(test)]
+mod right_column_tests {
+    use bevy::ecs::world::CommandQueue;
+
+    use archipelago_sim::ids::FactionId;
+    use archipelago_sim::scenario;
+
+    use super::*;
+
+    /// Regression guard for the collision this task fixes: `InspectText`
+    /// (region detail) and `PlayerPanelText` (player controls) used to be
+    /// two independent `PositionType::Absolute` nodes anchored to opposite
+    /// edges of the same right-hand column - one `top: 40` growing down, the
+    /// other `bottom: 6` growing up - with nothing stopping them from
+    /// meeting in the middle when both had enough text (reproduced with
+    /// `--debug-open-diplomacy --debug-select-region`, confirmed by
+    /// screenshot; the diplomacy panel shared the same collision against
+    /// `InspectText` even more directly, both starting only 6px apart from
+    /// the top).
+    ///
+    /// `spawn_right_column` fixes this by construction: both are children of
+    /// one shared `FlexDirection::Column` container (`RightColumnRoot`), so
+    /// this checks exactly that structural fact rather than any particular
+    /// pixel offset (which the task's own review explicitly warns against
+    /// hand-tuning). Confirmed this fails without the fix: reverting
+    /// `spawn_right_column` to spawn `InspectText`/`PlayerPanelText` as two
+    /// top-level `PositionType::Absolute` nodes (`setup::spawn_ui`'s own
+    /// pre-fix shape) makes the first assertion below fail with "InspectText
+    /// has no parent" - there is no shared container to find at all.
+    #[test]
+    fn inspect_and_player_panels_share_one_column_stacking_container() {
+        let world_data = scenario::build_world();
+        let font = Handle::<Font>::default();
+
+        let mut world = World::new();
+        let mut queue = CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_right_column(&mut commands, &font, &world_data, Some(FactionId(0)));
+        }
+        queue.apply(&mut world);
+
+        let inspect = {
+            let mut q = world.query_filtered::<Entity, With<InspectText>>();
+            q.iter(&world).next().expect("spawn_right_column must spawn an InspectText entity")
+        };
+        let player_panel = {
+            let mut q = world.query_filtered::<Entity, With<PlayerPanelText>>();
+            q.iter(&world).next().expect("spawn_right_column must spawn a PlayerPanelText entity")
+        };
+
+        let inspect_parent = world.get::<ChildOf>(inspect).expect("InspectText has no parent - it is not part of any shared stacking container").parent();
+        let player_parent = world.get::<ChildOf>(player_panel).expect("PlayerPanelText has no parent - it is not part of any shared stacking container").parent();
+        assert_eq!(
+            inspect_parent, player_parent,
+            "InspectText and PlayerPanelText must be children of the same container, so bevy_ui's own flex layout stacks them instead of letting two independently-anchored nodes overlap"
+        );
+
+        // A shared parent alone isn't enough - it also has to actually stack
+        // its children (a `Column` flex container) rather than merely group
+        // two still-independently-`Absolute` siblings under one entity that
+        // does nothing layout-wise.
+        let container_node = world.get::<Node>(inspect_parent).expect("the shared container must itself be a UI Node");
+        assert_eq!(
+            container_node.flex_direction,
+            FlexDirection::Column,
+            "the shared right-column container must lay its children out as a column so they stack top-to-bottom"
+        );
+        for (label, child) in [("InspectText", inspect), ("PlayerPanelText", player_panel)] {
+            let node = world.get::<Node>(child).unwrap_or_else(|| panic!("{label} must have a Node"));
+            assert_ne!(
+                node.position_type,
+                PositionType::Absolute,
+                "{label} must not opt back into independent absolute positioning inside the stacking column - that would let it overlap its siblings again"
+            );
+        }
+    }
+
+    /// Pins the fix for the "bakes in the startup window height" bug
+    /// `codex review` found (`spawn_right_column`'s own doc, "The box's own
+    /// height tracks the window, not a startup sample of it"): an earlier
+    /// version computed the column's `height` once, from whatever window
+    /// height the process happened to start with, and stored it as a fixed
+    /// `Val::Px`. Shrinking a resizable window (or a window manager
+    /// overriding the requested startup size) then left the column
+    /// extending past the window's real bottom edge - content clipped by
+    /// the *window* there is unreachable by any amount of `PageDown`, since
+    /// `bevy_ui`'s scroll clamp only ever knows about the column's own
+    /// (stale) box.
+    ///
+    /// Checked structurally, the same way the test above checks its own
+    /// property, rather than by spinning up a real window and resizing it:
+    /// the column's `height` must be `Val::Auto` with both `top` and
+    /// `bottom` set. That is not an arbitrary stand-in for "tracks the
+    /// window" - it is `taffy`'s (`bevy_ui`'s layout engine) own rule for an
+    /// absolutely positioned box with both opposing insets set and no
+    /// explicit size on that axis: the height is filled in from whatever
+    /// the *current* window/viewport size is, every time `bevy_ui`'s layout
+    /// system runs - the same rule every other `bottom: Val::Px(_)`-anchored
+    /// panel in this module (the event log, the legend) already relies on
+    /// to track the window's actual bottom edge. No system anywhere has to
+    /// re-sample the window and write a new `Val::Px` for that to hold.
+    ///
+    /// Confirmed this fails against the pre-fix shape: give
+    /// `spawn_right_column` back its old `window_height: f32` parameter and
+    /// `height: Val::Px((window_height - TOP - BOTTOM_MARGIN).max(0.0))`
+    /// (with no `bottom` field at all), and the first assertion below fails
+    /// immediately - `Val::Px(754.0) != Val::Auto` for a `window_height` of
+    /// `800.0` - because the height is a number baked in from whatever was
+    /// passed at spawn time, not a window-relative constraint at all.
+    #[test]
+    fn right_column_height_is_window_relative_not_a_baked_constant() {
+        let world_data = scenario::build_world();
+        let font = Handle::<Font>::default();
+
+        let mut world = World::new();
+        let mut queue = CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_right_column(&mut commands, &font, &world_data, Some(FactionId(0)));
+        }
+        queue.apply(&mut world);
+
+        let root = {
+            let mut q = world.query_filtered::<Entity, With<RightColumnRoot>>();
+            q.iter(&world).next().expect("spawn_right_column must spawn a RightColumnRoot entity")
+        };
+        let node = world.get::<Node>(root).expect("RightColumnRoot must have a Node");
+
+        assert_eq!(
+            node.height,
+            Val::Auto,
+            "the column's height must not be a baked Val::Px sampled from the window at spawn time - it must stay Val::Auto so bevy_ui computes it fresh from the *current* window size on every layout pass, not a snapshot taken once at startup"
+        );
+        assert_ne!(
+            node.top,
+            Val::Auto,
+            "top must be a concrete inset - with height left Val::Auto, bevy_ui's absolute-layout rule only fills the height in from the window's current size when both top and bottom are set"
+        );
+        assert_ne!(
+            node.bottom,
+            Val::Auto,
+            "bottom must be a concrete inset (not left at the default Val::Auto) - otherwise height has no second edge to be computed between and stays generically auto-sized to content instead of tracking the window"
+        );
+    }
 }
