@@ -10,12 +10,15 @@ use archipelago_sim::balance::{
     CAPITAL_FLIGHT_THRESHOLD, GROUP_SHORTAGE_CITIZENS_PENALTY, GROUP_SHORTAGE_GOVERNMENT_PENALTY, GROUP_SHORTAGE_LABOR_PENALTY, MUTINY_THRESHOLD,
     PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD, SEPARATISM_THRESHOLD, STRIKE_THRESHOLD, UNIT_MANPOWER,
 };
+use archipelago_sim::construction::Project;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::group::{Group, ALL_GROUPS};
 use archipelago_sim::naval::is_port_blockaded;
 use archipelago_sim::world::Station;
 
 use super::input::MENU_ITEMS;
+use super::map_mode::terrain_label;
+use super::panels::stance_label_ja;
 use super::{
     EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperPanelText, NewspaperState, PlayerFaction,
     PlayerPanelText, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, TopBarPlayerStatsText, TopBarText,
@@ -156,11 +159,28 @@ fn stock_marker(good: Good, stock: f32) -> &'static str {
     }
 }
 
+/// Japanese label for a `Project`, matching the wording `input::MENU_ITEMS`
+/// already uses for the same four build orders ("インフラ建設"/"港湾建設"/
+/// "生産設備建設（対象品目）"/"修復") so a region's in-progress construction
+/// reads with the same vocabulary as the menu that started it. Kept local to
+/// this module (its only consumer) rather than in `crates/sim`: `Project`
+/// already has `construction::required_points`/action-codec's own English
+/// key for every machine-facing need, so a Japanese display label is a pure
+/// presentation concern.
+fn project_label(project: Project) -> String {
+    match project {
+        Project::Infrastructure => "インフラ建設".to_string(),
+        Project::Port => "港湾建設".to_string(),
+        Project::Capacity(good) => format!("{}生産設備建設", good.label()),
+        Project::Repair => "修復".to_string(),
+    }
+}
+
 pub(super) fn update_top_bar(sim: Res<SimRes>, speed: Res<SpeedRes>, meta: Res<ScenarioMeta>, mut query: Query<&mut Text, With<TopBarText>>) {
     let Ok(mut text) = query.single_mut() else { return };
     let world = sim.0.world();
-    let status = if speed.paused { "paused".to_string() } else { format!("running ({})", speed.last_active.label()) };
-    text.0 = format!("{}  —  day {} / {}  —  {status}", meta.name, world.day, meta.max_days);
+    let status = if speed.paused { "一時停止中".to_string() } else { format!("実行中（{}）", speed.last_active.label()) };
+    text.0 = format!("{}  —  {}日目 / {}  —  {status}", meta.name, world.day, meta.max_days);
 }
 
 /// Stage 8B: the player faction's own key figures, always visible in the top
@@ -178,7 +198,7 @@ pub(super) fn update_top_bar_player_stats(sim: Res<SimRes>, player: Res<PlayerFa
     let faction = world.faction(player_faction);
     let stock: Vec<String> = ALL_GOODS
         .iter()
-        .map(|g| format!("{}={:.0}{}", g.key(), faction.stock[g.index()], stock_marker(*g, faction.stock[g.index()])))
+        .map(|g| format!("{}={:.0}{}", g.label(), faction.stock[g.index()], stock_marker(*g, faction.stock[g.index()])))
         .collect();
     text.0 = format!(
         "{}  |  在庫: {}  |  人的資源{:.1}{}  安定度{:.0}{}  戦争支持{:.0}  不足{:.2}",
@@ -219,7 +239,7 @@ pub(super) fn update_faction_panel(
     let units = world.units.iter().filter(|u| u.alive && u.owner == faction.id).count();
     let stock_summary: Vec<String> = ALL_GOODS
         .iter()
-        .map(|g| format!("{}={:.0}{}", g.key(), faction.stock[g.index()], stock_marker(*g, faction.stock[g.index()])))
+        .map(|g| format!("{}={:.0}{}", g.label(), faction.stock[g.index()], stock_marker(*g, faction.stock[g.index()])))
         .collect();
 
     let mut diplo_lines = String::new();
@@ -228,7 +248,7 @@ pub(super) fn update_faction_panel(
             continue;
         }
         let stance = world.diplomacy.stance(faction.id, other.id);
-        diplo_lines.push_str(&format!("\n    vs {}: {:?} (opinion {:.0})", other.name, stance, world.diplomacy.opinion(faction.id, other.id)));
+        diplo_lines.push_str(&format!("\n    対 {}: {} (感情 {:.0})", other.name, stance_label_ja(stance), world.diplomacy.opinion(faction.id, other.id)));
     }
 
     // Play-test finding #1's "group support" - previously not shown by any
@@ -257,16 +277,16 @@ pub(super) fn update_faction_panel(
 
     text.0 = format!(
         "{you_marker}{}{}  [Tab で他勢力に切替]\n\
-         territory: {regions} regions\n\
-         units: {units}\n\
-         manpower: {:.1}{}\n\
-         stock: {}\n\
-         stability: {:.0}{}   war support: {:.0}\n\
-         civilian ration: {:.2}   shortage: {:.2}\n\
-         group support: {}\n\
-         national focus: {:?}\n\
-         diplomacy:{diplo_lines}",
-        if faction.alive { "" } else { "(eliminated) " },
+         領土: {regions} 地域\n\
+         部隊数: {units}\n\
+         人的資源: {:.1}{}\n\
+         在庫: {}\n\
+         安定度: {:.0}{}   戦争支持: {:.0}\n\
+         配給率: {:.2}   不足: {:.2}\n\
+         集団支持: {}\n\
+         国家方針: {}\n\
+         外交:{diplo_lines}",
+        if faction.alive { "" } else { "(脱落) " },
         faction.name,
         faction.manpower,
         manpower_marker(faction.manpower),
@@ -277,7 +297,7 @@ pub(super) fn update_faction_panel(
         faction.civilian_ration,
         faction.shortage,
         group_summary.join("  "),
-        faction.national_focus,
+        faction.national_focus.label(),
     );
 }
 
@@ -303,23 +323,23 @@ pub(super) fn update_inspect_panel(sim: Res<SimRes>, selected: Res<SelectedRegio
 
     let owner_name = world.faction(region.owner).name.clone();
     let occupier_line = match region.occupier {
-        Some(occ) => format!("\noccupied by {} ({:.0}%)", world.faction(occ).name, region.occupation * 100.0),
+        Some(occ) => format!("\n占領中: {} ({:.0}%)", world.faction(occ).name, region.occupation * 100.0),
         None => String::new(),
     };
-    let blockaded = if region.port > 0.0 && is_port_blockaded(world, region.id) { "  (blockaded)" } else { "" };
-    let capacity: Vec<String> = ALL_GOODS.iter().map(|g| format!("{}={:.1}", g.key(), region.effective_capacity(*g))).collect();
+    let blockaded = if region.port > 0.0 && is_port_blockaded(world, region.id) { "（港湾封鎖中）" } else { "" };
+    let capacity: Vec<String> = ALL_GOODS.iter().map(|g| format!("{}={:.1}", g.label(), region.effective_capacity(*g))).collect();
 
     text.0 = format!(
-        "{}  ({:?})\n\
-         owner: {owner_name}{occupier_line}\n\
-         population: {:.0}\n\
-         capacity: {}\n\
-         infrastructure: {:.2}   port: {:.2}{blockaded}\n\
-         unrest: {:.2}   devastation: {:.2}\n\
-         supply: {:.2}   import flow: {:.2}\n\
-         construction: {}",
+        "{}（{}）\n\
+         領有: {owner_name}{occupier_line}\n\
+         人口: {:.0}\n\
+         生産能力: {}\n\
+         インフラ: {:.2}   港湾: {:.2}{blockaded}\n\
+         不穏度: {:.2}   戦災: {:.2}\n\
+         補給: {:.2}   輸入量: {:.2}\n\
+         建設: {}",
         region.name,
-        region.terrain,
+        terrain_label(region.terrain),
         region.population,
         capacity.join(", "),
         region.infrastructure,
@@ -331,8 +351,8 @@ pub(super) fn update_inspect_panel(sim: Res<SimRes>, selected: Res<SelectedRegio
         region
             .construction
             .as_ref()
-            .map(|c| format!("{:?} ({:.0}/{:.0})", c.project, c.invested, c.required))
-            .unwrap_or_else(|| "none".to_string()),
+            .map(|c| format!("{} ({:.0}/{:.0})", project_label(c.project), c.invested, c.required))
+            .unwrap_or_else(|| "なし".to_string()),
     );
 }
 
@@ -435,7 +455,7 @@ pub(super) fn update_newspaper_panel(
     let issue = &news.history[issue_index];
 
     let mut out = format!(
-        "-- 新聞 (N で閉じる, \u{2190}/\u{2192} で号を送る) -- 第{}号 (day {}\u{301c}{}) --\n",
+        "-- 新聞 (N で閉じる, \u{2190}/\u{2192} で号を送る) -- 第{}号 ({}日\u{301c}{}日) --\n",
         issue_index + 1,
         issue.period_start,
         issue.period_end,
@@ -606,8 +626,8 @@ mod tests {
             let mut q = top_bar_world.query_filtered::<&Text, With<TopBarPlayerStatsText>>();
             q.iter(&top_bar_world).next().unwrap().0.clone()
         };
-        assert!(top_bar_text.contains("food=0※枯渇"), "a depleted civilian good must be flagged in the top bar, got: {top_bar_text}");
-        assert!(!top_bar_text.contains("steel=0※枯渇"), "a depleted non-civilian good must not be flagged the same way, got: {top_bar_text}");
+        assert!(top_bar_text.contains("食料=0※枯渇"), "a depleted civilian good must be flagged in the top bar, got: {top_bar_text}");
+        assert!(!top_bar_text.contains("鉄鋼=0※枯渇"), "a depleted non-civilian good must not be flagged the same way, got: {top_bar_text}");
 
         let mut panel_sim = player_sim(FactionId(0));
         deplete(&mut panel_sim);
@@ -617,8 +637,8 @@ mod tests {
         panel_world.insert_resource(SelectedFaction(FactionId(0)));
         spawn_faction_panel_text(&mut panel_world);
         let panel_text = faction_panel_text(&mut panel_world);
-        assert!(panel_text.contains("food=0※枯渇"), "the faction detail panel must also flag the depleted good, got: {panel_text}");
-        assert!(!panel_text.contains("steel=0※枯渇"), "the faction detail panel must not flag a depleted non-civilian good, got: {panel_text}");
+        assert!(panel_text.contains("食料=0※枯渇"), "the faction detail panel must also flag the depleted good, got: {panel_text}");
+        assert!(!panel_text.contains("鉄鋼=0※枯渇"), "the faction detail panel must not flag a depleted non-civilian good, got: {panel_text}");
     }
 
     /// This task's regression guard for "what the shortage is currently
@@ -703,7 +723,7 @@ mod tests {
     /// fixture standing in for it.
     ///
     /// Checked this fails when broken: temporarily changed
-    /// `update_faction_panel`'s `if faction.alive {"" } else {"(eliminated)
+    /// `update_faction_panel`'s `if faction.alive {"" } else {"(脱落)
     /// "}` to always the empty-string arm - the first assertion below then
     /// fails, showing a blank-frozen panel with no elimination marker at
     /// all. Reverted before committing.
@@ -738,7 +758,7 @@ mod tests {
         spawn_faction_panel_text(&mut world);
 
         let text = faction_panel_text(&mut world);
-        assert!(text.contains("(eliminated)"), "an eliminated faction's panel must say so plainly, got: {text}");
+        assert!(text.contains("(脱落)"), "an eliminated faction's panel must say so plainly, got: {text}");
         assert!(text.contains(&eliminated_name), "must still name which faction this is, not go blank, got: {text}");
     }
 }

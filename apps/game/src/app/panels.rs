@@ -1088,6 +1088,24 @@ pub(super) fn treaty_label_ja(t: Treaty) -> &'static str {
     }
 }
 
+/// Japanese label for a `Stance` - the same wording `apps/headless/src/
+/// report.rs::stance_label` uses for its own console report, duplicated
+/// here rather than shared (that crate is binary-only, no library target -
+/// `event_text`'s own module doc gives the identical reason for its own
+/// duplicated `treaty_label`). Kept in `apps/game`, not `crates/sim`,
+/// alongside `treaty_label_ja` above: `Stance::key()` already covers every
+/// machine-facing need (scenario/`--json`), so a Japanese display label is a
+/// pure presentation concern with only this client and `apps/headless` as
+/// consumers - neither of which is `crates/sim` itself.
+pub(super) fn stance_label_ja(stance: Stance) -> &'static str {
+    match stance {
+        Stance::War => "交戦",
+        Stance::Ceasefire => "停戦",
+        Stance::NonAggression => "不可侵",
+        Stance::Alliance => "同盟",
+    }
+}
+
 /// Spawns the diplomacy panel, including one `DiplomacyTargetButton` per
 /// faction other than `player` that exists at scenario-load time - the
 /// faction roster is fixed for the life of a run (only `Faction::alive`
@@ -1210,7 +1228,7 @@ pub(super) fn sync_diplomacy_panel(
     set_text(
         &mut text_slots,
         DiplomacyTextSlot::Status,
-        format!("対象: {}   関係: {:?}   感情: {:.0}", tf.name, stance, world.diplomacy.opinion(player_faction, target)),
+        format!("対象: {}   関係: {}   感情: {:.0}", tf.name, stance_label_ja(stance), world.diplomacy.opinion(player_faction, target)),
     );
 
     for treaty in ALL_TREATIES {

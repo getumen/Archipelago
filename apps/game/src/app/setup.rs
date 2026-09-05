@@ -828,17 +828,17 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             // own docs for exactly what each binding does and why. Kept to
             // one line per binding, matched to the same `<=31`-char width
             // the longest existing legend row below already proves fits.
-            row("controls:", header_color);
-            row("pan: scroll or middle-drag", label_color);
-            row("pan: arrow keys (always)", label_color);
-            row("zoom: ctrl+scroll / pinch", label_color);
-            row("select/order: left click", label_color);
-            row("region menu: right click", label_color);
-            row("map mode: M button/key", label_color);
-            row("industry good: click row / G", label_color);
-            row("policy panel: P button/key", label_color);
-            row("diplomacy panel: D button/key", label_color);
-            row("unit hold/reinforce: buttons or H/J", label_color);
+            row("操作:", header_color);
+            row("移動: スクロール/中ドラッグ", label_color);
+            row("移動: 矢印キー（常時）", label_color);
+            row("ズーム: ctrl+スクロール/ピンチ", label_color);
+            row("選択/命令: 左クリック", label_color);
+            row("地域メニュー: 右クリック", label_color);
+            row("地図モード: M ボタン/キー", label_color);
+            row("対象品目: 行クリック/G", label_color);
+            row("政策パネル: P ボタン/キー", label_color);
+            row("外交パネル: D ボタン/キー", label_color);
+            row("部隊待機/補充: ボタン/H/J", label_color);
 
             row("凡例", label_color);
             row("■ 港湾封鎖中", overlay::BLOCKADE_MARKER_COLOR);

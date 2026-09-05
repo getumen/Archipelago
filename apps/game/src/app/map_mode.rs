@@ -231,6 +231,23 @@ pub(super) fn terrain_fill(terrain: Terrain) -> Color {
     }
 }
 
+/// Japanese label for a `Terrain`, colocated with `terrain_fill` above since
+/// both exist for the same reason - showing this field to a player. Kept in
+/// `apps/game`, not `crates/sim`: `Terrain::key()` already covers the one
+/// machine-facing need (scenario JSON), so a Japanese display label is a
+/// pure presentation concern with `apps/game` as its only consumer -
+/// `apps/headless`'s own report never names terrain at all. Used by both
+/// `legend_entries` below (replacing what used to be four hand-duplicated
+/// string literals there) and `ui::update_inspect_panel`'s region detail.
+pub(super) fn terrain_label(terrain: Terrain) -> &'static str {
+    match terrain {
+        Terrain::Plain => "平地",
+        Terrain::Hill => "丘陵",
+        Terrain::Mountain => "山地",
+        Terrain::Urban => "都市",
+    }
+}
+
 /// Splits `values` into 5 bands via their own 20/40/60/80th percentiles,
 /// returning the 4 interior cut points (ascending). Every cut point is
 /// itself one of `values`' own entries - never a hand-picked constant - so
@@ -431,10 +448,10 @@ pub(super) fn legend_entries(mode: MapMode, world: &SimWorld, active_good: Good)
     match mode {
         MapMode::Political => Vec::new(),
         MapMode::Terrain => vec![
-            (terrain_fill(Terrain::Plain), "平地".to_string(), false),
-            (terrain_fill(Terrain::Hill), "丘陵".to_string(), false),
-            (terrain_fill(Terrain::Mountain), "山地".to_string(), false),
-            (terrain_fill(Terrain::Urban), "都市".to_string(), false),
+            (terrain_fill(Terrain::Plain), terrain_label(Terrain::Plain).to_string(), false),
+            (terrain_fill(Terrain::Hill), terrain_label(Terrain::Hill).to_string(), false),
+            (terrain_fill(Terrain::Mountain), terrain_label(Terrain::Mountain).to_string(), false),
+            (terrain_fill(Terrain::Urban), terrain_label(Terrain::Urban).to_string(), false),
         ],
         MapMode::Population => {
             let cuts = population_thresholds(world);

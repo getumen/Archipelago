@@ -44,7 +44,7 @@ pub(super) fn advance_simulation(
         let events = sim.0.tick();
         for event in &events {
             let line = event_text::format_event(sim.0.world(), event);
-            log.0.push_front(format!("day {}: {line}", sim.0.world().day));
+            log.0.push_front(format!("{}日目: {line}", sim.0.world().day));
         }
 
         // Stage 7C's newspaper panel (docs/phase7-spec.md "5. 新聞"):
