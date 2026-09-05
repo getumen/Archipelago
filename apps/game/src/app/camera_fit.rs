@@ -28,8 +28,23 @@ use super::{MainCamera, RegionLayout, RegionRadii};
 /// see that function's own doc.
 pub(super) const SAFE_LEFT: f32 = 330.0;
 pub(super) const SAFE_RIGHT: f32 = 330.0;
-pub(super) const SAFE_TOP: f32 = 70.0;
-pub(super) const SAFE_BOTTOM: f32 = 230.0;
+/// Grown from `70.0` (this task's panel-chrome pass): the top bar is now one
+/// chrome-framed panel (`chrome`'s own module doc; `setup::spawn_ui`'s own
+/// `TOP_BAR_RESERVED_HEIGHT`) instead of two bare `Text` nodes with no
+/// padding/border of their own, so it reaches a little further down than it
+/// used to - this margin grows by the same rough amount so the fitted map
+/// still starts below it rather than sliding a few pixels under its new
+/// frame. This also grows `mod::window_height_for_layout`'s own computed
+/// height for a landscape-ish map like `mvp` slightly past the old
+/// `DEFAULT_WINDOW_HEIGHT` floor - see `window_height_tests::
+/// mvp_shaped_layout_stays_close_to_the_default_height`'s own doc for why
+/// that's an accepted, deliberate side effect rather than a regression.
+pub(super) const SAFE_TOP: f32 = 95.0;
+/// Grown from `230.0` (this task's panel-chrome pass): the event log and
+/// legend both gained a title row plus chrome padding/border of their own,
+/// so each reaches a little further up than it used to - see `SAFE_TOP`'s
+/// own doc for the same reasoning applied to the top edge.
+pub(super) const SAFE_BOTTOM: f32 = 264.0;
 
 /// Extra world-space padding around the region bounding box, so the
 /// outermost region's own marker and name label aren't flush against the

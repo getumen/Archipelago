@@ -4,6 +4,7 @@
 //! only entry point `main.rs` calls.
 
 mod camera_fit;
+mod chrome;
 mod event_text;
 mod fonts;
 mod input;
@@ -624,6 +625,7 @@ pub fn run(
                 input::nl_compose_text_input,
                 input::mouse_pan_zoom,
                 input::keyboard_pan,
+                input::keyboard_zoom,
                 input::map_click_select,
                 input::map_right_click_menu,
                 // Every panel button click just enqueues an `Action` through
@@ -847,13 +849,30 @@ mod window_height_tests {
 
     /// `mvp`'s own bounding box (520 x 400 world units, from `scenarios/
     /// mvp.json`'s own `Region::position` spread) is already close to the
-    /// default safe area's aspect ratio - this must compute at or below
-    /// `DEFAULT_WINDOW_HEIGHT` so the clamp leaves `mvp`'s window size
-    /// exactly as it always was.
+    /// default safe area's aspect ratio, so this must land close to
+    /// `DEFAULT_WINDOW_HEIGHT` rather than growing dramatically the way the
+    /// tall/narrow `japan_hex`-shaped box below legitimately does.
+    ///
+    /// This used to assert exact equality with `DEFAULT_WINDOW_HEIGHT` (the
+    /// clamp floor) - this task's panel-chrome pass grew `camera_fit::
+    /// SAFE_TOP`/`SAFE_BOTTOM` (every panel along those edges gained a real
+    /// background/border/padding, and several gained a new title row), which
+    /// pushes `mvp`'s own unclamped computation a little past that floor for
+    /// the first time (confirmed: this assertion, written against the old
+    /// `SAFE_TOP`/`SAFE_BOTTOM`, failed with `left: 836.9231, right: 800.0`
+    /// once those margins grew - i.e. this is a real, deliberate change in
+    /// `mvp`'s own window size, not a coincidence this test should paper
+    /// over). Widened to a tolerance rather than tightened back to an exact
+    /// literal that would just go stale the next time a margin is retuned -
+    /// docs/conventions.md's own "許容幅は広く取る" - while still catching
+    /// the actual regression this test exists for: `mvp` ballooning anywhere
+    /// close to `japan_hex`'s own several-hundred-pixel growth below.
     #[test]
-    fn mvp_shaped_layout_does_not_grow_the_window() {
+    fn mvp_shaped_layout_stays_close_to_the_default_height() {
         let positions = [[0.0, 0.0], [520.0, 0.0], [0.0, 400.0], [520.0, 400.0]];
-        assert_eq!(window_height_for_layout(&positions), DEFAULT_WINDOW_HEIGHT);
+        let height = window_height_for_layout(&positions);
+        assert!(height >= DEFAULT_WINDOW_HEIGHT, "must never go below the floor, got {height}");
+        assert!(height <= DEFAULT_WINDOW_HEIGHT + 100.0, "a landscape-ish map like mvp must stay close to the default height, got {height}");
     }
 
     /// A tall, narrow bounding box (`japan_hex`'s own ~1580 x 2113 shape)

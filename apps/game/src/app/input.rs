@@ -289,11 +289,16 @@ pub(super) fn keyboard_input(
         let next = ALL_FOCI[(idx + 1) % ALL_FOCI.len()];
         sim.0.push_human_action(Action::SetNationalFocus(next));
     }
-    if keys.just_pressed(KeyCode::Minus) {
+    // `!ctrl_held` (`keyboard_zoom`'s own doc has the full reasoning): with
+    // `Ctrl` held, this same physical key pair now means "zoom" instead -
+    // without this guard, `Ctrl+Minus`/`Ctrl+Equal` would fire *both* this
+    // conscription step and a camera zoom from one keypress.
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if keys.just_pressed(KeyCode::Minus) && !ctrl_held {
         let cur = sim.0.world().faction(player_faction).conscription;
         sim.0.push_human_action(Action::SetConscription((cur - CONSCRIPTION_STEP).clamp(0.0, 1.0)));
     }
-    if keys.just_pressed(KeyCode::Equal) {
+    if keys.just_pressed(KeyCode::Equal) && !ctrl_held {
         let cur = sim.0.world().faction(player_faction).conscription;
         sim.0.push_human_action(Action::SetConscription((cur + CONSCRIPTION_STEP).clamp(0.0, 1.0)));
     }
@@ -643,6 +648,50 @@ pub(super) fn keyboard_pan(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut
 
     let scale = orthographic_scale(projection);
     transform.translation += (dir.normalize() * KEY_PAN_SPEED * scale * time.delta_secs()).extend(0.0);
+}
+
+/// Keyboard zoom - the device-independent path panning already had via
+/// `keyboard_pan` above (this system's whole reason to exist): `mouse_pan_zoom`'s
+/// `Ctrl+scroll`/trackpad-pinch bindings both require a specific pointing
+/// device, so a keyboard-only player, or a plain wheel-less mouse, has no
+/// way to zoom at all without this - and `Ctrl+scroll` doubles as macOS's
+/// own system Accessibility zoom trigger on the owner's machine, which this
+/// binding never touches (it's a keypress, not a scroll gesture, so the OS
+/// has nothing to intercept). Shares `zoom_by`/`ZOOM_STEP`/`MIN_ZOOM`/
+/// `MAX_ZOOM` with `mouse_pan_zoom` so it zooms with the exact same step
+/// feel and clamping - a second, differently-tuned zoom path is exactly
+/// what this task's own brief warns against.
+///
+/// ## Key choice: `Ctrl+Equal` / `Ctrl+Minus`, not bare `+`/`-`
+///
+/// Every bare key a `+`/`-` mnemonic could plausibly use is already taken by
+/// this file's own policy bindings: `KeyCode::Minus`/`KeyCode::Equal`
+/// themselves step conscription (`keyboard_input`'s own "徴兵率" handling,
+/// labeled `[-/=]` in `panels::PolicyField::label`), `BracketLeft`/`Right`
+/// step the ration, `Semicolon`/`Quote` step industry priority, `Comma`/
+/// `Period` step logistics priority - and `PageUp`/`PageDown`, another
+/// plausible "step" pair, already scrolls the right column
+/// (`panels::handle_right_column_scroll`). So this reuses `Minus`/`Equal`
+/// themselves rather than inventing a fresh, unclaimed pair: `KeyCode` is a
+/// physical/positional code, not a layout glyph - on a US layout `Equal` is
+/// unshifted `=` and shifted `+`, and this binding, like the conscription
+/// one it shares the key with, does not care which; `Ctrl` is what
+/// disambiguates the two, mirroring the same "Ctrl = this app's zoom
+/// modifier" convention `mouse_pan_zoom`'s own `Ctrl+scroll` already
+/// established (`keyboard_input`'s own conscription handling gains a
+/// matching `!ctrl_held` guard so one keypress can never fire both).
+pub(super) fn keyboard_zoom(keys: Res<ButtonInput<KeyCode>>, mut camera: Query<&mut Projection, With<MainCamera>>) {
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !ctrl_held {
+        return;
+    }
+    let Ok(mut projection) = camera.single_mut() else { return };
+    if keys.just_pressed(KeyCode::Equal) {
+        zoom_by(&mut projection, ZOOM_STEP);
+    }
+    if keys.just_pressed(KeyCode::Minus) {
+        zoom_by(&mut projection, -ZOOM_STEP);
+    }
 }
 
 /// Converts a left-click release into a world-space point, or `None` if it
@@ -1279,5 +1328,145 @@ mod tests {
         let (translation, scale) = camera_state(&mut world);
         assert_eq!(translation, Vec3::ZERO, "a left-button drag must never pan the camera");
         assert_eq!(scale, 1.0, "a left-button drag must never zoom the camera either");
+    }
+
+    /// The device-independent keyboard zoom this task adds: `Ctrl+Equal`
+    /// must zoom in by exactly `ZOOM_STEP`, the same step `ctrl_scroll_
+    /// zooms_instead_of_panning` above already pins for one line of
+    /// Ctrl+scroll (`0.9` there too) - confirming this new binding shares
+    /// the exact same feel/clamping rather than a second, independently
+    /// tuned zoom path. Checked this fails when broken: temporarily made
+    /// `keyboard_zoom` return before reading `KeyCode::Equal` at all - this
+    /// assertion then fails (`scale == 1.0` instead of `0.9`), reverted
+    /// before committing.
+    #[test]
+    fn ctrl_equal_zooms_in() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::Equal);
+        world.insert_resource(keys);
+
+        let mut system = IntoSystem::into_system(keyboard_zoom);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        let (_, scale) = camera_state(&mut world);
+        assert_eq!(scale, 0.9, "Ctrl+Equal must zoom the projection scale to exactly 0.9, matching Ctrl+scroll's own one-line step");
+    }
+
+    /// The other half of the pair: `Ctrl+Minus` zooms out.
+    #[test]
+    fn ctrl_minus_zooms_out() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::Minus);
+        world.insert_resource(keys);
+
+        let mut system = IntoSystem::into_system(keyboard_zoom);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        let (_, scale) = camera_state(&mut world);
+        assert_eq!(scale, 1.1, "Ctrl+Minus must zoom the projection scale to exactly 1.1 (zoom out), matching ZOOM_STEP");
+    }
+
+    /// Without `Ctrl` held, `Equal`/`Minus` must not zoom at all - they mean
+    /// something else entirely (`keyboard_input`'s own conscription
+    /// stepping) once this system's own `Ctrl` gate is removed from the
+    /// picture. This is what makes the two bindings coexist on the same
+    /// physical keys without one silently overriding the other.
+    #[test]
+    fn zoom_keys_without_ctrl_do_nothing() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Equal);
+        keys.press(KeyCode::Minus);
+        world.insert_resource(keys);
+
+        let mut system = IntoSystem::into_system(keyboard_zoom);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        let (_, scale) = camera_state(&mut world);
+        assert_eq!(scale, 1.0, "Equal/Minus without Ctrl held must never touch zoom");
+    }
+
+    /// Keyboard zoom must clamp to the exact same `MIN_ZOOM`/`MAX_ZOOM`
+    /// range `mouse_pan_zoom`'s own Ctrl+scroll/pinch bindings already
+    /// respect (`zoom_by`'s own doc) - a second zoom path with its own,
+    /// differently-clamped limits is exactly what this task's brief warns
+    /// against. Drives the same system repeatedly (rather than starting the
+    /// projection already at the clamp) so this also exercises the clamp
+    /// actually being hit, not merely a projection pre-set to the boundary.
+    #[test]
+    fn keyboard_zoom_clamps_to_the_same_range_as_scroll_zoom() {
+        let mut world = World::new();
+        spawn_main_camera(&mut world);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::Equal);
+        world.insert_resource(keys);
+
+        let mut system = IntoSystem::into_system(keyboard_zoom);
+        system.initialize(&mut world);
+        // Bevy only marks a key `just_pressed` on the frame it transitions
+        // from released to pressed - re-`press`ing an already-pressed key
+        // keeps it `just_pressed` again on the very next `run`, since this
+        // bare-`World` harness never calls the `ButtonInput::clear` a real
+        // `PreUpdate` schedule would between frames. That quirk is exactly
+        // what lets a tight loop like this actually drive the projection
+        // all the way into the clamp within a handful of iterations.
+        for _ in 0..80 {
+            system.run((), &mut world).unwrap();
+        }
+
+        let (_, scale) = camera_state(&mut world);
+        assert_eq!(scale, MIN_ZOOM, "repeated Ctrl+Equal must clamp at exactly MIN_ZOOM, the same floor mouse_pan_zoom's own zoom_by already enforces");
+    }
+
+    /// Regression guard for the collision this task's `keyboard_zoom`
+    /// binding would otherwise create: `Ctrl+Minus`/`Ctrl+Equal` must fire
+    /// *only* the zoom above, never `keyboard_input`'s own conscription
+    /// step - without the `!ctrl_held` guard this task adds to that
+    /// existing binding, one keypress would fire both at once. Checked this
+    /// fails when broken: temporarily removed the `&& !ctrl_held` from both
+    /// `KeyCode::Minus`/`KeyCode::Equal` branches in `keyboard_input` - the
+    /// assertions below then fail (`conscription` moves away from its
+    /// starting `0.5` instead of staying put), reverted before committing.
+    #[test]
+    fn conscription_keys_are_suppressed_while_ctrl_is_held() {
+        // `keyboard_input_world`'s own default `SimRes` (`SimDriver::new`,
+        // no player at all) makes every `push_human_action` call a no-op by
+        // construction (`SimDriver::push_human_action`'s own doc) - which
+        // would make this test pass vacuously regardless of the guard under
+        // test. Overwritten here with a real `Human`-controlled driver
+        // (`SimDriver::new_with_player`, the same pattern `panels::tests::
+        // player_sim`/`ui::tests::player_sim` already use) so a pushed
+        // action actually has somewhere to land.
+        let mut world = keyboard_input_world(KeyCode::Equal);
+        world.resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ControlLeft);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SimRes(SimDriver::new_with_player(archipelago_sim::scenario::build_world(), 1, Some(FactionId(0)), None)));
+
+        let mut system = IntoSystem::into_system(keyboard_input);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        // `push_human_action` only queues into `HumanAgent` - `tick()` is
+        // what actually calls `decide()` and copies whatever was queued into
+        // `last_human_actions` (`SimDriver::last_human_actions`'s own doc).
+        world.resource_mut::<SimRes>().0.tick();
+
+        let sim = world.resource::<SimRes>();
+        assert!(
+            !sim.0.last_human_actions().iter().any(|a| matches!(a, Action::SetConscription(_))),
+            "Ctrl+Equal must not enqueue a conscription change - it means zoom while Ctrl is held, got {:?}",
+            sim.0.last_human_actions()
+        );
     }
 }

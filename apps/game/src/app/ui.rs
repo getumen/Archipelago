@@ -16,6 +16,7 @@ use archipelago_sim::group::{Group, ALL_GROUPS};
 use archipelago_sim::naval::is_port_blockaded;
 use archipelago_sim::world::Station;
 
+use super::chrome;
 use super::input::MENU_ITEMS;
 use super::map_mode::terrain_label;
 use super::panels::stance_label_ja;
@@ -188,12 +189,25 @@ pub(super) fn update_top_bar(sim: Res<SimRes>, speed: Res<SpeedRes>, meta: Res<S
 /// support/shortage at a glance) rather than only reachable by Tab-cycling
 /// `FactionPanelText` to land on the player's own faction. Empty text
 /// whenever no faction was `--play`ed.
-pub(super) fn update_top_bar_player_stats(sim: Res<SimRes>, player: Res<PlayerFaction>, mut query: Query<&mut Text, With<TopBarPlayerStatsText>>) {
-    let Ok(mut text) = query.single_mut() else { return };
+pub(super) fn update_top_bar_player_stats(
+    sim: Res<SimRes>,
+    player: Res<PlayerFaction>,
+    mut query: Query<(&mut Text, &mut Visibility, &mut Node), With<TopBarPlayerStatsText>>,
+) {
+    let Ok((mut text, mut visibility, mut node)) = query.single_mut() else { return };
     let Some(player_faction) = player.0 else {
         text.0 = String::new();
+        // Observer mode (no `--play`ed faction): this row is chrome-framed
+        // now (`setup::spawn_ui`'s own doc), so an empty row would otherwise
+        // render as a bare, content-less second line inside the top-bar
+        // panel - hide it outright rather than leave that gap. `chrome::
+        // set_panel_shown` also drives `Node::display` to `None`, not just
+        // `Visibility` - see that function's own doc for the dead-space
+        // defect a `Visibility`-only toggle left behind here.
+        chrome::set_panel_shown(&mut visibility, &mut node, false);
         return;
     };
+    chrome::set_panel_shown(&mut visibility, &mut node, true);
     let world = sim.0.world();
     let faction = world.faction(player_faction);
     let stock: Vec<String> = ALL_GOODS
@@ -309,17 +323,30 @@ pub(super) fn update_event_log(log: Res<EventLog>, mut query: Query<&mut Text, W
     text.0 = log.0.iter().cloned().collect::<Vec<_>>().join("\n");
 }
 
-pub(super) fn update_inspect_panel(sim: Res<SimRes>, selected: Res<SelectedRegion>, mut query: Query<&mut Text, With<InspectText>>) {
-    let Ok(mut text) = query.single_mut() else { return };
+pub(super) fn update_inspect_panel(
+    sim: Res<SimRes>,
+    selected: Res<SelectedRegion>,
+    mut query: Query<(&mut Text, &mut Visibility, &mut Node), With<InspectText>>,
+) {
+    let Ok((mut text, mut visibility, mut node)) = query.single_mut() else { return };
     let world = sim.0.world();
     let Some(region_id) = selected.0 else {
         text.0 = String::new();
+        // No region selected: this panel is chrome-framed now (`setup::
+        // spawn_right_column`'s own doc) - hide the whole box rather than
+        // show an empty bordered rectangle at the top of the right column.
+        // `chrome::set_panel_shown` also clears `Node::display` so this box
+        // reserves no space in the shared right-column flex layout while
+        // hidden - see that function's own doc.
+        chrome::set_panel_shown(&mut visibility, &mut node, false);
         return;
     };
     let Some(region) = world.regions.get(region_id.index()) else {
         text.0 = String::new();
+        chrome::set_panel_shown(&mut visibility, &mut node, false);
         return;
     };
+    chrome::set_panel_shown(&mut visibility, &mut node, true);
 
     let owner_name = world.faction(region.owner).name.clone();
     let occupier_line = match region.occupier {
@@ -376,13 +403,19 @@ pub(super) fn update_player_panel(
     selected_units: Res<SelectedUnits>,
     menu: Res<MenuRegion>,
     rejection: Res<LastRejection>,
-    mut query: Query<&mut Text, With<PlayerPanelText>>,
+    mut query: Query<(&mut Text, &mut Visibility, &mut Node), With<PlayerPanelText>>,
 ) {
-    let Ok(mut text) = query.single_mut() else { return };
+    let Ok((mut text, mut visibility, mut node)) = query.single_mut() else { return };
     let Some(player_faction) = player.0 else {
         text.0 = String::new();
+        // Observer mode: chrome-framed now (`setup::spawn_right_column`'s
+        // own doc) - hide the box instead of showing an empty one.
+        // `chrome::set_panel_shown` also clears `Node::display` so the right
+        // column doesn't reserve this box's height while it's hidden.
+        chrome::set_panel_shown(&mut visibility, &mut node, false);
         return;
     };
+    chrome::set_panel_shown(&mut visibility, &mut node, true);
     let world = sim.0.world();
     let faction = world.faction(player_faction);
 
@@ -441,13 +474,15 @@ pub(super) fn update_player_panel(
 pub(super) fn update_newspaper_panel(
     news: Res<NewspaperState>,
     selected: Res<SelectedFaction>,
-    mut query: Query<&mut Text, With<NewspaperPanelText>>,
+    mut query: Query<(&mut Text, &mut Visibility, &mut Node), With<NewspaperPanelText>>,
 ) {
-    let Ok(mut text) = query.single_mut() else { return };
+    let Ok((mut text, mut visibility, mut node)) = query.single_mut() else { return };
     if !news.open {
         text.0 = String::new();
+        chrome::set_panel_shown(&mut visibility, &mut node, false);
         return;
     }
+    chrome::set_panel_shown(&mut visibility, &mut node, true);
     let Some(issue_index) = news.viewing.or_else(|| news.history.len().checked_sub(1)) else {
         text.0 = "-- 新聞 (N で閉じる) --\nまだ号外は発行されていない\n".to_string();
         return;
@@ -760,5 +795,42 @@ mod tests {
         let text = faction_panel_text(&mut world);
         assert!(text.contains("(脱落)"), "an eliminated faction's panel must say so plainly, got: {text}");
         assert!(text.contains(&eliminated_name), "must still name which faction this is, not go blank, got: {text}");
+    }
+
+    /// `codex review`'s finding: hiding an empty/closed chrome-framed panel
+    /// with `Visibility::Hidden` alone stops it rendering but leaves it in
+    /// `bevy_ui`'s flex layout - a hidden panel still reserves its width,
+    /// padding, border, and column gap, exactly the "large empty box instead
+    /// of a compact line" this task's own report describes for the observer-
+    /// mode top bar. `update_top_bar_player_stats` must therefore also drive
+    /// `Node::display` to `Display::None` whenever it hides the row (via the
+    /// same `chrome::set_panel_shown` the three button-panel `sync_*`
+    /// systems already used before this fix), not merely flip `Visibility`.
+    ///
+    /// Confirmed this fails against the pre-fix code: before routing this
+    /// system through `chrome::set_panel_shown`, it set only `*visibility =
+    /// Visibility::Hidden` and never touched `Node::display` at all, so the
+    /// spawned entity's `Node` (default `Display::Flex`, since nothing in
+    /// this test's fixture ever sets it otherwise) stayed `Display::Flex`
+    /// forever - the `display` assertion below failed with `Flex != None`
+    /// while the `visibility` assertion right above it already passed,
+    /// which is exactly the "renders nothing, still reserves space" defect.
+    #[test]
+    fn hidden_top_bar_player_stats_row_reserves_no_flex_space() {
+        let mut world = World::new();
+        world.insert_resource(player_sim(FactionId(0)));
+        world.insert_resource(PlayerFaction(None));
+        world.spawn((Text::new(String::new()), TopBarPlayerStatsText));
+
+        run(&mut world, update_top_bar_player_stats);
+
+        let mut q = world.query_filtered::<(&Visibility, &Node), With<TopBarPlayerStatsText>>();
+        let (visibility, node) = q.iter(&world).next().expect("update_top_bar_player_stats must find its own TopBarPlayerStatsText entity");
+        assert_eq!(*visibility, Visibility::Hidden, "an observer-mode (no --play) top bar player-stats row must be hidden");
+        assert_eq!(
+            node.display,
+            Display::None,
+            "a hidden panel must also stop reserving flex layout space (Node::display = Display::None) - Visibility::Hidden alone still reserves its width/padding/border/gap"
+        );
     }
 }

@@ -67,6 +67,7 @@ use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
+use super::chrome;
 use super::input::MENU_ITEMS;
 use super::map_mode::MapModeRes;
 use super::setup::text_font;
@@ -135,23 +136,6 @@ const COLOR_DISABLED: Color = Color::srgba(0.22, 0.22, 0.24, 0.55);
 const TEXT_ENABLED: Color = Color::srgb(0.92, 0.95, 0.92);
 const TEXT_DISABLED: Color = Color::srgba(0.65, 0.65, 0.68, 0.8);
 const TEXT_REASON: Color = Color::srgb(0.85, 0.45, 0.40);
-const PANEL_BG: Color = Color::srgba(0.05, 0.06, 0.08, 0.88);
-
-/// Shared by `sync_region_action_buttons`/`sync_policy_panel`/
-/// `sync_diplomacy_panel`'s own root-visibility toggle: these three panels
-/// are now flex children of `setup::spawn_right_column`'s shared column
-/// (that function's own doc has the full rationale), so hiding one has to
-/// mean *both* "don't render" (`Visibility::Hidden`, unchanged from before
-/// this fix - still what keeps a closed panel's buttons reporting
-/// `Interaction::None`, per `bevy_ui`'s own documented guarantee this
-/// module's doc already cites) and "don't reserve flex space" (`Node::display
-/// = Display::None`, new) - without the second half, a closed panel would
-/// still occupy its full content height as permanent dead space in the
-/// column even while invisible.
-fn set_panel_shown(visibility: &mut Visibility, node: &mut Node, showing: bool) {
-    *visibility = if showing { Visibility::Visible } else { Visibility::Hidden };
-    node.display = if showing { Display::Flex } else { Display::None };
-}
 
 fn button_node() -> Node {
     Node { padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)), ..default() }
@@ -396,20 +380,20 @@ fn recruit_reason(world: &SimWorld, faction: FactionId) -> Option<&'static str> 
 pub(super) fn spawn_region_action_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
     parent
         .spawn((
-            Node {
+            chrome::framed(Node {
                 display: Display::None,
                 width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(3.0),
-                padding: UiRect::all(Val::Px(8.0)),
                 ..default()
-            },
-            BackgroundColor(PANEL_BG),
+            }),
+            chrome::panel_background(),
+            chrome::panel_border(),
             Visibility::Hidden,
             RegionActionPanelRoot,
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("-- 命令 --"), text_font(13.0, font), TextColor(Color::srgb(0.85, 0.87, 0.90))));
+            panel.spawn(chrome::panel_title("-- 命令 --", font));
             for kind in REGION_ACTION_KINDS {
                 panel.spawn(column_node()).with_children(|slot| {
                     slot.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), kind)).with_children(|b| {
@@ -442,7 +426,7 @@ pub(super) fn sync_region_action_buttons(
 ) {
     let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && selected.0.is_some() && !diplomacy.open && !policy.0;
-    set_panel_shown(&mut visibility, &mut node, showing);
+    chrome::set_panel_shown(&mut visibility, &mut node, showing);
     if !showing {
         return;
     }
@@ -567,25 +551,33 @@ pub(super) struct UnitPanelOverflowText;
 #[derive(Resource, Default)]
 pub(super) struct UnitPanelSlots(pub [Option<u32>; MAX_UNIT_ROWS]);
 
-pub(super) fn spawn_unit_panel(commands: &mut Commands, font: &Handle<Font>) {
+/// A child of `setup::spawn_left_column`'s shared flex column, not its own
+/// independently `PositionType::Absolute` box - this used to sit at a fixed
+/// `top: 300.0`, hand-tuned against how tall `setup::FactionPanelText`'s own
+/// box (directly above it) happened to be. That guess broke as soon as this
+/// task gave the faction panel a title row and chrome padding/border of its
+/// own: with several diplomatic relations listed, the faction panel's real
+/// height already exceeded `300.0` even before this task, and this task's
+/// own added height pushed it further - reproduced with `--play 関東府
+/// --debug-open-diplomacy --debug-select-region 東京1` on `japan_hex`
+/// (confirmed by screenshot: this panel's own title and first unit row
+/// rendered directly on top of the faction panel's diplomacy list, both
+/// legible text fighting for the same pixels). Fixed the same way `setup::
+/// spawn_right_column`'s own doc already fixed the equivalent right-column
+/// collision: both panels are now children of one `FlexDirection::Column`
+/// container, so this one always starts exactly where the faction panel's
+/// own box actually ends, not where it was guessed to end.
+pub(super) fn spawn_unit_panel(commands: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
     commands
         .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(300.0),
-                left: Val::Px(10.0),
-                width: Val::Px(300.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(4.0),
-                padding: UiRect::all(Val::Px(8.0)),
-                ..default()
-            },
-            BackgroundColor(PANEL_BG),
+            chrome::framed(Node { width: Val::Px(300.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(4.0), ..default() }),
+            chrome::panel_background(),
+            chrome::panel_border(),
             Visibility::Hidden,
             UnitPanelRoot,
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("-- 選択部隊 --"), text_font(13.0, font), TextColor(Color::srgb(0.85, 0.87, 0.90))));
+            panel.spawn(chrome::panel_title("-- 選択部隊 --", font));
             for slot in 0..MAX_UNIT_ROWS {
                 panel.spawn((column_node(), Visibility::Hidden, UnitRowContainer(slot))).with_children(|row| {
                     row.spawn((Text::new(String::new()), text_font(11.0, font), TextColor(TEXT_ENABLED), UnitRowText(slot)));
@@ -919,20 +911,20 @@ pub(super) struct FocusButton(NationalFocus);
 pub(super) fn spawn_policy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
     parent
         .spawn((
-            Node {
+            chrome::framed(Node {
                 display: Display::None,
                 width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
-                padding: UiRect::all(Val::Px(8.0)),
                 ..default()
-            },
-            BackgroundColor(PANEL_BG),
+            }),
+            chrome::panel_background(),
+            chrome::panel_border(),
             Visibility::Hidden,
             PolicyPanelRoot,
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("-- 政策 [P で閉じる] --"), text_font(14.0, font), TextColor(Color::srgb(1.0, 0.82, 0.45))));
+            panel.spawn(chrome::panel_title("-- 政策 [P で閉じる] --", font));
 
             panel.spawn((Text::new("対象品目 [G で切替]:"), text_font(11.0, font), TextColor(Color::srgb(0.8, 0.82, 0.85))));
             panel.spawn(row_node()).with_children(|row| {
@@ -992,7 +984,7 @@ pub(super) fn sync_policy_panel(
 ) {
     let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && policy.0 && !diplomacy.open;
-    set_panel_shown(&mut visibility, &mut node, showing);
+    chrome::set_panel_shown(&mut visibility, &mut node, showing);
     if !showing {
         return;
     }
@@ -1179,20 +1171,20 @@ pub(super) fn stance_label_ja(stance: Stance) -> &'static str {
 pub(super) fn spawn_diplomacy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>, world: &SimWorld, player: FactionId) {
     parent
         .spawn((
-            Node {
+            chrome::framed(Node {
                 display: Display::None,
                 width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
-                padding: UiRect::all(Val::Px(8.0)),
                 ..default()
-            },
-            BackgroundColor(PANEL_BG),
+            }),
+            chrome::panel_background(),
+            chrome::panel_border(),
             Visibility::Hidden,
             DiplomacyPanelRoot,
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("-- 外交 [D で閉じる] --"), text_font(14.0, font), TextColor(Color::srgb(1.0, 0.82, 0.45))));
+            panel.spawn(chrome::panel_title("-- 外交 [D で閉じる] --", font));
 
             panel.spawn((Text::new("対象:"), text_font(11.0, font), TextColor(Color::srgb(0.8, 0.82, 0.85))));
             panel.spawn(row_node()).with_children(|row| {
@@ -1263,7 +1255,7 @@ pub(super) fn sync_diplomacy_panel(
 ) {
     let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && diplomacy.open;
-    set_panel_shown(&mut visibility, &mut node, showing);
+    chrome::set_panel_shown(&mut visibility, &mut node, showing);
     if !showing {
         return;
     }

@@ -9,6 +9,7 @@ use bevy::sprite::{Anchor, Text2dShadow};
 use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::{LinkKind, Station, World as SimWorld};
 
+use super::chrome;
 use super::fonts::AppFont;
 use super::map_mode::{ModeLegendHeader, ModeLegendRow, MODE_LEGEND_ROWS};
 use super::overlay;
@@ -463,12 +464,45 @@ pub(super) fn setup(
     // spawned once here, alongside every other static UI node above - see
     // each spawn function's own doc for why it's safe to pre-spawn
     // (region/policy/diplomacy actions are a fixed set; the unit panel is a
-    // fixed-size pool). The unit panel sits on the *left* (`spawn_unit_panel`'s
-    // own `left: Val::Px(10.0)`) so it never competes with the right column
-    // below; region-action/policy/diplomacy do share that column and are
-    // spawned as its children instead.
-    super::panels::spawn_unit_panel(&mut commands, &font.0);
+    // fixed-size pool). `spawn_left_column` places the faction summary and
+    // the unit panel together, on the *left*, so this side never competes
+    // with the right column below; region-action/policy/diplomacy share
+    // that other column and are spawned as its children instead.
+    spawn_left_column(&mut commands, &font.0);
     spawn_right_column(&mut commands, &font.0, world, player.0);
+}
+
+/// The left column: `FactionPanelText`'s own panel, then `panels::
+/// UnitPanelRoot` below it - one `FlexDirection::Column` container instead
+/// of two independently `PositionType::Absolute` boxes (the same fix
+/// `spawn_right_column`'s own doc already applies on the other side, for
+/// exactly the same reason - see `panels::spawn_unit_panel`'s own doc for
+/// the reproduced collision this replaces). No `Overflow::scroll_y()` here
+/// unlike the right column: the faction panel's own worst case (every other
+/// living faction listed once, `update_faction_panel`'s own diplomacy loop)
+/// is bounded by the scenario's own faction count, not by anything a player
+/// or the simulation can grow without limit, so it comfortably fits every
+/// shipped scenario's window without needing a scroll escape hatch.
+fn spawn_left_column(commands: &mut Commands, font: &Handle<Font>) {
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(FACTION_PANEL_TOP),
+            left: Val::Px(10.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(PANEL_GAP),
+            ..default()
+        })
+        .with_children(|col| {
+            col.spawn(chrome::framed(Node { width: Val::Px(300.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(3.0), ..default() }))
+                .insert((chrome::panel_background(), chrome::panel_border()))
+                .with_children(|panel| {
+                    panel.spawn(chrome::panel_title("-- 勢力 --", font));
+                    panel.spawn((Node::default(), Text::new(String::new()), text_font(14.0, font), chrome::panel_body_color(), FactionPanelText));
+                });
+
+            super::panels::spawn_unit_panel(col, font);
+        });
 }
 
 /// The right column's own fixed width and its margin from the window's
@@ -579,27 +613,46 @@ fn spawn_right_column(commands: &mut Commands, font: &Handle<Font>, world: &SimW
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(8.0),
                 overflow: Overflow::scroll_y(),
-                // The container itself is `RIGHT_COLUMN_WIDTH` (340, the
-                // widest child - `panels::spawn_region_action_panel`/
-                // `spawn_policy_panel`/`spawn_diplomacy_panel` all size
-                // themselves to exactly that). `InspectText`/`PlayerPanelText`
-                // keep their own original, narrower widths below rather than
-                // stretching to fill it (`AlignItems::End`'s own doc on this
-                // same struct literal explains why that still lines their
-                // right edge up with `right: RIGHT_COLUMN_RIGHT_MARGIN`
-                // unchanged from before this fix).
-                align_items: AlignItems::End,
                 ..default()
             },
             ScrollPosition::default(),
             RightColumnRoot,
         ))
         .with_children(|col| {
+            // Chrome-framed like every other panel now (`chrome`'s own
+            // module doc), and - unlike before this task, when it was a bare
+            // `Text` node that simply rendered nothing - starts
+            // `Visibility::Hidden`: this panel's own text is genuinely empty
+            // until a region is actually selected, and an empty bordered box
+            // sitting at the top of the right column on every observer-mode
+            // screen would be exactly the clutter this task's "restrained"
+            // ask rules out (`ui::update_inspect_panel` keeps `Visibility` in
+            // sync with that same emptiness every frame - no separate static
+            // title child here, since the dynamic body's own first line
+            // already reads as one, `"{region.name}（{terrain}）"`, exactly
+            // like `PlayerPanelText` below already relies on its own
+            // `"== プレイヤー: {name} =="` opening line). `width:
+            // RIGHT_COLUMN_WIDTH` - same width as every other child in this
+            // column now that each one is chrome-framed, rather than the
+            // narrower `300.0`/`320.0` this and `PlayerPanelText` below used
+            // to be (`AlignItems::End`, no longer needed once every child
+            // shares one width, is dropped from this container's own `Node`
+            // above rather than left in place doing nothing).
             col.spawn((
-                Node { width: Val::Px(300.0), ..default() },
+                // `display: Display::None` matches the initial `Visibility::
+                // Hidden` right below - `ui::update_inspect_panel` keeps both
+                // in sync every frame from here on (`chrome::set_panel_shown`),
+                // but the very first frame reads whatever this literal spawns,
+                // and a mismatched pair here would reserve this box's flex
+                // space in the right column for that one frame regardless of
+                // what the sync system does afterwards.
+                chrome::framed(Node { display: Display::None, width: Val::Px(RIGHT_COLUMN_WIDTH), ..default() }),
+                chrome::panel_background(),
+                chrome::panel_border(),
+                Visibility::Hidden,
                 Text::new(String::new()),
                 text_font(14.0, font),
-                TextColor(Color::srgb(0.92, 0.92, 0.95)),
+                chrome::panel_body_color(),
                 InspectText,
             ));
 
@@ -609,11 +662,21 @@ fn spawn_right_column(commands: &mut Commands, font: &Handle<Font>, world: &SimW
                 super::panels::spawn_diplomacy_panel(col, font, world, player_faction);
             }
 
+            // Always shown once a faction is `--play`ed (its own dynamic
+            // text always opens with `"== プレイヤー: {name} =="` - `ui::
+            // update_player_panel`'s own doc - so it never needs the same
+            // hide-when-empty treatment `InspectText` above gets), hidden
+            // outright in observer mode via the same `Visibility` toggle
+            // (`update_player_panel` sets it) rather than a permanently
+            // empty chrome-framed box with nothing to show.
             col.spawn((
-                Node { width: Val::Px(320.0), ..default() },
+                chrome::framed(Node { width: Val::Px(RIGHT_COLUMN_WIDTH), ..default() }),
+                chrome::panel_background(),
+                chrome::panel_border(),
+                Visibility::Visible,
                 Text::new(String::new()),
                 text_font(13.0, font),
-                TextColor(Color::srgb(1.0, 0.82, 0.45)),
+                TextColor(chrome::PANEL_TITLE_COLOR),
                 PlayerPanelText,
             ));
         });
@@ -765,55 +828,89 @@ fn japanese_label_layout() -> TextLayout {
     TextLayout::linebreak(LineBreak::NoWrap)
 }
 
-fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
-    // Top bar: date / scenario / speed.
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(6.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-        Text::new(String::new()),
-        text_font(18.0, font),
-        japanese_label_layout(),
-        TextColor(Color::WHITE),
-        TopBarText,
-    ));
+/// The top-bar chrome panel's own `top` offset (`spawn_ui`'s own top-bar
+/// panel) - named once so `FACTION_PANEL_TOP` below reads the exact value
+/// the panel is actually spawned at, rather than a second, independently
+/// hand-picked `6.0`.
+const TOP_BAR_TOP: f32 = 6.0;
 
-    // Stage 8B: the player's own key figures, on a second top-bar line -
-    // docs/design.md §16 owner ask ("stockpiles per commodity, manpower,
-    // stability, war support, shortage" at a glance, not buried in the
-    // faction browser). Empty (no text) whenever no faction was `--play`ed -
-    // `ui::update_top_bar_player_stats`.
-    //
-    // `japanese_label_layout()` (`NoWrap`), same as `TopBarText` above and
-    // every region/sea-zone label: this is a one-line status readout by
-    // design, exactly like those, but was missing the `NoWrap` that actually
-    // enforces it - `update_top_bar_player_stats` joins every `Good`'s own
-    // stock figure onto one line, and with six goods plus manpower/
-    // stability/war-support/shortage that line can run past `width: 900`,
-    // wrapping onto a second line that then collides with `FactionPanelText`
-    // and the right column, both starting at `top: 40` just 14px below this
-    // node's own `top: 26` (this task's own review). `NoWrap` removes the
-    // possibility outright rather than re-tuning `width`/`top` against
-    // today's good count - a wider stock line (more goods, a longer faction
-    // name) would only need to grow `width`'s own footprint sideways, never
-    // fall back to wrapping downward into a neighbour.
-    commands.spawn((
-        Node {
+/// Conservative reserved height for the top-bar panel's own box (both its
+/// text lines, plus `chrome`'s own padding/border on every edge) - not
+/// measured pixel-for-pixel from font metrics (this crate has no cheap way
+/// to query Bevy's own text shaping ahead of a real layout pass), but
+/// generous enough that neither line's rendered height can push the panel's
+/// real bottom edge past it (confirmed by screenshot, this task's own
+/// verification, with both lines populated - the `--play` case, the taller
+/// of the two). `FACTION_PANEL_TOP` below derives its own clearance from
+/// this instead of an independently-guessed number that could silently
+/// drift out of sync with the top-bar panel's actual layout - exactly the
+/// kind of collision `RIGHT_COLUMN_LEFT_EDGE`'s own doc already describes
+/// happening twice for the right column.
+const TOP_BAR_RESERVED_HEIGHT: f32 = 64.0;
+
+/// `spawn_ui`'s faction-summary panel's own `top` - clears the top-bar
+/// panel's own reserved box (`TOP_BAR_RESERVED_HEIGHT`'s own doc) by
+/// `PANEL_GAP`, rather than the independently hand-picked `40.0` this used
+/// to be before the top bar gained its own chrome frame.
+const FACTION_PANEL_TOP: f32 = TOP_BAR_TOP + TOP_BAR_RESERVED_HEIGHT + PANEL_GAP;
+
+fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
+    // Top bar: date / scenario / speed, plus (Stage 8B) the player's own key
+    // figures on a second line - one chrome-framed panel (`chrome`'s own
+    // module doc) instead of two independently `PositionType::Absolute` bare
+    // `Text` nodes, so the one status readout every player has on screen at
+    // all times also gets a background/border like every other panel now
+    // does. `TOP_BAR_RESERVED_HEIGHT`'s own doc is what everything below
+    // this panel (`FACTION_PANEL_TOP`, `camera_fit::SAFE_TOP`) derives its
+    // own clearance from, so this panel's frame can never silently grow into
+    // a neighbour again.
+    commands
+        .spawn(chrome::framed(Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(26.0),
+            top: Val::Px(TOP_BAR_TOP),
             left: Val::Px(10.0),
-            width: Val::Px(900.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
             ..default()
-        },
-        Text::new(String::new()),
-        text_font(13.0, font),
-        japanese_label_layout(),
-        TextColor(Color::srgb(1.0, 0.82, 0.45)),
-        super::TopBarPlayerStatsText,
-    ));
+        }))
+        .insert((chrome::panel_background(), chrome::panel_border()))
+        .with_children(|col| {
+            col.spawn((
+                Node::default(),
+                Text::new(String::new()),
+                text_font(18.0, font),
+                japanese_label_layout(),
+                chrome::panel_body_color(),
+                TopBarText,
+            ));
+
+            // Stage 8B: the player's own key figures (docs/design.md §16
+            // owner ask - "stockpiles per commodity, manpower, stability,
+            // war support, shortage" at a glance, not buried in the faction
+            // browser). Empty text, and hidden (`ui::update_top_bar_player_stats`
+            // keeps both in sync every frame), whenever no faction was
+            // `--play`ed - an observer-mode run must not carry an empty
+            // chrome-framed row taking up space for content that will never
+            // arrive.
+            //
+            // `japanese_label_layout()` (`NoWrap`), same as `TopBarText`
+            // above and every region/sea-zone label: this is a one-line
+            // status readout by design, exactly like those - `update_top_bar_
+            // player_stats` joins every `Good`'s own stock figure onto one
+            // line, and with six goods plus manpower/stability/war-support/
+            // shortage that line can run past `width: 900`; `NoWrap` keeps a
+            // long line from ever wrapping down into this same panel's next
+            // row instead of re-tuning `width` against today's good count.
+            col.spawn((
+                Node { width: Val::Px(900.0), ..default() },
+                Text::new(String::new()),
+                text_font(13.0, font),
+                japanese_label_layout(),
+                TextColor(chrome::PANEL_TITLE_COLOR),
+                Visibility::Visible,
+                super::TopBarPlayerStatsText,
+            ));
+        });
 
     // Stage 8B: clickable speed controls + the policy/diplomacy panel
     // toggles, next to the existing status line - `panels::sync_speed_buttons`/
@@ -859,20 +956,9 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
             }
         });
 
-    // Left panel: faction summary.
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(40.0),
-            left: Val::Px(10.0),
-            width: Val::Px(300.0),
-            ..default()
-        },
-        Text::new(String::new()),
-        text_font(14.0, font),
-        TextColor(Color::srgb(0.92, 0.92, 0.95)),
-        FactionPanelText,
-    ));
+    // Left panel: faction summary + unit panel - `spawn_left_column` (called
+    // from `setup` alongside this function, not from here - see that
+    // function's own doc for why the two are now one flex container).
 
     // Bottom panel: event log, most recent first. Width derived (`EVENT_LOG_PANEL_WIDTH`'s
     // own doc) from wherever the legend actually starts, not restated
@@ -881,19 +967,21 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
     // doc), so the two have always shared this boundary; deriving it keeps
     // them sharing it by construction instead of by two constants that
     // happen to agree today.
-    commands.spawn((
-        Node {
+    commands
+        .spawn(chrome::framed(Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(6.0),
             left: Val::Px(EVENT_LOG_PANEL_LEFT),
             width: Val::Px(EVENT_LOG_PANEL_WIDTH),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(3.0),
             ..default()
-        },
-        Text::new(String::new()),
-        text_font(12.0, font),
-        TextColor(Color::srgb(0.8, 0.85, 0.8)),
-        EventLogText,
-    ));
+        }))
+        .insert((chrome::panel_background(), chrome::panel_border()))
+        .with_children(|panel| {
+            panel.spawn(chrome::panel_title("-- イベント --", font));
+            panel.spawn((Node::default(), Text::new(String::new()), text_font(12.0, font), chrome::panel_body_color(), EventLogText));
+        });
 
     // The right column - `InspectText` (click-to-inspect region detail),
     // whichever of `panels::RegionActionPanelRoot`/`PolicyPanelRoot`/
@@ -914,14 +1002,27 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
     // left edge rather than the independent `600.0` this used to be - fixes
     // the 10px overlap `codex review` found (this panel used to reach
     // `x=940`, the right column's own box now starts at `x=930`).
+    // Chrome-framed like every other panel, but starts `Visibility::Hidden`
+    // (with a matching `display: Display::None`, same reasoning as
+    // `spawn_right_column`'s own `InspectText`) - unlike the
+    // always-something-to-say panels above, this one's own text is genuinely
+    // empty whenever the panel is closed (`ui::update_newspaper_panel` keeps
+    // both in sync with that same emptiness every frame via `chrome::
+    // set_panel_shown`) - an empty bordered box sitting on the map with
+    // nothing in it would be exactly the clutter this task's own "restrained"
+    // ask rules out.
     commands.spawn((
-        Node {
+        chrome::framed(Node {
+            display: Display::None,
             position_type: PositionType::Absolute,
             top: Val::Px(90.0),
             left: Val::Px(NEWSPAPER_PANEL_LEFT),
             width: Val::Px(NEWSPAPER_PANEL_WIDTH),
             ..default()
-        },
+        }),
+        chrome::panel_background(),
+        chrome::panel_border(),
+        Visibility::Hidden,
         Text::new(String::new()),
         text_font(14.0, font),
         TextColor(Color::srgb(0.95, 0.93, 0.85)),
@@ -969,7 +1070,14 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
 /// "the gap between the event log and the right column"), so deriving one
 /// from the other keeps them sharing it by construction rather than by two
 /// independently hand-picked constants that happen to agree today.
-const LEGEND_PANEL_WIDTH: f32 = 176.0;
+/// `176.0` (the content-driven measurement this doc above describes) plus
+/// `chrome::PANEL_FRAME_INSET` on both sides - this panel gained a
+/// background/border/padding frame in this task, and `bevy_ui`'s border-box
+/// sizing (`chrome`'s own module doc) means that frame eats into the *same*
+/// `176.0` unless the outer width grows to compensate, which would have
+/// wrapped `legend_header`'s own longest line right back into the two-line
+/// mess this constant's own doc says this width was picked to avoid.
+const LEGEND_PANEL_WIDTH: f32 = 176.0 + 2.0 * chrome::PANEL_FRAME_INSET;
 const LEGEND_PANEL_LEFT: f32 = RIGHT_COLUMN_LEFT_EDGE - LEGEND_PANEL_WIDTH - PANEL_GAP;
 
 /// `spawn_ui`'s event log `Node`'s own `left`/`width` - `EVENT_LOG_PANEL_WIDTH`'s
@@ -989,7 +1097,7 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
     let header_color = Color::srgba(0.6, 0.63, 0.67, 0.9);
 
     commands
-        .spawn(Node {
+        .spawn(chrome::framed(Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(6.0),
             left: Val::Px(LEGEND_PANEL_LEFT),
@@ -997,8 +1105,11 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(1.0),
             ..default()
-        })
+        }))
+        .insert((chrome::panel_background(), chrome::panel_border()))
         .with_children(|parent| {
+            parent.spawn(chrome::panel_title("-- 操作と凡例 --", font));
+
             let mut row = |label: &str, color: Color| {
                 parent.spawn((Text::new(label.to_string()), text_font(10.0, font), TextColor(color)));
             };
@@ -1012,6 +1123,16 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             row("移動: スクロール/中ドラッグ", label_color);
             row("移動: 矢印キー（常時）", label_color);
             row("ズーム: ctrl+スクロール/ピンチ", label_color);
+            // `input::keyboard_zoom` - the device-independent zoom path this
+            // task adds: works from a bare keyboard with no scroll wheel or
+            // trackpad at all, exactly like "移動: 矢印キー（常時）" above
+            // already does for panning. `-/=` is the same `KeyCode::Minus`/
+            // `KeyCode::Equal` pair, and the same "-/=" notation,
+            // `panels::PolicyField::label`'s conscription row already uses
+            // in the policy panel (`"徴兵率 [-/=]"`) - `Ctrl` is what tells
+            // this binding apart from that one (`input::keyboard_zoom`'s own
+            // doc has the full collision-avoidance reasoning).
+            row("ズーム: ctrl+ -/=（常時）", label_color);
             row("選択/命令: 左クリック", label_color);
             row("地域メニュー: 右クリック", label_color);
             row("地図モード: M ボタン/キー", label_color);
