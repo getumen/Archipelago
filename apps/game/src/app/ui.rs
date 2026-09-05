@@ -7,9 +7,10 @@
 use bevy::prelude::*;
 
 use archipelago_sim::balance::{
-    CAPITAL_FLIGHT_THRESHOLD, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD, SEPARATISM_THRESHOLD, STRIKE_THRESHOLD, UNIT_MANPOWER,
+    CAPITAL_FLIGHT_THRESHOLD, GROUP_SHORTAGE_CITIZENS_PENALTY, GROUP_SHORTAGE_GOVERNMENT_PENALTY, GROUP_SHORTAGE_LABOR_PENALTY, MUTINY_THRESHOLD,
+    PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD, SEPARATISM_THRESHOLD, STRIKE_THRESHOLD, UNIT_MANPOWER,
 };
-use archipelago_sim::good::ALL_GOODS;
+use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::group::{Group, ALL_GROUPS};
 use archipelago_sim::naval::is_port_blockaded;
 use archipelago_sim::world::Station;
@@ -56,21 +57,102 @@ fn manpower_marker(manpower: f32) -> &'static str {
 /// Per-`Group` political-event threshold (`balance.rs`'s "political event
 /// thresholds" section, `politics::tick_politics`/`politics::tick_separatism`):
 /// each of these five groups gates one specific named event once its
-/// support drops below the constant shown. `Government`/`Bureaucracy` gate
-/// no event of their own in `balance.rs` and are left unmarked rather than
-/// inventing a parallel number for them.
-fn group_marker(group: Group, support: f32) -> &'static str {
+/// support drops below the constant returned. `Government`/`Bureaucracy`
+/// gate no event of their own in `balance.rs` and get `None` rather than an
+/// invented parallel number.
+fn group_threshold(group: Group) -> Option<f32> {
     match group {
-        Group::Military if support < MUTINY_THRESHOLD => "※反乱の危険",
-        Group::Labor if support < STRIKE_THRESHOLD => "※ストライキの危険",
-        Group::Citizens if support < PROTEST_THRESHOLD => "※暴動の危険",
-        Group::Business if support < CAPITAL_FLIGHT_THRESHOLD => "※資本逃避の危険",
+        Group::Military => Some(MUTINY_THRESHOLD),
+        Group::Labor => Some(STRIKE_THRESHOLD),
+        Group::Citizens => Some(PROTEST_THRESHOLD),
+        Group::Business => Some(CAPITAL_FLIGHT_THRESHOLD),
         // `politics::tick_separatism`'s own condition: this faction's own
         // LocalGovernment support, not the occupied region's - a low value
         // here risks losing whichever foreign territory this faction
         // currently holds back to its original owner.
-        Group::LocalGovernment if support < SEPARATISM_THRESHOLD => "※分離独立の危険",
-        _ => "",
+        Group::LocalGovernment => Some(SEPARATISM_THRESHOLD),
+        Group::Government | Group::Bureaucracy => None,
+    }
+}
+
+fn group_event_name(group: Group) -> &'static str {
+    match group {
+        Group::Military => "反乱",
+        Group::Labor => "ストライキ",
+        Group::Citizens => "暴動",
+        Group::Business => "資本逃避",
+        Group::LocalGovernment => "分離独立",
+        Group::Government | Group::Bureaucracy => "",
+    }
+}
+
+/// `balance.rs`'s `GROUP_SHORTAGE_*_PENALTY` constants
+/// (`politics::tick_politics`: `target[g] -= GROUP_SHORTAGE_*_PENALTY *
+/// shortage_f`) - `None` for the four groups `Faction::shortage` does not
+/// touch at all (Military/Business/LocalGovernment/Bureaucracy).
+fn group_shortage_penalty(group: Group) -> Option<f32> {
+    match group {
+        Group::Citizens => Some(GROUP_SHORTAGE_CITIZENS_PENALTY),
+        Group::Labor => Some(GROUP_SHORTAGE_LABOR_PENALTY),
+        Group::Government => Some(GROUP_SHORTAGE_GOVERNMENT_PENALTY),
+        Group::LocalGovernment | Group::Bureaucracy | Group::Military | Group::Business => None,
+    }
+}
+
+/// Play-test finding (this task - "the *cause* is invisible, so a player
+/// learns only when the strike happens, and cannot connect it to the
+/// decision that caused it 200 days earlier"): the previous pass's
+/// `group_marker` only announced a threshold already crossed. This now
+/// additionally names, for every group `group_threshold` covers, the exact
+/// point margin remaining before that happens (`残N`) - the "five points
+/// from its strike threshold and falling" moment the task asks to make
+/// legible - and, for every group `group_shortage_penalty` covers, exactly
+/// how many of those remaining points `Faction::shortage` is spending right
+/// now (`不足-N.N`), computed straight from the same `balance.rs` constant
+/// `politics::tick_politics` itself multiplies by `shortage_f` - never a
+/// parallel/invented number.
+///
+/// Below threshold this still emits the *exact* marker text play-test
+/// finding #2 added (`※反乱の危険` etc.) as a substring, so
+/// `faction_panel_marks_values_that_cross_their_balance_rs_threshold` (which
+/// greps for it verbatim) keeps passing unchanged.
+fn group_annotation(group: Group, support: f32, shortage: f32) -> String {
+    let mut parts = Vec::new();
+    if let Some(threshold) = group_threshold(group) {
+        let margin = support - threshold;
+        if margin < 0.0 {
+            parts.push(format!("※{}の危険", group_event_name(group)));
+        } else {
+            parts.push(format!("残{margin:.0}"));
+        }
+    }
+    if let Some(penalty) = group_shortage_penalty(group) {
+        let cost = penalty * shortage.clamp(0.0, 1.0);
+        if cost > 0.0 {
+            parts.push(format!("不足-{cost:.1}"));
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("({})", parts.join(" "))
+    }
+}
+
+/// Play-test finding (this task): a commodity stock `economy::tick_economy`'s
+/// `consume()` has floored at exactly `0.0` this tick - production plus
+/// carryover could not cover ration-adjusted demand - is a qualitatively
+/// different state from a merely low but still-positive stock (design.md
+/// §2/§9's 物不足 chain starts here). Only `Food`/`Energy`/`Machinery` are
+/// marked: the three goods `Faction::shortage_by_good` actually tracks -
+/// Steel/Munitions/Arms hitting zero has no equivalent civilian-facing
+/// political consequence to flag.
+fn stock_marker(good: Good, stock: f32) -> &'static str {
+    let civilian_good = matches!(good, Good::Food | Good::Energy | Good::Machinery);
+    if civilian_good && stock <= 0.0 {
+        "※枯渇"
+    } else {
+        ""
     }
 }
 
@@ -94,7 +176,10 @@ pub(super) fn update_top_bar_player_stats(sim: Res<SimRes>, player: Res<PlayerFa
     };
     let world = sim.0.world();
     let faction = world.faction(player_faction);
-    let stock: Vec<String> = ALL_GOODS.iter().map(|g| format!("{}={:.0}", g.key(), faction.stock[g.index()])).collect();
+    let stock: Vec<String> = ALL_GOODS
+        .iter()
+        .map(|g| format!("{}={:.0}{}", g.key(), faction.stock[g.index()], stock_marker(*g, faction.stock[g.index()])))
+        .collect();
     text.0 = format!(
         "{}  |  在庫: {}  |  人的資源{:.1}{}  安定度{:.0}{}  戦争支持{:.0}  不足{:.2}",
         faction.name,
@@ -134,7 +219,7 @@ pub(super) fn update_faction_panel(
     let units = world.units.iter().filter(|u| u.alive && u.owner == faction.id).count();
     let stock_summary: Vec<String> = ALL_GOODS
         .iter()
-        .map(|g| format!("{}={:.0}", g.key(), faction.stock[g.index()]))
+        .map(|g| format!("{}={:.0}{}", g.key(), faction.stock[g.index()], stock_marker(*g, faction.stock[g.index()])))
         .collect();
 
     let mut diplo_lines = String::new();
@@ -149,14 +234,17 @@ pub(super) fn update_faction_panel(
     // Play-test finding #1's "group support" - previously not shown by any
     // panel at all, sim-side or client-side, even though five of its seven
     // `Group`s are exactly what `balance.rs`'s political-event thresholds
-    // (`group_marker`'s own doc) key off. `Government`/`Bureaucracy` carry
+    // (`group_threshold`'s own doc) key off. `Government`/`Bureaucracy` carry
     // no threshold of their own but are listed anyway, same as every other
-    // group, rather than silently dropped from the list.
+    // group, rather than silently dropped from the list. This task's
+    // `group_annotation` additionally names each group's margin to its own
+    // threshold and, where `balance::GROUP_SHORTAGE_*_PENALTY` applies to it,
+    // exactly how much of that margin today's `shortage` is spending.
     let group_summary: Vec<String> = ALL_GROUPS
         .iter()
         .map(|&g| {
             let support = faction.group_support[g.index()];
-            format!("{}{:.0}{}", g.label(), support, group_marker(g, support))
+            format!("{}{:.0}{}", g.label(), support, group_annotation(g, support, faction.shortage))
         })
         .collect();
 
@@ -487,6 +575,108 @@ mod tests {
         assert!(text.contains("※政権崩壊の危険"), "stability below REGIME_CHANGE_THRESHOLD must be marked, got: {text}");
         assert!(text.contains("※徴兵不能"), "manpower below UNIT_MANPOWER must be marked, got: {text}");
         assert!(text.contains("軍部") && text.contains("※反乱の危険"), "Military group support below MUTINY_THRESHOLD must be marked, got: {text}");
+    }
+
+    /// This task's regression guard: a civilian good whose stock
+    /// `economy::tick_economy` has floored at exactly `0.0` must be flagged
+    /// distinctly from a merely low stock, in both the always-visible top
+    /// bar and the faction detail panel - and a non-civilian good hitting
+    /// zero (Steel here) must *not* get the same flag, since
+    /// `Faction::shortage_by_good` never tracks it. Checked this fails when
+    /// broken: temporarily made `stock_marker` always return `""` - the
+    /// `枯渇` assertions below then fail; temporarily made it ignore the
+    /// `civilian_good` check - the "must not" assertion fails instead. Both
+    /// reverted before committing.
+    #[test]
+    fn depleted_civilian_stock_is_flagged_distinctly_from_a_depleted_industrial_one() {
+        fn deplete(sim: &mut SimRes) {
+            let f = sim.0.sim.world.faction_mut(FactionId(0));
+            f.stock[archipelago_sim::good::Good::Food.index()] = 0.0;
+            f.stock[archipelago_sim::good::Good::Steel.index()] = 0.0;
+        }
+
+        let mut top_bar_sim = player_sim(FactionId(0));
+        deplete(&mut top_bar_sim);
+        let mut top_bar_world = World::new();
+        top_bar_world.insert_resource(top_bar_sim);
+        top_bar_world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        top_bar_world.spawn((Text::new(String::new()), TopBarPlayerStatsText));
+        run(&mut top_bar_world, update_top_bar_player_stats);
+        let top_bar_text = {
+            let mut q = top_bar_world.query_filtered::<&Text, With<TopBarPlayerStatsText>>();
+            q.iter(&top_bar_world).next().unwrap().0.clone()
+        };
+        assert!(top_bar_text.contains("food=0※枯渇"), "a depleted civilian good must be flagged in the top bar, got: {top_bar_text}");
+        assert!(!top_bar_text.contains("steel=0※枯渇"), "a depleted non-civilian good must not be flagged the same way, got: {top_bar_text}");
+
+        let mut panel_sim = player_sim(FactionId(0));
+        deplete(&mut panel_sim);
+        let mut panel_world = World::new();
+        panel_world.insert_resource(panel_sim);
+        panel_world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        panel_world.insert_resource(SelectedFaction(FactionId(0)));
+        spawn_faction_panel_text(&mut panel_world);
+        let panel_text = faction_panel_text(&mut panel_world);
+        assert!(panel_text.contains("food=0※枯渇"), "the faction detail panel must also flag the depleted good, got: {panel_text}");
+        assert!(!panel_text.contains("steel=0※枯渇"), "the faction detail panel must not flag a depleted non-civilian good, got: {panel_text}");
+    }
+
+    /// This task's regression guard for "what the shortage is currently
+    /// costing": the group support line must name exactly the
+    /// `balance::GROUP_SHORTAGE_*_PENALTY * shortage` product
+    /// `politics::tick_politics` itself subtracts from each affected group's
+    /// target, right next to that group's own support number - not a
+    /// parallel/invented figure. Checked this fails when broken: temporarily
+    /// made `group_shortage_penalty` always return `None` - the `不足-N.N`
+    /// assertions below then fail. Reverted before committing.
+    #[test]
+    fn group_support_names_its_own_shortage_cost() {
+        let mut world = World::new();
+        let mut sim = player_sim(FactionId(0));
+        {
+            let f = sim.0.sim.world.faction_mut(FactionId(0));
+            f.shortage = 0.10;
+        }
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedFaction(FactionId(0)));
+        spawn_faction_panel_text(&mut world);
+
+        let text = faction_panel_text(&mut world);
+        assert!(text.contains("市民") && text.contains("不足-2.0"), "Citizens' shortage cost (GROUP_SHORTAGE_CITIZENS_PENALTY * shortage) must be shown, got: {text}");
+        assert!(text.contains("労働者") && text.contains("不足-1.0"), "Labor's shortage cost must be shown, got: {text}");
+        assert!(text.contains("中央政府") && text.contains("不足-0.8"), "Government's shortage cost must be shown, got: {text}");
+        assert!(!text.contains("軍部(不足"), "Military support carries no shortage penalty in balance.rs and must not show one, got: {text}");
+    }
+
+    /// This task's regression guard for the "proximity to threshold" part of
+    /// the fix: a group still *above* its `balance.rs` threshold must show
+    /// how many points of margin remain, not just silence until the moment
+    /// it crosses - the "five points from its strike threshold and falling"
+    /// moment the task names. Checked this fails when broken: temporarily
+    /// made `group_annotation` skip the `margin >= 0.0` branch entirely
+    /// (returning `String::new()` there) - the `残5` assertions below then
+    /// fail. Reverted before committing.
+    #[test]
+    fn faction_panel_shows_margin_to_threshold_before_it_is_crossed() {
+        let mut world = World::new();
+        let mut sim = player_sim(FactionId(0));
+        {
+            let f = sim.0.sim.world.faction_mut(FactionId(0));
+            f.group_support[Group::Labor.index()] = STRIKE_THRESHOLD + 5.0;
+            f.group_support[Group::Citizens.index()] = PROTEST_THRESHOLD + 5.0;
+            f.shortage = 0.10;
+        }
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedFaction(FactionId(0)));
+        spawn_faction_panel_text(&mut world);
+
+        let text = faction_panel_text(&mut world);
+        assert!(!text.contains("危険"), "a group still above its threshold must not show the crossed-threshold marker, got: {text}");
+        assert!(text.contains("残5"), "a group 5 points above its threshold must show the remaining margin, got: {text}");
+        assert!(text.contains("不足-1.0"), "Labor's shortage cost must be shown alongside its margin, got: {text}");
+        assert!(text.contains("不足-2.0"), "Citizens' shortage cost must be shown alongside its margin, got: {text}");
     }
 
     /// Scenario-acceptance regression guard (see
