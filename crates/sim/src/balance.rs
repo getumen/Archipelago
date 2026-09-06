@@ -198,7 +198,6 @@ pub const UNIT_START_ORG_RATIO: f32 = 0.4;
 
 pub const SUPPLY_NEED_PER_MANPOWER: f32 = 1.0;
 pub const COMBAT_SUPPLY_MULT: f32 = 2.5;
-pub const PROJECTED_SUPPLY_FACTOR: f32 = 0.4;
 
 pub const COMBAT_DAMAGE: f32 = 8.0;
 pub const ORG_DAMAGE_MULT: f32 = 2.0;

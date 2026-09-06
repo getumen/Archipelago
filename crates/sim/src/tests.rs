@@ -1894,13 +1894,32 @@ fn reinforcement_uses_current_region_supply() {
     let dest = RegionId(1);
     assert_eq!(world.region(dest).owner, faction, "test setup requires an owned, uncontested destination");
 
-    // `world.supply` is recomputed once a tick by `recompute_supply` from
-    // the map's link topology alone - independent of which units are
-    // where - so directly driving it down to zero here is a faithful stand
-    // in for "region 1's relay chain is currently cut" without this test
-    // depending on the MVP map's specific link layout (already exercised
-    // by `supply_corridor_cut` above).
-    world.supply[dest.index()] = 0.0;
+    // Land-side staleness fix (this round): `land_unit_supply_avail` no
+    // longer trusts a cached `world.supply` entry once `arms_delivery_
+    // station != station` (see that function's own doc) - it re-runs
+    // `compute_transport_flow` fresh instead, which reads straight from the
+    // map/region/line state, never from the `world.supply` field itself.
+    // Directly poking `world.supply[dest] = 0.0` (this test's pre-fix
+    // stand-in for "region 1's relay chain is currently cut") would
+    // therefore no longer have any effect on what the fresh recompute
+    // finds - so the destination is genuinely cut off here instead: zero
+    // its own production/import base and every transport line touching it,
+    // so no path (direct or relayed) can possibly reach it regardless of
+    // which figure is consulted.
+    world.region_mut(dest).capacity = [0.0; GOOD_COUNT];
+    world.region_mut(dest).port = 0.0;
+    for line in world.transport_lines.iter_mut() {
+        let from_region = world.transport_nodes[line.from.index()].region;
+        let to_region = world.transport_nodes[line.to.index()].region;
+        if from_region == dest || to_region == dest {
+            line.capacity = Capacity::new(0.0).unwrap();
+        }
+    }
+    logistics::recompute_supply(&mut world);
+    assert_eq!(
+        world.supply[dest.index()], 0.0,
+        "test setup requires the destination to be genuinely unreachable, not just cached as such"
+    );
 
     // Simulate the unit having just finished a same-day move into the
     // now-cut-off region 1, before `distribute_supply` has run again for
@@ -1931,6 +1950,314 @@ fn reinforcement_uses_current_region_supply() {
         filled < gap * 0.1,
         "a unit that moved into a cut-off region must not reinforce as if it \
          were still at its old, well-supplied region: filled={filled}, gap={gap}"
+    );
+}
+
+/// Land-side counterpart of `fleet_reinforces_after_moving_into_previously_
+/// empty_zone`: `logistics::land_unit_supply_avail` used to read
+/// `world.supply`/`world.supply_by_faction` unconditionally - figures
+/// `region_demand` sizes *before* `military::tick_movement` runs, so a
+/// region with no same-faction unit in it at the last `recompute_supply`
+/// pass necessarily reads `0.0` there, regardless of how well-connected the
+/// region actually is. A land unit that finishes marching into such a
+/// region therefore looked unreachable to `action::apply_reinforce` on the
+/// very day it arrived, even though the region is fully staffed by ample
+/// production and no enemy in sight - the exact defect shape
+/// `fleet_unit_supply_avail`'s own doc already fixed one domain over.
+///
+/// One of this faction's own non-capital regions (already reached by the
+/// scenario's own transport network, sharing a direct line with the
+/// capital) is emptied of every friendly unit and `recompute_supply` run
+/// with nothing standing there - this test's proof that the region starts
+/// out reading exactly `0.0` (the broken symptom `land_unit_supply_avail`
+/// used to return even for a unit that then appears there). The unit is
+/// then stationed in that region with `arms_delivery_station` still
+/// pointing at the capital - exactly the state `military::tick_movement`'s
+/// "arrival is just `unit.station = to`" leaves a freshly-arrived unit in,
+/// before the next `distribute_supply` re-stamps it.
+///
+/// **Confirmed this test can fail**: with the staleness check in
+/// `land_unit_supply_avail` removed (reading `world.supply`/`world.
+/// supply_by_faction` directly, this round's committed behaviour before
+/// this fix), `avail` reads exactly `0.0` and both assertions below fail -
+/// the unit gets `manpower_after == manpower_before == 50.0` and
+/// `equipment_after == equipment_before == 10.0`, i.e. `ReinforceUnit`
+/// silently does nothing to a fully-connected unit. Restored, both
+/// assertions pass: `avail > 0.0` and both stats rise.
+#[test]
+fn land_unit_reinforces_after_moving_into_previously_empty_region() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    // A second region this faction already owns and already reaches via a
+    // direct transport line from its capital (`build_world` only ever
+    // stations initial units at the capital and its owned neighbors, so any
+    // other-than-capital station among this faction's own units names one).
+    let region = world
+        .units
+        .iter()
+        .find(|u| u.owner == faction && u.station.region() != Some(capital))
+        .and_then(|u| u.station.region())
+        .expect("test setup requires this faction to own a second, unit-holding region");
+
+    // Empty it of every friendly unit - isolating "does a lone fresh arrival
+    // get served" from "how does it split against other units already
+    // there's own demand" (a separate, already-covered property).
+    world.units.retain(|u| !(u.owner == faction && u.station.region() == Some(region)));
+
+    logistics::recompute_supply(&mut world);
+    assert_eq!(
+        world.supply[region.index()], 0.0,
+        "test setup requires the cached figure to read exactly 0.0 before any friendly unit is present there"
+    );
+    assert!(
+        !world.has_enemy_units(region, faction),
+        "test setup requires the destination to be uncontested"
+    );
+
+    // Station a damaged unit in `region` with a stale `arms_delivery_station`
+    // pointing at the capital - simulating a same-day arrival.
+    let unit_id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: unit_id,
+        owner: faction,
+        name: "Corps".to_string(),
+        station: Station::Region(region),
+        movement: None,
+        manpower: crate::balance::UNIT_MANPOWER * 0.5,
+        equipment: crate::balance::UNIT_EQUIPMENT * 0.5,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.5,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(capital),
+        experience: 0.0,
+        alive: true,
+    });
+
+    world.faction_mut(faction).manpower = 1_000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000.0;
+
+    let avail = logistics::land_unit_supply_avail(&world, unit_id);
+    assert!(
+        avail > 0.0,
+        "a unit standing in a fully-connected, uncontested region must read reachable the same day it arrives, \
+         got {avail}"
+    );
+
+    let manpower_before = world.unit(unit_id).manpower;
+    let equipment_before = world.unit(unit_id).equipment;
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()));
+    assert!(
+        world.unit(unit_id).manpower > manpower_before,
+        "manpower must be refilled: before={manpower_before}, after={}",
+        world.unit(unit_id).manpower
+    );
+    assert!(
+        world.unit(unit_id).equipment > equipment_before,
+        "equipment must be refilled: before={equipment_before}, after={}",
+        world.unit(unit_id).equipment
+    );
+}
+
+/// Naval counterpart of `repeated_fleet_reinforce_cannot_exceed_daily_
+/// delivery` (land domain): the first `ReinforceUnit` call against a unit
+/// with a stale `arms_delivery_station` recomputes and stamps a real ratio/
+/// budget on the spot (`land_unit_reinforces_after_moving_into_previously_
+/// empty_region` above), and every subsequent call in the same batch must
+/// spend down that same stamped budget rather than recomputing - and
+/// re-granting - a fresh one against the shrinking remainder each time.
+/// Guards against the on-the-spot recompute in `apply_reinforce`'s stale
+/// branch reintroducing the exact "ratio re-applied to remainder" shape
+/// `arms_budget`'s own doc already fixed once for the common case.
+#[test]
+fn repeated_land_reinforce_after_move_cannot_exceed_daily_delivery() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+    let region = world
+        .units
+        .iter()
+        .find(|u| u.owner == faction && u.station.region() != Some(capital))
+        .and_then(|u| u.station.region())
+        .expect("test setup requires this faction to own a second, unit-holding region");
+    world.units.retain(|u| !(u.owner == faction && u.station.region() == Some(region)));
+    logistics::recompute_supply(&mut world);
+
+    let unit_id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: unit_id,
+        owner: faction,
+        name: "Corps".to_string(),
+        station: Station::Region(region),
+        movement: None,
+        manpower: crate::balance::UNIT_MANPOWER,
+        equipment: 5.0, // gap of 15.0 against UNIT_EQUIPMENT (20.0)
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.5,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(capital), // stale - forces the same on-the-spot recompute
+        experience: 0.0,
+        alive: true,
+    });
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
+
+    let before = world.unit(unit_id).equipment;
+
+    // First call recomputes and stamps a real ratio/budget on the spot;
+    // capture what it granted so this test doesn't depend on the exact
+    // network figure, only on whether repeating the call compounds past it.
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()));
+    let after_first = world.unit(unit_id).equipment;
+    let first_grant = after_first - before;
+    assert!(first_grant > 0.0, "sanity: the first call into a healthy, connected region must grant something");
+
+    for _ in 0..29 {
+        let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+        assert_eq!(result, Ok(()));
+    }
+
+    let after_all = world.unit(unit_id).equipment;
+    let total_filled = after_all - before;
+    assert!(
+        (total_filled - first_grant).abs() < 0.01,
+        "29 further ReinforceUnit calls in the same batch must not deliver anything beyond what the first call \
+         already stamped as this tick's budget: first_grant={first_grant}, total_filled={total_filled}"
+    );
+}
+
+/// `codex review` P1 (second round): the two tests above only pin that *one*
+/// unit's own repeated `ReinforceUnit` calls can't compound past its own
+/// already-stamped `arms_budget`. They say nothing about *several different*
+/// units that all finish moving into the *same* region on the *same* tick,
+/// each hitting the `arms_delivery_station != station` branch on its own
+/// *first* `ReinforceUnit` call this tick - `logistics::SupplyLeftover`'s own
+/// doc has the mechanism this closes.
+///
+/// `region` here is fully isolated (no port, every touching `TransportLine`
+/// zeroed) and given a small, deliberately undersized production base, so its
+/// entire tick's throughput is one small vertex budget - well below even a
+/// single arriving unit's own combined manpower+equipment-gap demand, so the
+/// production base (not any one unit's own demand) is what binds throughout.
+///
+/// **Confirmed this test can fail**: reverting `logistics::instantaneous_
+/// land_avail`/`instantaneous_sea_avail` to re-run `compute_transport_flow`
+/// against the live `world` and read `served[region][faction]` directly
+/// (this fix's own prior, defective cut) and rerunning this test with `N=5`
+/// reproduces exactly the leak this fix closes: `total_five` came back at
+/// `50.06` against `solo_grant` of `10.0` - a `5.006x` multiplier, i.e.
+/// essentially exactly `N`. Each of the five arriving units sees the *same*
+/// region-total `avail` (the fresh recompute's `region_demand` sums *every*
+/// alive unit currently in the region, not just the one asking, so nothing
+/// about that figure depends on which of the five is asking) and
+/// independently applies the *whole* thing to its own individual equipment
+/// gap, rather than the five dividing one shared, decreasing allowance.
+/// Restored before committing.
+#[test]
+fn simultaneous_arrivals_share_one_ticks_allocation_not_n_times_it() {
+    let mut base_world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = base_world.faction(faction).capital;
+    let region = base_world
+        .units
+        .iter()
+        .find(|u| u.owner == faction && u.station.region() != Some(capital))
+        .and_then(|u| u.station.region())
+        .expect("test setup requires this faction to own a second, unit-holding region");
+    base_world.units.retain(|u| !(u.owner == faction && u.station.region() == Some(region)));
+
+    // Fully isolate `region`'s supply to its own small, deliberate
+    // production base - no port, no relay - so a single vertex budget
+    // (`production_source(region)`, ~1.0 with the capacity below) is this
+    // tick's *entire* capacity for this region/faction: well below even one
+    // unit's own demand (manpower 1.0 + a full equipment gap's worth of Arms
+    // demand, ~3.0 combined), so the production base binds throughout,
+    // never the units' own appetite.
+    base_world.region_mut(region).port = 0.0;
+    base_world.region_mut(region).devastation = 0.0;
+    for good in crate::good::ALL_GOODS {
+        base_world.region_mut(region).capacity[good.index()] = 0.4;
+    }
+    for line in base_world.transport_lines.iter_mut() {
+        let from_region = base_world.transport_nodes[line.from.index()].region;
+        let to_region = base_world.transport_nodes[line.to.index()].region;
+        if from_region == region || to_region == region {
+            line.capacity = Capacity::new(0.0).unwrap();
+        }
+    }
+    // Arms takes the whole logistics priority, so the throughput->equipment
+    // conversion below isn't obscured by a Munitions/Arms split.
+    base_world.faction_mut(faction).logistics_priority[Good::Munitions.index()] = 0.0;
+    base_world.faction_mut(faction).logistics_priority[Good::Arms.index()] = 1.0;
+    base_world.faction_mut(faction).manpower = 1_000_000.0;
+    base_world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
+
+    let make_unit = |id: UnitId, capital: RegionId| military::Unit {
+        id,
+        owner: faction,
+        name: "Corps".to_string(),
+        station: Station::Region(region),
+        movement: None,
+        manpower: UNIT_MANPOWER,
+        equipment: 0.0, // full gap against UNIT_EQUIPMENT
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.0,
+        arms_delivery: 0.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(capital), // stale - simulates a same-day arrival
+        experience: 0.0,
+        alive: true,
+    };
+
+    // Solo baseline: one unit, alone, arriving stale into the same
+    // production-capped region.
+    let mut solo_world = base_world.clone();
+    logistics::recompute_supply(&mut solo_world);
+    let solo_id = UnitId(solo_world.units.len() as u32);
+    solo_world.units.push(make_unit(solo_id, capital));
+    let solo_before = solo_world.unit(solo_id).equipment;
+    action::apply_action(&mut solo_world, faction, Action::ReinforceUnit { unit: solo_id }).unwrap();
+    let solo_grant = solo_world.unit(solo_id).equipment - solo_before;
+    assert!(solo_grant > 0.0, "sanity: a lone arriving unit must get something from the region's own production");
+
+    // Five units, all arriving stale on the same tick, each issuing exactly
+    // one `ReinforceUnit` - `Simulation::apply`'s own fixed, caller-given
+    // action order, one call per unit here.
+    const N: usize = 5;
+    let mut world = base_world;
+    logistics::recompute_supply(&mut world);
+    let mut unit_ids = Vec::new();
+    for _ in 0..N {
+        let id = UnitId(world.units.len() as u32);
+        world.units.push(make_unit(id, capital));
+        unit_ids.push(id);
+    }
+    let mut total_five = 0.0;
+    for &id in &unit_ids {
+        let before = world.unit(id).equipment;
+        let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: id });
+        assert_eq!(result, Ok(()));
+        total_five += world.unit(id).equipment - before;
+    }
+
+    assert!(
+        total_five > 0.0,
+        "sanity: the batch must still deliver something - the first unit processed should fully claim the \
+         region's own small production"
+    );
+    assert!(
+        total_five < solo_grant * 1.5,
+        "{N} units arriving into the same production-capped region on the same tick must together draw roughly \
+         what a single shared allocation would grant, not {N} times a lone arrival's own share: \
+         solo_grant={solo_grant}, total_five={total_five} ({}x solo)",
+        total_five / solo_grant,
     );
 }
 
@@ -2006,24 +2333,17 @@ fn stranded_unit_eventually_dies_despite_being_reinforced_every_tick() {
 
 /// The third sibling of the occupier-supply defect `logistics`'s own
 /// module doc already documents two fixes for (`distribute_supply`'s and
-/// `land_unit_supply_avail`'s non-owner branches): `naval::
-/// best_facing_port_supply` used to read `world.supply[region]`, which
-/// since Stage 9B means "delivered to this region's own *land* demand" -
-/// `0.0` whenever no land unit happens to be garrisoned there, regardless
-/// of how healthy and fully connected the port actually is (`logistics::
-/// compute_transport_flow` never creates a demand candidate for a region
-/// with none). A damaged fleet facing exactly such a port could then never
-/// reinforce its manpower even though the network was fully intact - fixed
-/// by `world.port_capacity` (`World`'s own doc), a structural
-/// capacity/source figure independent of local demand.
-///
-/// Confirmed this can fail: reverted `naval::best_facing_port_supply` to
-/// read `world.supply[r.index()]` again (the pre-fix formula) and reran -
-/// `world.supply[port_region]` reads `0.0` with no land garrison (asserted
-/// below as the demand-bounded reading the test setup relies on), so
-/// `naval::fleet_unit_supply_avail` also reads `0.0`, `network_reachable`
-/// is `false`, and the fleet's manpower does not move at all (`after ==
-/// before`), failing the final assertion. Reverted before committing.
+/// `land_unit_supply_avail`'s non-owner branches): reading a region's *land*
+/// demand-bounded `world.supply[region]` for a fleet's own supply would read
+/// `0.0` whenever no land unit happens to be garrisoned at its facing port,
+/// regardless of how healthy and fully connected the port actually is
+/// (`logistics::compute_transport_flow` never creates a *land* demand
+/// candidate for a region with none). Defect 3's fix keeps this working not
+/// by falling back to a structural figure independent of demand, but by
+/// giving the fleet's own demand a real seat in the very same flow
+/// (`world.supply_sea`, fed via each `Port` node's `EdgeKind::PortToSea`
+/// edge) - a *sea-zone* sink entirely separate from the region's own land
+/// `Demand(r)`, so land having no garrison never starves it.
 #[test]
 fn damaged_fleet_at_undegarrisoned_port_can_reinforce() {
     let mut world = scenario::build_world();
@@ -2066,8 +2386,8 @@ fn damaged_fleet_at_undegarrisoned_port_can_reinforce() {
         "test setup requires the demand-bounded region reading to be zero with no land garrison present"
     );
     assert!(
-        world.port_capacity[port_region.index()][faction.index()] > 0.0,
-        "test setup requires the port to be structurally reachable"
+        world.supply_sea[zone.index()][faction.index()] > 0.0,
+        "test setup requires the fleet's own sea-zone demand to be met even though the port's land demand is zero"
     );
 
     world.unit_mut(fleet_id).manpower = UNIT_MANPOWER * 0.5;
@@ -7653,4 +7973,385 @@ fn occupier_with_no_route_home_gets_nothing() {
          guess: got {avail_occupier}"
     );
     assert_eq!(logistics::land_unit_supply_avail(&world, occupier), 0.0);
+}
+
+/// Defect 1 (`codex review` P1 on Stage 9D): an invader holding a *chain* of
+/// two or more occupied regions must be able to relay supply through the
+/// first one to reach the second. `build_transport_graph` used to gate every
+/// line leaving a region on whether that region held units hostile to its
+/// *legal owner* - true at `shinetsu_hokuriku` here regardless of who is
+/// hauling, since touhou_rengou's own occupier there is hostile to
+/// chuo_domei, the legal owner. That blocked touhou_rengou from relaying
+/// onward to `kinki` even though touhou_rengou itself holds
+/// `shinetsu_hokuriku` completely uncontested (no chuo_domei unit anywhere
+/// near it) - the same occupier-supply defect one hop further in than
+/// `occupier_adjacent_to_healthy_network_gets_supplied` covers.
+///
+/// **Confirmed this can fail**: reverted `build_transport_graph` to gate
+/// each line's edges on `contested[r] = has_enemy_units(r, r.owner)` (the
+/// legal owner, computed once, structurally omitting the edge) instead of
+/// asking `contested_for` fresh per hauling faction inside the BFS - reran,
+/// and `avail_deep` came back `0.0` (below), because no edge leaving
+/// `shinetsu_hokuriku` was ever added to the adjacency for *any* faction, so
+/// `kinki`'s demand candidate was never reachable at all. Reverted before
+/// committing.
+#[test]
+fn occupier_relays_through_a_chain_of_occupied_regions() {
+    let shinetsu_hokuriku = RegionId(4);
+    let kinki = RegionId(6);
+    let touhou_rengou = FactionId(0);
+    let chuo_domei = FactionId(1);
+    assert_eq!(
+        scenario::build_world().region(kinki).owner,
+        chuo_domei,
+        "test setup: kinki must be chuo_domei's own territory (its capital)"
+    );
+
+    let mut world = scenario::build_world();
+    // Give chuo_domei's own units nothing to draw the line capacity down
+    // with - isolating "does the deep occupied region get served at all"
+    // from "how does it split against the owner's own demand"
+    // (`occupier_adjacent_to_healthy_network_gets_supplied`'s own doc covers
+    // the split case separately).
+    world.units.retain(|u| u.owner != chuo_domei);
+    // touhou_rengou holds a two-region-deep chain into chuo_domei's own
+    // territory: kanto (touhou_rengou's own) -> shinetsu_hokuriku (occupied)
+    // -> kinki (occupied deeper still), connected by direct `TransportLine`s
+    // at every hop.
+    station_foreign_unit(&mut world, touhou_rengou, shinetsu_hokuriku);
+    let deep_occupier = station_foreign_unit(&mut world, touhou_rengou, kinki);
+
+    logistics::recompute_supply(&mut world);
+    let avail_deep = world.supply_by_faction[kinki.index()][touhou_rengou.index()];
+    assert!(
+        avail_deep > 0.9,
+        "an invader holding a chain of two occupied regions must supply the deeper one through the first, \
+         not just the first one alone: got {avail_deep}"
+    );
+    assert_eq!(
+        logistics::land_unit_supply_avail(&world, deep_occupier),
+        avail_deep,
+        "land_unit_supply_avail must read the exact same (region, faction) figure distribute_supply's own avail array does"
+    );
+}
+
+/// Defect 2 (`codex review` P2 on Stage 9D): a `Sea` `TransportLine`'s
+/// enemy-sea-control throttle must be asked from the *hauling* faction's own
+/// perspective, not the line's legal-owner region's. `kita_tohoku`'s port is
+/// flipped to chuo_domei while touhou_rengou physically occupies it - the
+/// same "occupier hauls across a mixed-ownership line" case
+/// `transport_line_usable_flag_follows_the_flow_models_own_rule` already
+/// covers for eligibility - and touhou_rengou's own navy secures the strait
+/// completely (`control[touhou_rengou] = 1.0`), while chuo_domei's own navy
+/// has none. `naval::sea_line_factor` asked with touhou_rengou (the actual
+/// hauler) is `1.0` (unthrottled - its own navy secures the crossing); asked
+/// with chuo_domei (the line's legal-owner region) it is `0.0` (chuo_domei's
+/// navy cannot contest touhou_rengou's total control at all).
+///
+/// **Confirmed this can fail**: reverted `build_transport_graph`'s
+/// `line_capacity` to bake `naval::sea_line_factor(world, ra, rb,
+/// world.region(ra).owner)` once, keyed off the legal owner exactly as
+/// before Stage 9D's fix - reran, and `avail` came back `0.0` (below),
+/// because the legal owner's (chuo_domei's) zero-control factor was applied
+/// to touhou_rengou's own crossing instead of touhou_rengou's own `1.0`.
+/// Reverted before committing.
+#[test]
+fn sea_line_throttle_uses_haulers_own_control_not_owners() {
+    let hokkaido = RegionId(0);
+    let kita_tohoku = RegionId(1);
+    let minami_tohoku = RegionId(2);
+    let kanto = RegionId(3);
+    let touhou_rengou = FactionId(0);
+    let chuo_domei = FactionId(1);
+    assert_eq!(scenario::build_world().region(kita_tohoku).owner, touhou_rengou, "test setup: kita_tohoku starts touhou_rengou's own");
+
+    let mut world = scenario::build_world();
+    world.units.clear();
+    // kita_tohoku's own base is the sole source touhou_rengou could ever
+    // relay to hokkaido from - zero every other touhou_rengou region's
+    // capacity/port so nothing else can mask the sea line's own throttle.
+    for r in [minami_tohoku, kanto] {
+        world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+        world.region_mut(r).port = 0.0;
+    }
+    for good in crate::good::ALL_GOODS {
+        world.region_mut(kita_tohoku).capacity[good.index()] = 1000.0;
+    }
+    world.region_mut(kita_tohoku).infrastructure = 1.0;
+    world.region_mut(hokkaido).capacity = [0.0; GOOD_COUNT];
+
+    // Flip hokkaido's legal ownership to chuo_domei; touhou_rengou physically
+    // occupies it instead (the mixed-ownership line
+    // `hokkaido_port<->kita_tohoku_port` this test drives).
+    world.region_mut(hokkaido).owner = chuo_domei;
+    let occupier = station_foreign_unit(&mut world, touhou_rengou, hokkaido);
+
+    // touhou_rengou's own navy totally controls the zone the crossing
+    // uses; chuo_domei (the line's legal-owner region) has none at all.
+    let zone = world
+        .zones_touching(hokkaido)
+        .into_iter()
+        .find(|&z| world.zones_touching(kita_tohoku).contains(&z))
+        .expect("test setup requires hokkaido and kita_tohoku to share a sea zone");
+    let mut control = vec![0.0f32; world.factions.len()];
+    control[touhou_rengou.index()] = 1.0;
+    world.sea_zone_mut(zone).control = control;
+
+    logistics::recompute_supply(&mut world);
+    let avail = world.supply_by_faction[hokkaido.index()][touhou_rengou.index()];
+    assert!(
+        avail > 0.9,
+        "a sea line touhou_rengou's own navy fully secures must not be throttled by the line's legal-owner \
+         region's (chuo_domei's) navy, which controls nothing here: got {avail}"
+    );
+    assert_eq!(logistics::land_unit_supply_avail(&world, occupier), avail);
+}
+
+/// Defect 3: fleet demand must enter `compute_transport_flow` and compete
+/// for capacity like every other candidate, so two fleets facing the same
+/// port share its finite throughput rather than each independently drawing
+/// the port's entire structural capacity. `kita_tohoku`'s port faces two
+/// distinct sea zones (`hoppou`/`taiheiyo_kita`) - every other touhou_rengou
+/// region that could relay or import into either zone is zeroed out, so
+/// `kita_tohoku`'s own rail-limited port is the *only* source either zone's
+/// fleet could ever draw on, and each fleet's own manpower (1000.0) is set
+/// far past that port's own throughput so the port's own finite capacity -
+/// not either fleet's tiny individual appetite - is what actually binds.
+///
+/// **Confirmed this can fail**: reverted `naval::fleet_unit_supply_avail`/
+/// `fleet_demand_and_avail` to read `world.port_capacity` (the pre-fix
+/// structural, never-consumed reachability figure) again - reran, and
+/// `both_hoppou` came back numerically equal to `alone_hoppou` (both read
+/// the same un-consumed structural number regardless of the second zone's
+/// fleet), failing the "must cut into the first zone's own share"
+/// assertion below. Reverted before committing.
+#[test]
+fn two_fleets_facing_one_port_share_its_capacity() {
+    let touhou_rengou = FactionId(0);
+    let hokkaido = RegionId(0);
+    let kita_tohoku = RegionId(1);
+    let minami_tohoku = RegionId(2);
+    let kanto = RegionId(3);
+    let hoppou = SeaZoneId(0);
+    let taiheiyo_kita = SeaZoneId(1);
+
+    let push_fleet = |world: &mut World, zone: SeaZoneId| {
+        let id = crate::ids::UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner: touhou_rengou,
+            name: "Fleet".to_string(),
+            station: Station::Sea(zone),
+            movement: None,
+            manpower: 1000.0,
+            equipment: UNIT_EQUIPMENT,
+            organization: 100.0,
+            morale: 1.0,
+            supply: 0.0,
+            arms_delivery: 0.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Sea(zone),
+            experience: 0.0,
+            alive: true,
+        });
+    };
+
+    let build = |two_zones: bool| {
+        let mut world = scenario::build_world();
+        world.units.clear();
+        for r in [hokkaido, minami_tohoku, kanto] {
+            world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+            world.region_mut(r).port = 0.0;
+        }
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(kita_tohoku).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(kita_tohoku).infrastructure = 1.0;
+
+        push_fleet(&mut world, hoppou);
+        if two_zones {
+            push_fleet(&mut world, taiheiyo_kita);
+        }
+
+        logistics::recompute_supply(&mut world);
+        (
+            world.supply_sea[hoppou.index()][touhou_rengou.index()],
+            world.supply_sea[taiheiyo_kita.index()][touhou_rengou.index()],
+        )
+    };
+
+    let (alone_hoppou, _) = build(false);
+    let (both_hoppou, both_taiheiyo) = build(true);
+
+    assert!(alone_hoppou > 0.0, "sanity: a lone fleet should draw something from kita_tohoku's port: {alone_hoppou}");
+    assert!(both_taiheiyo > 0.0, "sanity: the second zone's fleet should also draw something: {both_taiheiyo}");
+    assert!(
+        both_hoppou < alone_hoppou * 0.75,
+        "a second fleet facing the same port in another zone must cut into the first zone's own share, not \
+         leave it untouched: alone={alone_hoppou}, both={both_hoppou}"
+    );
+    assert!(
+        (both_hoppou - both_taiheiyo).abs() < alone_hoppou * 0.1,
+        "two fleets with identical demand on the same shared port should split it roughly evenly: \
+         hoppou={both_hoppou}, taiheiyo_kita={both_taiheiyo}"
+    );
+}
+
+/// `codex review` P1 fix: `naval::fleet_unit_supply_avail` used to read
+/// `world.supply_sea[zone][faction]` unconditionally - a figure Defect 3
+/// made demand-*bounded*, so a zone with no same-faction fleet in it at the
+/// last `logistics::recompute_supply` pass necessarily reads `0.0` there,
+/// regardless of how well-connected the zone actually is. A fleet that
+/// finishes sailing into such a zone therefore looked unreachable to
+/// `action::apply_reinforce` on the very day it arrived, even though the
+/// zone's port is fully staffed by ample production and no enemy in sight.
+///
+/// `kita_tohoku`'s capital port is `touhou_rengou`'s own, uncontested, with
+/// ample production - `recompute_supply` run with *no* fleet anywhere is
+/// this test's proof that the zone starts out reading exactly `0.0` (the
+/// broken symptom `fleet_unit_supply_avail` used to return even for a fleet
+/// that then appears there). The fleet is then stationed in that zone with
+/// `arms_delivery_station` still pointing at a different zone - exactly the
+/// state `military::tick_movement`'s "arrival is just `unit.station = to`"
+/// leaves a freshly-arrived fleet in, before the next `distribute_supply`
+/// re-stamps it.
+///
+/// **Confirmed this test can fail**: with the staleness check in
+/// `fleet_unit_supply_avail` removed (reading `world.supply_sea` directly,
+/// this round's committed behaviour before this fix), `avail` reads exactly
+/// `0.0` and both assertions below fail - the fleet gets `manpower_after ==
+/// manpower_before == 500.0` and `equipment_after == equipment_before ==
+/// 10.0`, i.e. `ReinforceUnit` silently does nothing to a fully-connected
+/// fleet. Restored, both assertions pass: `avail > 0.0` and both stats rise.
+#[test]
+fn fleet_reinforces_after_moving_into_previously_empty_zone() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let port_region = world.faction(faction).capital;
+    assert!(world.has_port_node(port_region), "test setup requires the capital to have a port");
+    let zone = naval::home_zone(&world, port_region).expect("test setup requires a facing sea zone");
+
+    // No fleet exists anywhere yet (mvp's default scenario starts with none)
+    // - this is `recompute_supply`'s snapshot of "yesterday", before the
+    // fleet below ever existed.
+    logistics::recompute_supply(&mut world);
+    assert_eq!(
+        world.supply_sea[zone.index()][faction.index()], 0.0,
+        "test setup requires the cached figure to read exactly 0.0 before any fleet is present in this zone"
+    );
+
+    // Station a damaged fleet in `zone` with a stale `arms_delivery_station`
+    // pointing elsewhere - simulating a same-day arrival.
+    let old_zone = SeaZoneId(if zone.0 == 0 { 1 } else { 0 });
+    let fleet_id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: fleet_id,
+        owner: faction,
+        name: "Fleet".to_string(),
+        station: Station::Sea(zone),
+        movement: None,
+        manpower: UNIT_MANPOWER * 0.5,
+        equipment: UNIT_EQUIPMENT * 0.5,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.5,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Sea(old_zone),
+        experience: 0.0,
+        alive: true,
+    });
+
+    world.faction_mut(faction).manpower = 1_000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000.0;
+
+    let avail = naval::fleet_unit_supply_avail(&world, fleet_id);
+    assert!(
+        avail > 0.0,
+        "a fleet standing in a fully-connected, uncontested zone must read reachable the same day it arrives, \
+         got {avail}"
+    );
+
+    let manpower_before = world.unit(fleet_id).manpower;
+    let equipment_before = world.unit(fleet_id).equipment;
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: fleet_id });
+    assert_eq!(result, Ok(()));
+    assert!(
+        world.unit(fleet_id).manpower > manpower_before,
+        "manpower must be refilled: before={manpower_before}, after={}",
+        world.unit(fleet_id).manpower
+    );
+    assert!(
+        world.unit(fleet_id).equipment > equipment_before,
+        "equipment must be refilled: before={equipment_before}, after={}",
+        world.unit(fleet_id).equipment
+    );
+}
+
+/// Naval counterpart of `repeated_reinforce_cannot_exceed_daily_delivery`:
+/// `action::apply_reinforce`'s `arms_budget` spend-down applies identically
+/// regardless of domain, but nothing exercised it for a fleet before this
+/// round's naval work. Also covers the moved-fleet path from
+/// `fleet_reinforces_after_moving_into_previously_empty_zone` above: the
+/// first `ReinforceUnit` call recomputes and stamps `arms_delivery`/
+/// `arms_budget`/`arms_delivery_station` on the spot (mirroring `action::
+/// apply_reinforce`'s own doc for the land case), and every subsequent call
+/// in the same batch must spend down that same stamped budget rather than
+/// recomputing a fresh one against the shrinking remainder each time.
+#[test]
+fn repeated_fleet_reinforce_cannot_exceed_daily_delivery() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let port_region = world.faction(faction).capital;
+    let zone = naval::home_zone(&world, port_region).expect("test setup requires a facing sea zone");
+
+    logistics::recompute_supply(&mut world);
+    let old_zone = SeaZoneId(if zone.0 == 0 { 1 } else { 0 });
+    let fleet_id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: fleet_id,
+        owner: faction,
+        name: "Fleet".to_string(),
+        station: Station::Sea(zone),
+        movement: None,
+        manpower: UNIT_MANPOWER,
+        equipment: 5.0, // gap of 15.0 against UNIT_EQUIPMENT (20.0)
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.5,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Sea(old_zone), // stale - forces the same on-the-spot recompute
+        experience: 0.0,
+        alive: true,
+    });
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000_000.0;
+
+    let before = world.unit(fleet_id).equipment;
+    let gap = UNIT_EQUIPMENT - before;
+
+    // First call recomputes and stamps a real ratio/budget on the spot;
+    // capture what it granted so this test doesn't depend on the exact
+    // network figure, only on whether repeating the call compounds past it.
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: fleet_id });
+    assert_eq!(result, Ok(()));
+    let after_first = world.unit(fleet_id).equipment;
+    let filled_first = after_first - before;
+    assert!(filled_first > 0.0, "the first call must actually deliver something on a healthy, connected zone");
+    assert!(filled_first < gap, "sanity: the network must not instantly fill the whole gap in one call");
+
+    for _ in 0..29 {
+        let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: fleet_id });
+        assert_eq!(result, Ok(()));
+    }
+
+    let after = world.unit(fleet_id).equipment;
+    let filled_total = after - before;
+
+    assert!(
+        (filled_total - filled_first).abs() < 0.01,
+        "30 ReinforceUnit actions against one fleet in a single batch must not together deliver more than the \
+         first call's own one-tick allowance ({filled_first}) no matter how many times the action is resubmitted: \
+         filled_total={filled_total}, gap={gap}"
+    );
 }

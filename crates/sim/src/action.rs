@@ -591,35 +591,8 @@ fn apply_reinforce(
         return Err(ActionError::RegionContested);
     }
 
-    // External code review fix (Stage 2C; Stage 2D extends it to fleets):
-    // `arms_delivery`/`arms_budget` are stamped by
-    // `logistics::distribute_supply`, which runs once a tick *before*
-    // movement. If this unit has moved since that stamp
-    // (`arms_delivery_station != station`), the cached numbers describe a
-    // place it has already left - trust them and a unit could finish
-    // marching (or sailing) out of a well-supplied place into a cut-off one
-    // and still reinforce at the old, high ratio. Recompute fresh for the
-    // *current* station on the spot instead of trying to invalidate/track
-    // the cache from `military::tick_movement` (deriving on demand here is
-    // the simpler thing to reason about: one call site, no extra
-    // bookkeeping needed anywhere movement happens), then stamp the
-    // refreshed numbers back onto the unit so a second `ReinforceUnit`
-    // against it later in this same batch sees the already-fresh,
-    // already-being-spent budget rather than recomputing - and
-    // re-granting - it again.
-    if unit.arms_delivery_station != unit.station {
-        let (ratio, budget) = match unit.station.domain() {
-            Domain::Land => logistics::instantaneous_arms_delivery(world, unit_id),
-            Domain::Sea => naval::instantaneous_fleet_arms_delivery(world, unit_id),
-        };
-        let unit = world.unit_mut(unit_id);
-        unit.arms_delivery = ratio;
-        unit.arms_budget = budget;
-        unit.arms_delivery_station = unit.station;
-    }
-
     // Stage 9D fix (docs/conventions.md §6's "状態には必ず回復経路を持たせる"):
-    // unlike equipment (gated above by `arms_budget`, itself derived from
+    // unlike equipment (gated below by `arms_budget`, itself derived from
     // the transport network), manpower reinforcement used to refill
     // straight from the faction's national manpower pool with no reference
     // to the network at all. `military::tick_recovery`'s own attrition
@@ -645,11 +618,83 @@ fn apply_reinforce(
     // avenue back to full strength and `tick_recovery`'s attrition is left
     // to run its course - the recovery path this project's own convention
     // requires.
-    let unit = world.unit(unit_id);
+    //
+    // `codex review` P1 fix: asked *before* the arms-delivery recompute
+    // below, not after. Both `naval::fleet_unit_supply_avail` and
+    // `logistics::land_unit_supply_avail` detect staleness the same way -
+    // comparing `Unit::arms_delivery_station` against the unit's current
+    // `station` (see each function's own doc) and falling back to a fresh
+    // flow re-run when they differ - but the arms-delivery block below
+    // re-stamps `arms_delivery_station` onto the current station the moment
+    // it runs. Asking `network_reachable` afterward would see "not stale"
+    // and trust the still-unrefreshed `world.supply_sea`/`world.supply`
+    // cache instead, silently undoing the fix for this exact call, in
+    // either domain alike. `land_unit_supply_avail` used to be exempt from
+    // this ordering trap only because it never consulted
+    // `arms_delivery_station` at all - which was itself the land-side half
+    // of this same staleness defect, left unfixed; now that it does, the
+    // order above matters for land too, and is already correct for it since
+    // `network_reachable` is computed once, ahead of both domains' recompute
+    // blocks, not per-domain.
     let network_reachable = match unit.station.domain() {
         Domain::Land => logistics::land_unit_supply_avail(world, unit_id) > 0.0,
         Domain::Sea => naval::fleet_unit_supply_avail(world, unit_id) > 0.0,
     };
+
+    // External code review fix (Stage 2C; Stage 2D extends it to fleets):
+    // `arms_delivery`/`arms_budget` are stamped by
+    // `logistics::distribute_supply`, which runs once a tick *before*
+    // movement. If this unit has moved since that stamp
+    // (`arms_delivery_station != station`), the cached numbers describe a
+    // place it has already left - trust them and a unit could finish
+    // marching (or sailing) out of a well-supplied place into a cut-off one
+    // and still reinforce at the old, high ratio. Recompute fresh for the
+    // *current* station on the spot instead of trying to invalidate/track
+    // the cache from `military::tick_movement` (deriving on demand here is
+    // the simpler thing to reason about: one call site, no extra
+    // bookkeeping needed anywhere movement happens), then stamp the
+    // refreshed numbers back onto the unit so a second `ReinforceUnit`
+    // against it later in this same batch sees the already-fresh,
+    // already-being-spent budget rather than recomputing - and
+    // re-granting - it again.
+    if unit.arms_delivery_station != unit.station {
+        let domain = unit.station.domain();
+        let (ratio, budget) = match domain {
+            Domain::Land => logistics::instantaneous_arms_delivery(world, unit_id),
+            Domain::Sea => naval::instantaneous_fleet_arms_delivery(world, unit_id),
+        };
+        // `codex review` P1 fix (second round): claim the exact throughput
+        // `instantaneous_arms_delivery`/`instantaneous_fleet_arms_delivery`'s
+        // own `avail` just drew from this tick's shared, decreasing network-
+        // capacity leftover (`logistics::SupplyLeftover`) - never a second,
+        // fresh full-capacity recompute, which is what let N arrivals in one
+        // tick each independently draw a whole tick's own capacity all over
+        // again. Kept as an explicit, separate step from the peeks above
+        // (`network_reachable`, and `instantaneous_arms_delivery`'s own
+        // internal read) rather than folded into either of them, so asking
+        // "is this reachable at all" never itself spends anything - only
+        // this one call does, and this branch runs at most once per unit per
+        // tick (the `arms_delivery_station` guard above), so it can never
+        // double-spend for the same arrival - see `commit_instantaneous_
+        // land_grant`'s own doc for the full account, including why the
+        // order multiple *different* arriving units get processed in here is
+        // not a "fixed priority" in the sense this project's conventions
+        // forbid.
+        match domain {
+            Domain::Land => {
+                logistics::commit_instantaneous_land_grant(world, unit_id);
+            }
+            Domain::Sea => {
+                logistics::commit_instantaneous_sea_grant(world, unit_id);
+            }
+        }
+        let unit = world.unit_mut(unit_id);
+        unit.arms_delivery = ratio;
+        unit.arms_budget = budget;
+        unit.arms_delivery_station = unit.station;
+    }
+
+    let unit = world.unit(unit_id);
     let need_manpower = (UNIT_MANPOWER - unit.manpower).max(0.0);
     let need_equipment = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
     // External code review fix (Stage 2C): `arms_budget` is a real

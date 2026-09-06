@@ -8,6 +8,7 @@ use crate::focus::NationalFocus;
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::logistics::SupplyLeftover;
 use crate::military::Unit;
 use crate::transport::{TransportLine, TransportNode};
 
@@ -620,29 +621,41 @@ pub struct World {
     /// happened to have no units of its own to draw the figure up regardless
     /// of how much the network could actually carry.
     pub supply_by_faction: Vec<Vec<f32>>,
-    /// A structural "what could the network deliver here" figure, indexed
-    /// like `supply_by_faction` but independent of `region_demand` - the
-    /// widest-path (max-min-capacity) source capacity `logistics::
-    /// compute_port_source_capacity` finds reaching each `Port` transport
-    /// node from that faction's own production/import, over the same
-    /// eligible lines `compute_transport_flow` uses (`0.0` for a region with
-    /// no `Port` node, or for a faction that cannot reach one). Meaningful
-    /// only at regions with a port - `naval::best_facing_port_supply`'s sole
-    /// reader.
+    /// The Munitions+Arms throughput that actually flowed to each sea
+    /// zone's fleets this tick, indexed by `[SeaZoneId][FactionId]` - the
+    /// sea-domain counterpart of `supply_by_faction`, read by
+    /// `naval::fleet_unit_supply_avail`/`fleet_demand_and_avail`.
     ///
-    /// This exists because `supply`/`supply_by_faction` answer "what
-    /// actually flowed to this region's own *land* demand" - `0.0` for a
-    /// healthy, fully-connected port with no land unit garrisoned there,
-    /// since `compute_transport_flow` never creates a demand candidate for a
-    /// region with none. A fleet facing exactly such a port used to read
-    /// that same `0.0` and be judged unreachable regardless of how much
-    /// capacity the network actually carried - the third sibling of the
-    /// occupier-supply defect `supply_by_faction`'s own doc already
-    /// explains two fixes for (`distribute_supply`'s and `land_unit_supply_
-    /// avail`'s non-owner branches): another unmigrated reader answering a
-    /// "what flowed to a specific demander" question, asked in a context
-    /// that actually wanted "what the network can carry" instead.
-    pub port_capacity: Vec<Vec<f32>>,
+    /// Defect 3 fix (the third sibling of the occupier-supply defect
+    /// `supply_by_faction`'s own doc already explains two fixes for): a
+    /// fleet's demand used to be answered by a separate structural,
+    /// never-consumed figure - `world.port_capacity`, the widest-path
+    /// (max-min-capacity) source capacity `logistics::
+    /// compute_port_source_capacity` found reaching a `Port` node, entirely
+    /// independent of `region_demand` - so two fleets facing the same port
+    /// each read that port's *entire* structural capacity independently,
+    /// since nothing there was ever debited by a grant. Both are removed:
+    /// fleet demand is now folded straight into `logistics::
+    /// compute_transport_flow`'s own contended, capacity-constrained rounds
+    /// (via each `Port` node's `EdgeKind::PortToSea` edge into its own
+    /// sea-zone demand sink), so this field is exactly as demand-bounded and
+    /// as genuinely finite as `supply_by_faction` is for land.
+    pub supply_sea: Vec<Vec<f32>>,
+    /// `codex review` P1 (second round, `logistics::SupplyLeftover`'s own
+    /// doc): the transport network's own per-resource capacity this tick's
+    /// `logistics::recompute_supply` did *not* hand to any (region, faction)
+    /// or (sea zone, faction) demand it already knew about - reset fresh
+    /// every time `recompute_supply` runs, then spent down, once per
+    /// arriving unit, by `logistics::commit_instantaneous_land_grant`/
+    /// `commit_instantaneous_sea_grant` for a unit that finishes moving into
+    /// a region/zone this same tick, so N such arrivals can never together
+    /// draw more than this tick's own genuinely unclaimed capacity. Not
+    /// `pub`, unlike every field above it: nothing outside `logistics`
+    /// itself has a legitimate reason to read or write this directly (the
+    /// JSON/observation export, the API, and the headless report all read
+    /// `supply`/`supply_by_faction`/`supply_sea` instead, exactly as before
+    /// this fix).
+    pub(crate) supply_leftover: SupplyLeftover,
     /// Stage 2D (docs/phase2-spec.md "海域"): the map's sea zones, separate
     /// from the region graph.
     pub sea_zones: Vec<SeaZone>,

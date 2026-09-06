@@ -13,8 +13,8 @@
 use crate::balance::{
     ARMS_SUPPLY_NEED_PER_GAP, BLOCKADE_CONTROL_THRESHOLD, BROKEN_LOSS_MULT, COMBAT_SUPPLY_MULT,
     EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, MANPOWER_LOSS_PER_DAMAGE,
-    MORALE_LOSS_PER_BROKEN_HIT, NAVAL_DAMAGE, ORG_DAMAGE_MULT, PROJECTED_SUPPLY_FACTOR,
-    SUPPLY_NEED_PER_MANPOWER, SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
+    MORALE_LOSS_PER_BROKEN_HIT, NAVAL_DAMAGE, ORG_DAMAGE_MULT, SUPPLY_NEED_PER_MANPOWER,
+    SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
 };
 use crate::event::Event;
 use crate::good::Good;
@@ -213,35 +213,6 @@ pub fn tick_naval_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Even
     CombatReport { fought, casualties }
 }
 
-/// docs/phase2-spec.md "艦隊": a fleet's best source of supply — the
-/// highest `world.port_capacity[region][faction]` among the zone's coastal
-/// regions this faction owns, has a port in, and doesn't currently contest
-/// with the enemy. `0.0` if no such port faces this zone at all.
-///
-/// Stage 9B fix (the third sibling of the occupier-supply defect
-/// `logistics`'s own module doc already documents two fixes for): this used
-/// to read `world.supply[r]`, which since Stage 9B means "delivered to this
-/// region's own *land* demand" - `0.0` for a perfectly healthy, fully
-/// connected port with no land unit garrisoned there, since
-/// `logistics::compute_transport_flow` never creates a demand candidate for
-/// a region with none, regardless of how much capacity the network could
-/// actually carry. `world.port_capacity` (`World`'s own doc) answers the
-/// question this function actually needs instead: what could the network
-/// structurally deliver here, independent of whether any local land demand
-/// happened to ask for it.
-fn best_facing_port_supply(world: &World, zone: SeaZoneId, faction: FactionId) -> f32 {
-    world
-        .sea_zone(zone)
-        .coast
-        .iter()
-        .filter(|&&r| {
-            let region = world.region(r);
-            region.owner == faction && world.has_port_node(r) && !world.has_enemy_units(r, faction)
-        })
-        .map(|&r| world.port_capacity[r.index()][faction.index()])
-        .fold(0.0f32, f32::max)
-}
-
 /// The lowest-id sea zone a region faces, if any — the "home water" a fleet
 /// built at that port is launched into (`action::apply_recruit`) and the
 /// zone the AI treats as that port's own for naval purposes.
@@ -249,15 +220,13 @@ pub fn home_zone(world: &World, region: RegionId) -> Option<SeaZoneId> {
     world.zones_touching(region).into_iter().next()
 }
 
-/// Per-zone, per-faction Munitions/Arms demand and available throughput for
-/// fleets, mirroring `logistics::distribute_supply`'s per-region arrays but
-/// keyed by `SeaZoneId`. Pure (no mutation) — `logistics::distribute_supply`
-/// folds the result into the very same national-stock scaling pass land's
-/// own demand goes through, rather than letting land spend the shared
-/// Munitions stock first and sea take whatever's left (that exact
-/// hardcoded-precedence shape is the standing defect class this project
-/// keeps finding and fixing).
-pub fn fleet_demand_and_avail(world: &World) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+/// Per-zone, per-faction Munitions/Arms upkeep demand this tick - the
+/// sea-domain twin of `logistics::region_demand`, extracted so
+/// `logistics::compute_transport_flow` (sizes each sea zone's demand *sink*)
+/// and `fleet_demand_and_avail` below (splits whatever was actually
+/// delivered between the two goods) never carry two independently
+/// -maintained copies of the same per-unit loop.
+pub(crate) fn sea_demand(world: &World) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let n_zones = world.sea_zones.len();
     let n_factions = world.factions.len();
 
@@ -282,16 +251,50 @@ pub fn fleet_demand_and_avail(world: &World) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, V
         let equipment_gap = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
         demand_arms[zi][f] += equipment_gap * ARMS_SUPPLY_NEED_PER_GAP;
     }
+    (demand_munitions, demand_arms)
+}
+
+/// Per-zone, per-faction Munitions/Arms demand and available throughput for
+/// fleets, mirroring `logistics::distribute_supply`'s per-region arrays but
+/// keyed by `SeaZoneId`. Pure (no mutation) — `logistics::distribute_supply`
+/// folds the result into the very same national-stock scaling pass land's
+/// own demand goes through, rather than letting land spend the shared
+/// Munitions stock first and sea take whatever's left (that exact
+/// hardcoded-precedence shape is the standing defect class this project
+/// keeps finding and fixing).
+///
+/// Defect 3 fix: `avail[z][f]` is now exactly `world.supply_sea[z][f]` -
+/// fleet demand already went through `logistics::compute_transport_flow`'s
+/// own contended, capacity-constrained rounds (via each `Port` node's
+/// `EdgeKind::PortToSea` edge), competing for the network on the same terms
+/// every land candidate does. This used to be `best_facing_port_supply(...)
+/// * PROJECTED_SUPPLY_FACTOR` — a widest-path *structural* reachability
+/// figure (`logistics::compute_port_source_capacity`, `world.port_capacity`,
+/// both removed) that was never actually debited by a grant, so two fleets
+/// facing the same port each read the port's entire structural capacity
+/// independently — a real-capacity model with an un-metered side door.
+///
+/// `codex review` P1 fix (`fleet_unit_supply_avail`'s own doc): unlike that
+/// action-time query, this function never needs to fall back to a fresh
+/// `logistics::compute_transport_flow` re-run - it is only ever called from
+/// `logistics::distribute_supply`, once a tick, immediately after `logistics::
+/// recompute_supply` populated `world.supply_sea` from that very same tick's
+/// flow. Its own `sea_demand` call above and `world.supply_sea` here are
+/// therefore always read from the same snapshot, never a stale one - the
+/// staleness this module's P1 fixes only ever arises for a query asked
+/// *between* ticks, after a fleet has since moved.
+pub fn fleet_demand_and_avail(world: &World) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let (demand_munitions, demand_arms) = sea_demand(world);
+    let n_zones = world.sea_zones.len();
+    let n_factions = world.factions.len();
 
     let mut avail = vec![vec![0.0f32; n_factions]; n_zones];
     for zi in 0..n_zones {
-        let zone_id = SeaZoneId(zi as u32);
         for f in 0..n_factions {
             if demand_munitions[zi][f] <= 0.0 && demand_arms[zi][f] <= 0.0 {
                 continue;
             }
-            let faction_id = FactionId(f as u32);
-            avail[zi][f] = best_facing_port_supply(world, zone_id, faction_id) * PROJECTED_SUPPLY_FACTOR;
+            avail[zi][f] = world.supply_sea[zi][f];
         }
     }
 
@@ -385,14 +388,47 @@ pub fn blockaded_ports(world: &World) -> Vec<PortBlockade> {
 /// `0.0` for a unit with no sea zone at all (never true for a real
 /// `Domain::Sea` unit - `apply_reinforce` only reaches this arm when
 /// `unit.station.domain() == Domain::Sea`, which implies `Station::Sea`).
+///
+/// Defect 3 fix: reads `world.supply_sea` directly - see
+/// `fleet_demand_and_avail`'s own doc for why this is now a real,
+/// demand-contended flow figure rather than a never-consumed structural one.
+///
+/// `codex review` P1 fix: `world.supply_sea` is only ever written once a
+/// tick, by `logistics::recompute_supply`, *before* that same tick's
+/// `military::tick_movement` runs - so a fleet that finishes sailing into
+/// `zone` this tick is not among the demand `naval::sea_demand` counted when
+/// that entry was computed. If no *other* same-faction fleet already sat in
+/// `zone` at that time, the cached entry is necessarily `0.0` regardless of
+/// how well-connected `zone` actually is, and `action::apply_reinforce`
+/// would read a fully reachable destination as unreachable the very day the
+/// fleet arrives. `Unit::arms_delivery_station` already records the station
+/// the cached figures were last trustworthy for (stamped by `apply_fleet_
+/// supply`, which runs before movement, exactly like land's `distribute_
+/// supply` stamp) - a mismatch against the fleet's *current* `station` means
+/// this fleet's own presence here hasn't gone through a flow pass yet, so
+/// the cached `world.supply_sea` entry can't be trusted and `logistics::
+/// instantaneous_sea_avail` is asked instead - a peek against this tick's
+/// already-spent-down leftover network capacity, never a second, fresh
+/// full-capacity flow run (`logistics::SupplyLeftover`'s own doc has the
+/// full account of why: a fresh full-capacity re-run here is exactly the P1
+/// this fix's own second round exists to close).
 pub fn fleet_unit_supply_avail(world: &World, unit_id: UnitId) -> f32 {
     let unit = world.unit(unit_id);
-    let Some(zone) = unit.station.sea_zone() else {
+    if unit.station.sea_zone().is_none() {
         return 0.0;
-    };
-    best_facing_port_supply(world, zone, unit.owner) * PROJECTED_SUPPLY_FACTOR
+    }
+    if unit.arms_delivery_station != unit.station {
+        return crate::logistics::instantaneous_sea_avail(world, unit_id);
+    }
+    let zone = unit.station.sea_zone().expect("checked above");
+    world.supply_sea[zone.index()][unit.owner.index()]
 }
 
+/// `logistics::instantaneous_arms_delivery`'s sea-domain counterpart. Needs
+/// no P1 fix of its own beyond `fleet_unit_supply_avail`'s: it never reads
+/// `world.supply_sea` directly, only through that function's `avail` call
+/// below, which already recomputes fresh for a fleet whose presence in its
+/// current zone hasn't gone through a flow pass yet.
 pub fn instantaneous_fleet_arms_delivery(world: &World, unit_id: UnitId) -> (f32, f32) {
     let unit = world.unit(unit_id);
     let need_equipment = (UNIT_EQUIPMENT - unit.equipment).max(0.0);

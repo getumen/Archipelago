@@ -1133,25 +1133,28 @@ impl Scenario {
         // `codex review` (P2): "overwritten before it is ever read" was not
         // actually true. `Simulation::with_world` accepts actions, and an
         // agent may inspect the world, *before* the first `step` ever calls
-        // `logistics::recompute_supply`. A zero here made
-        // `naval::best_facing_port_supply` report every starting fleet as
+        // `logistics::recompute_supply`. A zero here would make
+        // `naval::fleet_unit_supply_avail` report every starting fleet as
         // having no route home on turn one, so a perfectly valid pre-step
-        // `ReinforceUnit` against a healthy owned port was refused. Seeding
-        // it from the region's own `supply_source` (exactly how `supply` and
-        // `supply_by_faction` above are seeded) means the pre-step value is
-        // a coarse local approximation rather than a wrong one, and the
-        // first `recompute_supply` replaces it with the real widest-path
-        // figure as before.
-        let port_capacity: Vec<Vec<f32>> = regions
+        // `ReinforceUnit` against a healthy owned port would be refused.
+        // Seeded from each facing port region's own `supply` estimate
+        // (exactly how `supply`/`supply_by_faction` above are seeded) so the
+        // pre-step value is a coarse local approximation rather than a wrong
+        // one; the first `recompute_supply` replaces it with the real
+        // flow-model figure as before.
+        let supply_sea: Vec<Vec<f32>> = sea_zones
             .iter()
-            .zip(supply.iter())
-            .map(|(region, &s)| {
+            .map(|zone| {
                 let mut row = vec![0.0f32; factions.len()];
-                let has_port_node = transport_nodes
-                    .iter()
-                    .any(|n| n.kind == crate::transport::TransportNodeKind::Port && n.region == region.id);
-                if has_port_node {
-                    row[region.owner.index()] = s;
+                for &r in &zone.coast {
+                    let region = &regions[r.index()];
+                    let has_port_node = transport_nodes
+                        .iter()
+                        .any(|n| n.kind == crate::transport::TransportNodeKind::Port && n.region == r);
+                    if has_port_node {
+                        let f = region.owner.index();
+                        row[f] = row[f].max(supply[r.index()]);
+                    }
                 }
                 row
             })
@@ -1177,7 +1180,19 @@ impl Scenario {
             units,
             supply,
             supply_by_faction,
-            port_capacity,
+            supply_sea,
+            // Never read before the first real `logistics::recompute_supply`
+            // call (`World::supply_leftover`'s own doc): a freshly-built
+            // `World`'s units are always stationed exactly where their own
+            // `arms_delivery_station` says (`action::apply_recruit`'s
+            // initial placement, mirrored here), and only `military::
+            // tick_movement` - reachable only from inside `Simulation::step`,
+            // which always runs `recompute_supply` first - can ever make the
+            // two disagree. An empty default is therefore never indexed into
+            // by `logistics::instantaneous_land_grant`/`instantaneous_sea_
+            // grant`; `Simulation::step`'s first tick overwrites it with a
+            // real snapshot before anything could.
+            supply_leftover: Default::default(),
             sea_zones,
             transport_nodes,
             transport_lines,

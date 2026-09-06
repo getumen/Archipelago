@@ -30,7 +30,7 @@
 //! `Region::links` (still present, unchanged) is movement-only from this
 //! stage on - nothing here reads it any more.
 
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::balance::{
     ARMS_SUPPLY_NEED_PER_GAP, COMBAT_SUPPLY_MULT, INDUSTRY_SUPPLY_SHARE, PORT_SUPPLY_PER_PORT,
@@ -38,7 +38,8 @@ use crate::balance::{
     UNIT_EQUIPMENT,
 };
 use crate::good::Good;
-use crate::ids::RegionId;
+use crate::ids::{FactionId, RegionId, UnitId};
+use crate::military::Unit;
 use crate::naval;
 use crate::transport::TransportNodeKind;
 use crate::world::{LinkKind, Region, World};
@@ -65,12 +66,29 @@ fn region_demand(world: &World) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
         let r = region.index();
         let f = unit.owner.index();
         let in_combat = world.has_enemy_units(region, unit.owner);
-        let mult = if in_combat { COMBAT_SUPPLY_MULT } else { 1.0 };
-        demand_munitions[r][f] += unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult;
-        let equipment_gap = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
-        demand_arms[r][f] += equipment_gap * ARMS_SUPPLY_NEED_PER_GAP;
+        let (m, a) = unit_supply_demand(unit, in_combat);
+        demand_munitions[r][f] += m;
+        demand_arms[r][f] += a;
     }
     (demand_munitions, demand_arms)
+}
+
+/// One unit's own Munitions/Arms upkeep demand `(munitions, arms)` - the
+/// per-unit term `region_demand`'s loop above sums over every land unit in a
+/// region (`naval::sea_demand` keeps its own near-identical copy for fleets,
+/// per this crate's standing "land/sea are different topologies, a small
+/// amount of structural duplication beats a forced shared abstraction"
+/// stance - see `naval`'s own module doc). Extracted so
+/// `instantaneous_land_grant`/`instantaneous_sea_grant` below can ask the
+/// *identical* question for exactly one arriving unit's own demand, rather
+/// than an independently-maintained second copy of this same two-line
+/// formula that could silently drift from `region_demand`'s.
+fn unit_supply_demand(unit: &Unit, in_combat: bool) -> (f32, f32) {
+    let mult = if in_combat { COMBAT_SUPPLY_MULT } else { 1.0 };
+    let munitions = unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult;
+    let equipment_gap = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
+    let arms = equipment_gap * ARMS_SUPPLY_NEED_PER_GAP;
+    (munitions, arms)
 }
 
 /// A region's own production injected into the transport network -
@@ -92,26 +110,339 @@ fn import_source(region: &Region, blockaded: bool) -> f32 {
     }
 }
 
-/// Recomputes `world.supply`/`world.supply_by_faction`/`world.port_capacity`:
-/// the Munitions+Arms throughput that actually flowed to each region this
-/// tick, from `compute_transport_flow` - see that function's own doc for the
-/// algorithm - plus the structural port-reachability figure from
-/// `compute_port_source_capacity` (that function's own doc, and
-/// `World::port_capacity`'s own doc, for why this is a separate computation
-/// rather than another reader of `flow.served`). `world.supply[r]` is kept
-/// as the region's own owner's entry of `world.supply_by_faction[r]`,
-/// unchanged in meaning, so every reader that only ever cared about a
-/// region's own delivered amount (JSON/observation export, the API, the
-/// headless report) needs no change; the full per-faction matrix exists for
-/// `distribute_supply`'s and `land_unit_supply_avail`'s non-owner branches.
+/// Recomputes `world.supply`/`world.supply_by_faction`/`world.supply_sea`:
+/// the Munitions+Arms throughput that actually flowed to each region, and
+/// each sea zone's fleets, this tick - all three straight from
+/// `compute_transport_flow`, the whole model (see that function's own doc
+/// for the algorithm). `world.supply[r]` is kept as the region's own owner's
+/// entry of `world.supply_by_faction[r]`, unchanged in meaning, so every
+/// reader that only ever cared about a region's own delivered amount
+/// (JSON/observation export, the API, the headless report) needs no change;
+/// the full per-faction matrix exists for `distribute_supply`'s and
+/// `land_unit_supply_avail`'s non-owner branches. `world.supply_sea` is the
+/// sea-domain counterpart `naval::fleet_unit_supply_avail` reads - Defect 3
+/// fix: fleet demand is now a first-class candidate inside
+/// `compute_transport_flow` itself, sharing the same contended, demand-
+/// bounded rounds land does, rather than a separate never-consumed
+/// structural reachability figure (`world.port_capacity`/
+/// `compute_port_source_capacity`, removed - see this module's own
+/// top-of-file doc).
 pub fn recompute_supply(world: &mut World) {
     let flow = compute_transport_flow(world);
-    let port_capacity = compute_port_source_capacity(world);
     world.supply = (0..world.regions.len())
         .map(|r| flow.served[r][world.regions[r].owner.index()])
         .collect();
     world.supply_by_faction = flow.served;
-    world.port_capacity = port_capacity;
+    world.supply_sea = flow.served_sea;
+    world.supply_leftover = flow.leftover;
+}
+
+/// `codex review` P1 (second round): the capacity `compute_transport_flow`'s
+/// `SUPPLY_FLOW_ROUNDS` rounds did *not* hand out to this tick's already-known
+/// demand (`region_demand`/`naval::sea_demand`, sized from unit positions as
+/// of *before* `military::tick_movement` runs) - a snapshot of `vertex_
+/// budget`/`residual_line`/`residual_line_faction` exactly as
+/// `compute_transport_flow` left them at the end of its own rounds, not a
+/// second, independently-derived figure.
+///
+/// This exists for `instantaneous_land_grant`/`instantaneous_sea_grant`
+/// below, which answer "what can the network still deliver *right now*" for
+/// a unit that finishes moving into a region/zone this same tick's
+/// `military::tick_movement` runs, before the *next* `recompute_supply` ever
+/// sees it. The first cut of this fix (this function's own git history) read
+/// that question by throwing the unit's demand at a second, *freshly
+/// reset-to-full-capacity* `compute_transport_flow` run - which handed every
+/// arriving unit a full tick's worth of network capacity all over again, on
+/// top of what this tick's `recompute_supply` had already granted everyone
+/// else, and let a second, third, ... Nth arrival in the same tick each
+/// independently repeat the same over-grant. That is CLAUDE.md's own
+/// "繰り返し踏んだ欠陥" #3 verbatim - "1 tick の許容量は減る予算として持つ。
+/// 残量に比率を掛け直す実装は行動の連打で破られる" - reintroduced by the very
+/// fix meant to respect it.
+///
+/// Fixed the way `Unit::arms_budget` already fixes the identical shape one
+/// level down (a single unit's own equipment allowance): by making the
+/// *shared* capacity a real, decreasing per-tick budget instead of a ratio
+/// re-derived against a fresh remainder. `instantaneous_land_grant`/
+/// `instantaneous_sea_grant` size an arriving unit's own grant against
+/// exactly this leftover (never a fresh `compute_transport_flow`), and
+/// `commit_instantaneous_land_grant`/`commit_instantaneous_sea_grant` spend
+/// it down by exactly what they grant - so N arrivals in one tick can
+/// together never draw more than what this tick's `recompute_supply` left
+/// unclaimed, no matter how many of them ask, in whatever order their
+/// `ReinforceUnit` actions happen to be processed in (see
+/// `commit_instantaneous_land_grant`'s own doc for why *that* order is not a
+/// "fixed priority" in the sense this project's conventions forbid).
+///
+/// Reset to a fresh post-round snapshot every time `recompute_supply` runs
+/// (once a tick, before movement); read and spent down only in the window
+/// between here and the tick's *next* `recompute_supply` call - exactly
+/// `Unit::arms_budget`'s own per-tick lifetime, one level up (shared across
+/// every arriving unit's grant this tick, rather than owned by one unit).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SupplyLeftover {
+    /// Indexed exactly like `TransportGraph`'s own vertex space
+    /// (`TransportGraph::n_vertices`) - only the `Prod`/`Import`/`Inbound`
+    /// slots are ever nonzero contenders; `Demand`/`SeaDemand` slots are
+    /// sinks with no budget of their own, matching `compute_transport_flow`'s
+    /// own `vertex_budget` this is snapshotted from.
+    vertex_budget: Vec<f32>,
+    residual_line: Vec<f32>,
+    residual_line_faction: Vec<Vec<f32>>,
+}
+
+/// A single arriving unit's own grant, sized against `leftover`'s *current*
+/// residuals and (always) spent back down against `leftover` by exactly what
+/// it grants - the arrival-day counterpart of `compute_transport_flow`'s own
+/// per-round, per-candidate grant, reduced to the one-candidate case: with
+/// nothing else contending for the same resources in this one call, the
+/// round algorithm's pooled `total_desired`/`scale` machinery collapses to
+/// `granted = desired * min(1, budget / desired)` over every resource the
+/// found path touches, which is exactly what this computes directly.
+///
+/// Deliberately a single BFS/shortest-path grant, never
+/// `compute_transport_flow`'s own `SUPPLY_FLOW_ROUNDS`-round search for a
+/// second, alternate path once the first one's resource runs thin -
+/// `instantaneous_arms_delivery`'s own doc already accepts this exact
+/// trade-off for a single unit's query ("a deliberately conservative
+/// simplification... never grants more... than a from-scratch pass would
+/// give this unit alone"); this is that same accepted simplification, one
+/// layer down, and it only ever under-grants relative to a full multi-round
+/// solve, never over-grants.
+///
+/// Callers control commit vs. peek entirely through what they pass as
+/// `leftover`: a real mutation against `world.supply_leftover` itself
+/// commits (`commit_instantaneous_land_grant`/`commit_instantaneous_sea_
+/// grant`), a disposable `.clone()` peeks without affecting anything else
+/// this tick (`instantaneous_land_avail`/`instantaneous_sea_avail`) - there
+/// is no separate boolean flag to keep in sync with which one a caller meant.
+fn instantaneous_grant(
+    world: &World,
+    graph: &TransportGraph,
+    leftover: &mut SupplyLeftover,
+    f: usize,
+    target: usize,
+    desired: f32,
+) -> f32 {
+    if desired <= SUPPLY_FLOW_EPSILON {
+        return 0.0;
+    }
+
+    let mut visited = vec![false; graph.n_vertices()];
+    let mut parent: Vec<Option<(usize, EdgeKind)>> = vec![None; graph.n_vertices()];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+
+    // Multi-source BFS from every region `f` owns with remaining Prod/Import
+    // budget - the single-faction restriction of `compute_transport_flow`'s
+    // own per-round source seeding (this call only ever asks on behalf of
+    // one faction, the arriving unit's own).
+    for r in 0..graph.n_regions {
+        if world.regions[r].owner.index() != f {
+            continue;
+        }
+        let p = graph.prod(r);
+        if leftover.vertex_budget[p] > SUPPLY_FLOW_EPSILON && !visited[p] {
+            visited[p] = true;
+            queue.push_back(p);
+        }
+        let im = graph.import(r);
+        if leftover.vertex_budget[im] > SUPPLY_FLOW_EPSILON && !visited[im] {
+            visited[im] = true;
+            queue.push_back(im);
+        }
+    }
+    while let Some(u) = queue.pop_front() {
+        for edge in &graph.adj[u] {
+            let usable = match edge.kind {
+                EdgeKind::Line { line, dir } => {
+                    leftover.residual_line[line] > SUPPLY_FLOW_EPSILON
+                        && leftover.residual_line_faction[line][f] > SUPPLY_FLOW_EPSILON
+                        && graph.line_eligible_for(line, dir, f)
+                }
+                EdgeKind::Virtual => true,
+                EdgeKind::PortToSea { region } => !graph.contested_for[region][f],
+            };
+            if !usable {
+                continue;
+            }
+            let v = edge.to;
+            if graph.is_inbound(v) && leftover.vertex_budget[v] <= SUPPLY_FLOW_EPSILON {
+                continue;
+            }
+            if visited[v] {
+                continue;
+            }
+            visited[v] = true;
+            parent[v] = Some((u, edge.kind));
+            queue.push_back(v);
+        }
+    }
+
+    if !visited[target] {
+        return 0.0;
+    }
+    let (source_vertex, lines, inbounds) = reconstruct_path(&parent, graph, target);
+
+    let mut scale = (leftover.vertex_budget[source_vertex] / desired).min(1.0);
+    for &ib in &inbounds {
+        scale = scale.min((leftover.vertex_budget[ib] / desired).min(1.0));
+    }
+    for &(line, _dir) in &lines {
+        scale = scale.min((leftover.residual_line[line] / desired).min(1.0));
+        let budget = leftover.residual_line_faction[line][f];
+        if budget.is_finite() {
+            scale = scale.min((budget / desired).min(1.0));
+        }
+    }
+    let granted = desired * scale.max(0.0);
+    if granted <= 0.0 {
+        return 0.0;
+    }
+
+    leftover.vertex_budget[source_vertex] = (leftover.vertex_budget[source_vertex] - granted).max(0.0);
+    for &ib in &inbounds {
+        leftover.vertex_budget[ib] = (leftover.vertex_budget[ib] - granted).max(0.0);
+    }
+    for &(line, _dir) in &lines {
+        leftover.residual_line[line] = (leftover.residual_line[line] - granted).max(0.0);
+        let budget = &mut leftover.residual_line_faction[line][f];
+        if budget.is_finite() {
+            *budget = (*budget - granted).max(0.0);
+        }
+    }
+    granted
+}
+
+/// This one arriving unit's own combined Munitions+Arms demand
+/// (`unit_supply_demand`, the same formula `region_demand` sums over every
+/// unit already accounted for), granted against `leftover`.
+fn instantaneous_land_grant(world: &World, unit_id: UnitId, leftover: &mut SupplyLeftover) -> f32 {
+    let unit = world.unit(unit_id);
+    let region = unit
+        .station
+        .region()
+        .expect("instantaneous_land_grant is land-only; callers must route fleets to instantaneous_sea_grant");
+    let f = unit.owner.index();
+    let in_combat = world.has_enemy_units(region, unit.owner);
+    let (m, a) = unit_supply_demand(unit, in_combat);
+    let desired = m + a;
+    if desired <= SUPPLY_FLOW_EPSILON {
+        return 0.0;
+    }
+    let graph = build_transport_graph(world);
+    let target = graph.demand(region.index());
+    instantaneous_grant(world, &graph, leftover, f, target, desired)
+}
+
+/// Sea-domain twin of `instantaneous_land_grant`.
+fn instantaneous_sea_grant(world: &World, unit_id: UnitId, leftover: &mut SupplyLeftover) -> f32 {
+    let unit = world.unit(unit_id);
+    let zone = unit
+        .station
+        .sea_zone()
+        .expect("instantaneous_sea_grant is sea-only; callers must route land units to instantaneous_land_grant");
+    let f = unit.owner.index();
+    let in_combat = world.has_enemy_fleets(zone, unit.owner);
+    let (m, a) = unit_supply_demand(unit, in_combat);
+    let desired = m + a;
+    if desired <= SUPPLY_FLOW_EPSILON {
+        return 0.0;
+    }
+    let graph = build_transport_graph(world);
+    let target = graph.sea_demand(zone.index());
+    instantaneous_grant(world, &graph, leftover, f, target, desired)
+}
+
+/// Land-domain twin of `instantaneous_sea_avail` immediately below, for
+/// `land_unit_supply_avail` to fall back on when its cached `World::supply`/
+/// `World::supply_by_faction` entry cannot be trusted - see that function's
+/// own doc for the staleness this closes. A pure peek: `world.supply_
+/// leftover` is cloned first, so this never affects what a later call this
+/// same tick (for this unit or any other) sees - `apply_reinforce` calls this
+/// (via `land_unit_supply_avail`) purely to read `> 0.0`, and separately
+/// calls `commit_instantaneous_land_grant` to actually claim anything (see
+/// that function's own doc for why the two must stay independent steps).
+fn instantaneous_land_avail(world: &World, unit_id: UnitId) -> f32 {
+    let mut leftover = world.supply_leftover.clone();
+    instantaneous_land_grant(world, unit_id, &mut leftover)
+}
+
+/// Sea-domain twin of `instantaneous_land_avail` immediately above, for
+/// `naval::fleet_unit_supply_avail` to fall back on when its cached `World::
+/// supply_sea` entry cannot be trusted - same peek-only contract.
+pub(crate) fn instantaneous_sea_avail(world: &World, unit_id: UnitId) -> f32 {
+    let mut leftover = world.supply_leftover.clone();
+    instantaneous_sea_grant(world, unit_id, &mut leftover)
+}
+
+/// The actual claim: re-derives the identical grant `instantaneous_land_
+/// avail` would peek right now (nothing mutates `world.supply_leftover`
+/// in between the two calls within one `action::apply_reinforce` - see its
+/// own doc), and this time spends it down against `world.supply_leftover`
+/// itself, so a second arriving unit's own call later in the same tick sees
+/// the genuinely smaller remainder rather than a fresh full-capacity budget.
+///
+/// Called exactly once per arriving unit per tick, from `apply_reinforce`'s
+/// `arms_delivery_station != station` branch - the same guard that already
+/// makes `Unit::arms_budget`'s own stamp-and-spend a one-shot-per-arrival
+/// event, since after this branch runs, `arms_delivery_station` matches
+/// `station` again and every further `ReinforceUnit` against this unit this
+/// tick takes the already-stamped, already-spending-down-its-own-`arms_
+/// budget` fast path instead, never asking `world.supply_leftover` again.
+///
+/// Multiple *different* units arriving into the same region/zone this tick
+/// each still call this once, in whatever order their own `ReinforceUnit`
+/// actions happen to be processed in (`Simulation::apply`'s own fixed,
+/// caller-given action order - never a `HashMap`/`HashSet` or an id-keyed
+/// lookup) - so the second one to be processed draws against whatever the
+/// first one's own claim left behind. This is not a *priority* in the sense
+/// this project's conventions forbid (id, iteration order, or arrival-into-
+/// the-region order deciding who gets served first): it is the same
+/// sequential spend-down every other shared per-tick resource in
+/// `apply_reinforce` already uses (`Faction::stock[Arms]`, `Faction::
+/// manpower`, both drawn down in this exact action-processing order a few
+/// lines below with no complaint from this project's own conventions) -
+/// action-processing order is simply *when in the tick* a claim is made, the
+/// same way a bank balance is spent down in the order withdrawals are
+/// actually presented rather than split evenly among every withdrawal made
+/// that day. Critically, it never lets an arriving unit take priority over a
+/// unit `recompute_supply` already served this tick, nor the reverse: this
+/// only ever spends what `recompute_supply`'s own rounds left unclaimed, and
+/// an already-served unit's own grant was fixed the moment `recompute_
+/// supply` committed it, never revisited here.
+///
+/// **`codex review` raises this as a P1 every time and it is declined each
+/// time; the reasoning is recorded here so it is not re-litigated.** The
+/// claim is that spending the leftover in action order lets a caller decide
+/// who wins scarce capacity by reordering actions, violating CLAUDE.md's
+/// 「希少な資源に固定の優先順位を置かない」. That rule's own stated rationale
+/// is 「**意思決定で動かせないループ**は境界値で飽和する」 - it forbids a
+/// priority *baked into the engine*, where no decision can move it. Action
+/// order is not that: it is the decision, made by whoever is playing.
+///
+/// It is also the established contract everywhere else in this file's
+/// neighbourhood - `action::apply_reinforce` already draws
+/// `Faction::stock[Arms]` and `Faction::manpower` down in action order, and
+/// `Unit::arms_budget` is spent the same way. Batching same-tick arrivals
+/// into one proportional allocation would require `Simulation::apply` to
+/// stop applying actions one at a time, contradicting the API contract
+/// `docs/mvp-spec.md` §5 fixes for RL agents. The invariant that actually
+/// matters here - N arrivals can never together exceed one tick's allowance
+/// - is pinned by `simultaneous_arrivals_share_one_ticks_allocation_not_n_
+/// times_it`.
+pub(crate) fn commit_instantaneous_land_grant(world: &mut World, unit_id: UnitId) -> f32 {
+    let mut leftover = std::mem::take(&mut world.supply_leftover);
+    let granted = instantaneous_land_grant(world, unit_id, &mut leftover);
+    world.supply_leftover = leftover;
+    granted
+}
+
+/// Sea-domain twin of `commit_instantaneous_land_grant` immediately above.
+pub(crate) fn commit_instantaneous_sea_grant(world: &mut World, unit_id: UnitId) -> f32 {
+    let mut leftover = std::mem::take(&mut world.supply_leftover);
+    let granted = instantaneous_sea_grant(world, unit_id, &mut leftover);
+    world.supply_leftover = leftover;
+    granted
 }
 
 /// One edge of `compute_transport_flow`'s internal graph: either a real
@@ -128,6 +459,14 @@ pub fn recompute_supply(world: &mut World) {
 enum EdgeKind {
     Line { line: usize, dir: bool },
     Virtual,
+    /// A `Port` node's own outbound edge into one of the sea zones it
+    /// faces, feeding that zone's fleet demand (Defect 3 fix - see
+    /// `build_transport_graph`'s own doc). Carries no capacity of its own
+    /// (unlike `Line`); `region` is the port's own region, read by the
+    /// traversal's "usable" check so a port under a hauling faction's own
+    /// definition of contested (`TransportGraph::contested_for`) can't
+    /// relay supply out to sea any more than it could relay it overland.
+    PortToSea { region: usize },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,10 +483,18 @@ struct Edge {
 struct TransportFlow {
     /// `[region][faction]` - see `World::supply_by_faction`'s own doc.
     served: Vec<Vec<f32>>,
+    /// `[sea zone][faction]` - see `World::supply_sea`'s own doc (Defect 3
+    /// fix).
+    served_sea: Vec<Vec<f32>>,
     /// `[forward, backward]` committed flow per `world.transport_lines`
     /// index - `forward` is `line.from -> line.to`.
     line_flow: Vec<[f32; 2]>,
     line_capacity: Vec<f32>,
+    /// The exact per-resource state `compute_transport_flow`'s own rounds
+    /// left behind once every candidate above was served - see `SupplyLeftover`'s
+    /// own doc for why `recompute_supply` stores this on `World` rather than
+    /// letting it fall on the floor.
+    leftover: SupplyLeftover,
 }
 
 /// Stage 9B's flow model (docs/phase9-spec.md "2. 補給を有限流量にする"): a
@@ -233,6 +580,23 @@ struct TransportFlow {
 /// itself to the production of the region it is standing in and does not
 /// own.
 ///
+/// A line's own two directed edges are always both structurally present in
+/// `adj` regardless of contest (Defect 1 fix, `codex review` P1 on Stage
+/// 9D): whether region `r` may currently *relay* onward - as opposed to
+/// merely receive - is asked fresh, per hauling faction, by
+/// `contested_for[r][f]` (`World::has_enemy_units(r, f)`), evaluated against
+/// the edge's own *source* region for the direction being traversed. Before
+/// this fix the gate lived in `build_transport_graph` itself, baked once
+/// against each region's *legal owner* (`contested[r] =
+/// has_enemy_units(r, r.owner)`) and applied to every hauling faction alike
+/// - so an invader holding a chain of two or more foreign regions could
+/// never relay past the first one: that region's own gate was computed
+/// against the *defender*, who the invader had already driven out, not
+/// against the invader itself, who genuinely holds it uncontested. A region
+/// contested from a given faction's own perspective still receives whatever
+/// reaches it that round (the target side of an edge is never gated) - it
+/// only can't relay *onward* for that faction specifically.
+///
 /// Because eligibility now depends on who is hauling, one shared
 /// multi-source BFS can no longer answer "what can everyone reach" - the old
 /// model's owner-partitioned subgraphs never overlapped; this one's do,
@@ -296,21 +660,30 @@ struct TransportFlow {
 /// arbitrarily among multiple optimal solutions when several exist, which
 /// would violate the demand-proportional requirement this algorithm is
 /// built around instead.
-/// The static parts of the transport graph `compute_transport_flow` (flow
-/// rounds) and `compute_port_source_capacity` (widest-path reachability)
-/// both search: vertex adjacency, each line's own effective capacity, and
+/// The static parts of the transport graph `compute_transport_flow`'s flow
+/// rounds search - vertex adjacency, each line's own physical capacity,
 /// which `(region, faction)` pairs may use a region's transport nodes at all
-/// (`controlled` - see `compute_transport_flow`'s own doc, "Which lines an
-/// occupier may use"). Built once by `build_transport_graph` and shared by
-/// both callers so they can never silently drift into two independently
-/// -maintained copies of the same graph.
+/// (`controlled`), and which regions are contested from which faction's own
+/// perspective (`contested_for` - see this function's own doc, "Which lines
+/// an occupier may use") - built once by `build_transport_graph` per tick.
 struct TransportGraph {
     n_nodes: usize,
     n_regions: usize,
+    n_zones: usize,
     adj: Vec<Vec<Edge>>,
+    /// Physical `capacity * condition * health` alone (`TransportLine::
+    /// effective_capacity`) - Defect 2 fix: no sea-control throttle baked in
+    /// here any more, since that throttle depends on which faction is
+    /// hauling, not on the line itself. See `line_faction_factor`.
     line_capacity: Vec<f32>,
     line_regions: Vec<(usize, usize)>,
+    line_is_sea: Vec<bool>,
     controlled: Vec<Vec<bool>>,
+    /// `contested_for[r][f]` - does region `r` hold units hostile to
+    /// faction `f`, right now (`World::has_enemy_units(r, f)`), asked fresh
+    /// for *every* faction rather than baked in once against each region's
+    /// legal owner (Defect 1 fix - see `line_eligible_for`'s own doc).
+    contested_for: Vec<Vec<bool>>,
 }
 
 impl TransportGraph {
@@ -326,19 +699,60 @@ impl TransportGraph {
     fn demand(&self, r: usize) -> usize {
         self.n_nodes + 3 * self.n_regions + r
     }
+    fn sea_demand(&self, z: usize) -> usize {
+        self.n_nodes + 4 * self.n_regions + z
+    }
     fn is_inbound(&self, v: usize) -> bool {
         (self.n_nodes + 2 * self.n_regions..self.n_nodes + 3 * self.n_regions).contains(&v)
     }
     fn n_vertices(&self) -> usize {
-        self.n_nodes + 4 * self.n_regions
+        self.n_nodes + 4 * self.n_regions + self.n_zones
     }
-    /// `f` may traverse `line`'s edge only when both of its regions are its
-    /// own network - home territory or somewhere it physically occupies (see
-    /// `compute_transport_flow`'s own doc, "Which lines an occupier may
-    /// use").
-    fn line_eligible_for(&self, line: usize, f: usize) -> bool {
+    /// `f` may traverse `line`'s edge, in the direction `dir` (`true` =
+    /// `line.from -> line.to`, matching `EdgeKind::Line`), exactly when both
+    /// of its regions are its own network (`controlled`, home territory or
+    /// somewhere it physically occupies) and the edge's own *source* region
+    /// for this direction is not contested from `f`'s own perspective
+    /// (Defect 1 fix - `contested_for`, keyed by the hauling faction, not
+    /// the region's legal owner). A `Sea` line's *additional*
+    /// faction-specific sea-control throttle (Defect 2 fix) is a genuine
+    /// decreasing per-tick budget, not a structural yes/no fact - see
+    /// `line_faction_factor` and `compute_transport_flow`'s own
+    /// `residual_line_faction`, checked alongside this in the traversal's
+    /// "usable" match rather than folded in here.
+    fn line_eligible_for(&self, line: usize, dir: bool, f: usize) -> bool {
         let (ra, rb) = self.line_regions[line];
-        self.controlled[ra][f] && self.controlled[rb][f]
+        if !(self.controlled[ra][f] && self.controlled[rb][f]) {
+            return false;
+        }
+        let source = if dir { ra } else { rb };
+        !self.contested_for[source][f]
+    }
+
+    /// The absolute amount of `line`'s own physical capacity that faction
+    /// `f` itself may push through *in total this tick* - `f32::INFINITY`
+    /// (unconstrained) for every non-`Sea` line; otherwise `line_capacity`
+    /// times `naval::sea_line_factor` asked with `f` as the hauler (Defect 2
+    /// fix: never the line's legal-owner region). Used only to seed
+    /// `compute_transport_flow`'s `residual_line_faction` once per tick -
+    /// *not* re-evaluated per round or per candidate, so it becomes a real
+    /// shrinking budget rather than a ratio silently re-applied to whatever
+    /// demand remains after each round (CLAUDE.md's standing rule against
+    /// exactly that shape: re-deriving a candidate's share from a fraction
+    /// of the *current* remainder, round after round, lets it converge
+    /// toward the *entire* original demand over enough rounds instead of
+    /// ever actually being capped - confirmed by reintroducing that shape
+    /// and rerunning `sea_control_throttles_strait`: `open` and `contested`
+    /// came back numerically equal, `4.6153846` vs `4.615385`, because 20
+    /// rounds of "grant 10% of what's left" converges to essentially 100%
+    /// of `open`).
+    fn line_faction_factor(&self, world: &World, line: usize, f: usize) -> f32 {
+        if !self.line_is_sea[line] {
+            return f32::INFINITY;
+        }
+        let (ra, rb) = self.line_regions[line];
+        let factor = naval::sea_line_factor(world, RegionId(ra as u32), RegionId(rb as u32), FactionId(f as u32));
+        self.line_capacity[line] * factor
     }
 }
 
@@ -346,18 +760,30 @@ fn build_transport_graph(world: &World) -> TransportGraph {
     let n_nodes = world.transport_nodes.len();
     let n_regions = world.regions.len();
     let n_factions = world.factions.len();
-    let n_vertices = n_nodes + 4 * n_regions;
+    let n_zones = world.sea_zones.len();
+    let n_vertices = n_nodes + 4 * n_regions + n_zones;
 
     let inbound = |r: usize| n_nodes + 2 * n_regions + r;
     let prod = |r: usize| n_nodes + r;
     let import = |r: usize| n_nodes + n_regions + r;
     let demand = |r: usize| n_nodes + 3 * n_regions + r;
+    let sea_demand = |z: usize| n_nodes + 4 * n_regions + z;
 
-    let contested: Vec<bool> = world.regions.iter().map(|r| world.has_enemy_units(r.id, r.owner)).collect();
+    // `contested_for[r][f]` - see `TransportGraph::line_eligible_for`'s own
+    // doc. Fixed order (`0..n_regions` x `0..n_factions`, both plain
+    // ranges), asking `World::has_enemy_units` fresh for every faction
+    // rather than baking in only the region's legal owner (Defect 1 fix).
+    let contested_for: Vec<Vec<bool>> = (0..n_regions)
+        .map(|r| {
+            (0..n_factions)
+                .map(|f| world.has_enemy_units(RegionId(r as u32), FactionId(f as u32)))
+                .collect()
+        })
+        .collect();
 
-    // `controlled[r][f]` - see this function's own doc, "Which lines an
-    // occupier may use". Fixed order (`world.regions` then `world.units`,
-    // both plain `Vec`s, never a `HashMap`/`HashSet`).
+    // `controlled[r][f]` - see `compute_transport_flow`'s own doc, "Which
+    // lines an occupier may use". Fixed order (`world.regions` then
+    // `world.units`, both plain `Vec`s, never a `HashMap`/`HashSet`).
     let mut controlled = vec![vec![false; n_factions]; n_regions];
     for region in &world.regions {
         controlled[region.id.index()][region.owner.index()] = true;
@@ -371,34 +797,12 @@ fn build_transport_graph(world: &World) -> TransportGraph {
         }
     }
 
-    // Fixed-order adjacency build: every push below iterates a `Vec` in its
-    // own stored order (`world.transport_lines`, then `world.transport_nodes`
-    // twice) - never a `HashMap`/`HashSet`, so BFS neighbor order is a pure
-    // function of world state.
-    let mut adj: Vec<Vec<Edge>> = vec![Vec::new(); n_vertices];
-    // Stage 9B: a `TransportLineKind::Sea` line additionally suffers
-    // `naval::sea_line_factor` - the transport-network counterpart of the
-    // old region-`Strait`-link throttle (docs/phase2-spec.md "1. 海峡リンク
-    // の遮断"). A `Rail`/`Road` line (including the 中国—九州 corridor,
-    // deliberately modeled as a low-capacity `Rail` rather than a `Sea`
-    // line - `transport`'s own module doc) is never touched by this at all,
-    // which is exactly what keeps it immune to sea control by construction
-    // (`kanmon_tunnel_survives_blockade`) rather than by a special case.
-    let line_capacity: Vec<f32> = world
-        .transport_lines
-        .iter()
-        .map(|line| {
-            let base = line.effective_capacity(world);
-            if line.kind == crate::transport::TransportLineKind::Sea {
-                let ra = world.transport_node(line.from).region;
-                let rb = world.transport_node(line.to).region;
-                let owner = world.region(ra).owner;
-                base * naval::sea_line_factor(world, ra, rb, owner)
-            } else {
-                base
-            }
-        })
-        .collect();
+    // Physical capacity alone, per `TransportGraph::line_capacity`'s own doc
+    // - Defect 2 fix: no owner-relative `naval::sea_line_factor` baked in
+    // here any more.
+    let line_capacity: Vec<f32> = world.transport_lines.iter().map(|line| line.effective_capacity(world)).collect();
+    let line_is_sea: Vec<bool> =
+        world.transport_lines.iter().map(|line| line.kind == crate::transport::TransportLineKind::Sea).collect();
 
     // `(ra, rb)` region index per line, looked up once - read by every BFS
     // below (`TransportGraph::line_eligible_for`) rather than re-derived
@@ -409,25 +813,25 @@ fn build_transport_graph(world: &World) -> TransportGraph {
         .map(|line| (world.transport_node(line.from).region.index(), world.transport_node(line.to).region.index()))
         .collect();
 
+    // Fixed-order adjacency build: every push below iterates a `Vec` in its
+    // own stored order (`world.transport_lines`, then `world.transport_nodes`
+    // once or twice) - never a `HashMap`/`HashSet`, so BFS neighbor order is
+    // a pure function of world state.
+    let mut adj: Vec<Vec<Edge>> = vec![Vec::new(); n_vertices];
     for (i, &(ra, rb)) in line_regions.iter().enumerate() {
         let line = &world.transport_lines[i];
         let from_node = line.from.index();
         let to_node = line.to.index();
-        // Stage 9B fix: no longer pre-filtered to "both ends share one
-        // owner" here - a line whose ends belong to two different factions
-        // is still structurally added (`contested` is the only gate that
-        // belongs in this shared, faction-independent adjacency list);
-        // *whether* it is actually usable for a given hauling faction is
-        // answered fresh by `line_eligible_for`, inside that faction's own
-        // BFS below.
-        if !contested[ra] {
-            let target = if ra == rb { to_node } else { inbound(rb) };
-            adj[from_node].push(Edge { to: target, kind: EdgeKind::Line { line: i, dir: true } });
-        }
-        if !contested[rb] {
-            let target = if ra == rb { from_node } else { inbound(ra) };
-            adj[to_node].push(Edge { to: target, kind: EdgeKind::Line { line: i, dir: false } });
-        }
+        // Defect 1 fix: both directions are always structurally present -
+        // no `contested` gate here at all any more. Whether a given hauling
+        // faction may actually traverse this edge (including whether its
+        // own source region is contested *for that faction*) is answered
+        // fresh, per faction, by `line_eligible_for` inside that faction's
+        // own BFS below - see this function's own doc.
+        let fwd_target = if ra == rb { to_node } else { inbound(rb) };
+        adj[from_node].push(Edge { to: fwd_target, kind: EdgeKind::Line { line: i, dir: true } });
+        let bwd_target = if ra == rb { from_node } else { inbound(ra) };
+        adj[to_node].push(Edge { to: bwd_target, kind: EdgeKind::Line { line: i, dir: false } });
     }
     for (n_idx, node) in world.transport_nodes.iter().enumerate() {
         adj[inbound(node.region.index())].push(Edge { to: n_idx, kind: EdgeKind::Virtual });
@@ -441,18 +845,52 @@ fn build_transport_graph(world: &World) -> TransportGraph {
             }
             TransportNodeKind::Port => {
                 adj[import(r)].push(Edge { to: n_idx, kind: EdgeKind::Virtual });
+                // Defect 3 fix: a `Port` node also feeds every sea zone it
+                // faces, so fleet demand there becomes a real candidate in
+                // `compute_transport_flow`'s own contended rounds - see
+                // `EdgeKind::PortToSea`'s own doc.
+                for zone in world.zones_touching(node.region) {
+                    adj[n_idx].push(Edge { to: sea_demand(zone.index()), kind: EdgeKind::PortToSea { region: r } });
+                }
             }
             TransportNodeKind::Junction => {}
         }
     }
 
-    TransportGraph { n_nodes, n_regions, adj, line_capacity, line_regions, controlled }
+    TransportGraph { n_nodes, n_regions, n_zones, adj, line_capacity, line_regions, line_is_sea, controlled, contested_for }
+}
+
+/// Walks `parent` back from `sink` to its source vertex, collecting every
+/// `Line` edge crossed (with direction) and every `Inbound` vertex passed
+/// through - shared by the region-demand and sea-zone-demand candidate
+/// passes in `compute_transport_flow` below (Defect 3 fix folded fleet
+/// demand into the very same search/reconstruction land already used,
+/// rather than a second copy of this walk).
+fn reconstruct_path(
+    parent: &[Option<(usize, EdgeKind)>],
+    graph: &TransportGraph,
+    sink: usize,
+) -> (usize, Vec<(usize, bool)>, Vec<usize>) {
+    let mut cur = sink;
+    let mut lines = Vec::new();
+    let mut inbounds = Vec::new();
+    while let Some((p, kind)) = parent[cur] {
+        if let EdgeKind::Line { line, dir } = kind {
+            lines.push((line, dir));
+        }
+        if graph.is_inbound(p) {
+            inbounds.push(p);
+        }
+        cur = p;
+    }
+    (cur, lines, inbounds)
 }
 
 fn compute_transport_flow(world: &World) -> TransportFlow {
     let n_regions = world.regions.len();
     let n_lines = world.transport_lines.len();
     let n_factions = world.factions.len();
+    let n_zones = world.sea_zones.len();
 
     let graph = build_transport_graph(world);
     let n_vertices = graph.n_vertices();
@@ -460,8 +898,8 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
     let import = |r: usize| graph.import(r);
     let inbound = |r: usize| graph.inbound(r);
     let demand = |r: usize| graph.demand(r);
+    let sea_demand = |z: usize| graph.sea_demand(z);
     let is_inbound = |v: usize| graph.is_inbound(v);
-    let line_eligible_for = |line: usize, f: usize| graph.line_eligible_for(line, f);
     let adj = &graph.adj;
     let line_capacity = graph.line_capacity.clone();
 
@@ -492,6 +930,18 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
     // scaling, never a fixed priority for whichever direction is "forward").
     let mut residual_line: Vec<f32> = line_capacity.clone();
 
+    // Defect 2 fix: a second, per-(line, faction) budget for a `Sea` line's
+    // own hauling-faction-specific sea-control throttle
+    // (`TransportGraph::line_faction_factor`'s own doc has the full account
+    // of why this must be a real shrinking budget, snapshotted once here and
+    // decremented by grants exactly like `residual_line`/`vertex_budget`,
+    // rather than a fraction re-applied to each round's shrinking remaining
+    // demand). `f32::INFINITY` for every non-`Sea` line/faction pair - never
+    // the binding term there.
+    let mut residual_line_faction: Vec<Vec<f32>> = (0..n_lines)
+        .map(|line| (0..n_factions).map(|f| graph.line_faction_factor(world, line, f)).collect())
+        .collect();
+
     // Per-(region, faction) demand - generalized from the pre-fix
     // region-only array, which collapsed every row down to just the
     // region's own owner before this point and silently dropped every other
@@ -502,10 +952,30 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
         .map(|r| (0..n_factions).map(|f| demand_munitions[r][f] + demand_arms[r][f]).collect())
         .collect();
     let mut served = vec![vec![0.0f32; n_factions]; n_regions];
+
+    // Defect 3 fix: fleet demand, keyed by sea zone rather than region,
+    // pooled into the very same candidate list and contended rounds below -
+    // `naval::sea_demand` is the sea-domain twin of `region_demand` above.
+    let (demand_munitions_sea, demand_arms_sea) = naval::sea_demand(world);
+    let mut remaining_demand_sea: Vec<Vec<f32>> = (0..n_zones)
+        .map(|z| (0..n_factions).map(|f| demand_munitions_sea[z][f] + demand_arms_sea[z][f]).collect())
+        .collect();
+    let mut served_sea = vec![vec![0.0f32; n_factions]; n_zones];
+
     let mut line_flow_accum = vec![[0.0f32; 2]; n_lines];
 
+    // A candidate's demand sink - either a region's land `Demand(r)` or a
+    // sea zone's `SeaDemand(z)` (Defect 3 fix). `Ord` orders every `Region`
+    // before every `Sea` (declaration order) then by index - a fixed,
+    // deterministic key, not required to match any prior ordering.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Target {
+        Region(usize),
+        Sea(usize),
+    }
+
     struct Candidate {
-        region: usize,
+        target: Target,
         faction: usize,
         source_vertex: usize,
         lines: Vec<(usize, bool)>,
@@ -563,12 +1033,23 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                         // Shared budget (reachability doesn't depend on
                         // which direction this edge is traversed in -
                         // either direction draws down the same
-                        // `residual_line`), *and* this line must actually be
-                        // eligible for the faction whose BFS this is.
-                        EdgeKind::Line { line, .. } => {
-                            residual_line[line] > SUPPLY_FLOW_EPSILON && line_eligible_for(line, f)
+                        // `residual_line`), plus this faction's own
+                        // remaining sea-control budget on the line (Defect 2
+                        // fix - `residual_line_faction`), *and* this line
+                        // must actually be eligible for the faction whose
+                        // BFS this is (Defect 1 fix - asks `f` itself, never
+                        // the line's legal-owner region).
+                        EdgeKind::Line { line, dir } => {
+                            residual_line[line] > SUPPLY_FLOW_EPSILON
+                                && residual_line_faction[line][f] > SUPPLY_FLOW_EPSILON
+                                && graph.line_eligible_for(line, dir, f)
                         }
                         EdgeKind::Virtual => true,
+                        // Defect 3 fix: a port can't relay supply out to sea
+                        // for `f` any more than it could relay it overland -
+                        // same per-hauling-faction contested check as a
+                        // `Line`'s own source side.
+                        EdgeKind::PortToSea { region } => !graph.contested_for[region][f],
                     };
                     if !usable {
                         continue;
@@ -586,6 +1067,25 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                 }
             }
 
+            // Deliberately *not* pre-capped by any resource's own current
+            // budget/residual here - only by each candidate's own remaining
+            // demand, the one thing that is never shared with another
+            // candidate. Capping against a *shared* resource's budget before
+            // the round's aggregate `total_desired`/`scale` step below would
+            // make a large demand look artificially small next to a tiny one
+            // sharing the same bottleneck (its "desired" would already have
+            // been clipped down to the resource's own size), biasing the
+            // split toward whichever side happened to have the smaller
+            // demand instead of splitting by the true demand ratio - exactly
+            // the "fixed priority over a scarce resource" shape this stage
+            // exists to avoid, just smuggled in through demand size instead
+            // of id/iteration order. Leaving `desired` as the raw remaining
+            // demand and letting `scale` (computed from the *true*
+            // `total_desired` across every candidate sharing a resource) do
+            // 100% of the throttling is what makes the split proportional to
+            // demand regardless of how lopsided it is - and, since
+            // candidates here span every hauling faction, not just an
+            // occupier's own.
             for r in 0..n_regions {
                 if remaining_demand[r][f] <= SUPPLY_FLOW_EPSILON {
                     continue;
@@ -594,61 +1094,35 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                 if !visited[sink] {
                     continue;
                 }
-                let mut cur = sink;
-                let mut lines = Vec::new();
-                let mut inbounds = Vec::new();
-                while let Some((p, kind)) = parent[cur] {
-                    if let EdgeKind::Line { line, dir } = kind {
-                        lines.push((line, dir));
-                    }
-                    if is_inbound(p) {
-                        inbounds.push(p);
-                    }
-                    cur = p;
-                }
-                let source_vertex = cur;
-                // Deliberately *not* pre-capped by any resource's own current
-                // budget/residual here - only by this candidate's own
-                // remaining demand, the one thing that is never shared with
-                // another candidate. Capping against a *shared* resource's
-                // budget before the round's aggregate `total_desired`/`scale`
-                // step below would make a large demand look artificially
-                // small next to a tiny one sharing the same bottleneck (its
-                // "desired" would already have been clipped down to the
-                // resource's own size), biasing the split toward whichever
-                // side happened to have the smaller demand instead of
-                // splitting by the true demand ratio - exactly the "fixed
-                // priority over a scarce resource" shape this stage exists
-                // to avoid, just smuggled in through demand size instead of
-                // id/iteration order. Leaving `desired` as the raw remaining
-                // demand and letting `scale` (computed from the *true*
-                // `total_desired` across every candidate sharing a resource)
-                // do 100% of the throttling is what makes the split
-                // proportional to demand regardless of how lopsided it is -
-                // and, since candidates here span every hauling faction, not
-                // just an occupier's own.
+                let (source_vertex, lines, inbounds) = reconstruct_path(&parent, &graph, sink);
                 let desired = remaining_demand[r][f];
-                if desired <= SUPPLY_FLOW_EPSILON {
+                candidates.push(Candidate { target: Target::Region(r), faction: f, source_vertex, lines, inbounds, desired });
+            }
+            // Defect 3 fix: the same candidate treatment, for fleet demand
+            // sinks reached via a `Port` node's `EdgeKind::PortToSea` edge.
+            for z in 0..n_zones {
+                if remaining_demand_sea[z][f] <= SUPPLY_FLOW_EPSILON {
                     continue;
                 }
-                candidates.push(Candidate { region: r, faction: f, source_vertex, lines, inbounds, desired });
+                let sink = sea_demand(z);
+                if !visited[sink] {
+                    continue;
+                }
+                let (source_vertex, lines, inbounds) = reconstruct_path(&parent, &graph, sink);
+                let desired = remaining_demand_sea[z][f];
+                candidates.push(Candidate { target: Target::Sea(z), faction: f, source_vertex, lines, inbounds, desired });
             }
         }
         if candidates.is_empty() {
             continue;
         }
-        // Canonical `(region, faction)` order, not the `(faction, region)`
+        // Canonical `(target, faction)` order, not the `(faction, target)`
         // order the per-faction passes above happened to produce it in -
         // step 3's `total_desired_vertex`/`total_desired_line` sums are
         // order-sensitive float accumulation (never associative), so this
         // fixes one single deterministic order regardless of how many
-        // factions have occupier candidates this round, and - for a region
-        // with only its own owner's candidate, the ordinary case - matches
-        // the single ascending-region order the pre-fix single-pass model
-        // always summed in, isolating any behavioural difference to where
-        // an occupier's candidate genuinely adds a new term rather than to
-        // incidental reordering of terms that were already there.
-        candidates.sort_by_key(|c| (c.region, c.faction));
+        // factions have occupier/fleet candidates this round.
+        candidates.sort_by_key(|c| (c.target, c.faction));
 
         // --- 3. proportional scale per contended resource, from one shared snapshot ---
         let mut total_desired_vertex = vec![0.0f32; n_vertices];
@@ -658,6 +1132,10 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
         // down together (never a fixed priority for either direction) the
         // same way two candidates sharing a vertex already are.
         let mut total_desired_line = vec![0.0f32; n_lines];
+        // Defect 2 fix: pooled per (line, faction) - only candidates sharing
+        // *both* the line and the hauling faction contend over the same
+        // `residual_line_faction` cell.
+        let mut total_desired_line_faction = vec![vec![0.0f32; n_factions]; n_lines];
         for c in &candidates {
             total_desired_vertex[c.source_vertex] += c.desired;
             for &ib in &c.inbounds {
@@ -665,6 +1143,7 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
             }
             for &(line, _dir) in &c.lines {
                 total_desired_line[line] += c.desired;
+                total_desired_line_faction[line][c.faction] += c.desired;
             }
         }
         let scale_vertex = |v: usize, budget: &[f32]| -> f32 {
@@ -679,6 +1158,18 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
             let td = total_desired_line[line];
             if td > SUPPLY_FLOW_EPSILON {
                 (residual[line] / td).min(1.0)
+            } else {
+                1.0
+            }
+        };
+        let scale_line_faction = |line: usize, f: usize, residual: &[Vec<f32>]| -> f32 {
+            let budget = residual[line][f];
+            if !budget.is_finite() {
+                return 1.0; // non-`Sea` line, or a `Sea` line with no hostile control
+            }
+            let td = total_desired_line_faction[line][f];
+            if td > SUPPLY_FLOW_EPSILON {
+                (budget / td).min(1.0)
             } else {
                 1.0
             }
@@ -708,6 +1199,14 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                 }
                 for &(line, _dir) in &c.lines {
                     scale = scale.min(scale_line(line, &residual_line));
+                    // Defect 2 fix: on top of the shared-residual scale
+                    // above, a `Sea` line further throttles *this
+                    // candidate's own* hauling faction by its own
+                    // real, shrinking sea-control budget - never the line's
+                    // legal-owner region, and never shared away from
+                    // `residual_line` itself (`residual_line_faction`'s own
+                    // doc).
+                    scale = scale.min(scale_line_faction(line, c.faction, &residual_line_faction));
                 }
                 c.desired * scale
             })
@@ -718,8 +1217,16 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
             if granted <= 0.0 {
                 continue;
             }
-            served[c.region][c.faction] += granted;
-            remaining_demand[c.region][c.faction] -= granted;
+            match c.target {
+                Target::Region(r) => {
+                    served[r][c.faction] += granted;
+                    remaining_demand[r][c.faction] -= granted;
+                }
+                Target::Sea(z) => {
+                    served_sea[z][c.faction] += granted;
+                    remaining_demand_sea[z][c.faction] -= granted;
+                }
+            }
             vertex_budget[c.source_vertex] -= granted;
             for &ib in &c.inbounds {
                 vertex_budget[ib] -= granted;
@@ -730,143 +1237,24 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                 // split, purely for `supply_routes`/`supply_link_flows`'s
                 // read-only reconstruction below.
                 residual_line[line] -= granted;
+                // Defect 2 fix: this candidate's own hauling-faction budget
+                // shrinks too (a no-op when it's `f32::INFINITY` - a
+                // non-`Sea` line, or a `Sea` line with no hostile control -
+                // since `INFINITY - finite == INFINITY`).
+                residual_line_faction[line][c.faction] -= granted;
                 let idx = usize::from(!dir);
                 line_flow_accum[line][idx] += granted;
             }
         }
     }
 
-    TransportFlow { served, line_flow: line_flow_accum, line_capacity }
-}
+    // The exact residual state every candidate above competed down from -
+    // `SupplyLeftover`'s own doc has the full account of why this, not a
+    // fresh `compute_transport_flow` re-run, is what an arriving unit's
+    // instantaneous grant must be sized against.
+    let leftover = SupplyLeftover { vertex_budget, residual_line, residual_line_faction };
 
-/// `World::port_capacity`'s own computation: for every region with a `Port`
-/// transport node and every faction, the widest-path (max-min-capacity)
-/// source capacity the transport network structurally offers that port -
-/// the largest bottleneck over any usable path from that faction's own
-/// `Prod`/`Import` sources, entirely independent of `region_demand` (this
-/// module's own top-of-file doc, and `World::port_capacity`'s own doc, for
-/// why `compute_transport_flow`'s demand-bounded `served` cannot answer this
-/// question: a region with no demand candidate never gets one, regardless of
-/// how much capacity would reach it if asked).
-///
-/// Shares `build_transport_graph` with `compute_transport_flow` (same
-/// `line_capacity`/eligibility/`controlled`), but solves a different
-/// problem on it: a widest path (maximum bottleneck path) rather than a
-/// contended multi-commodity flow, since nothing here is rationed against a
-/// competing demand - there is deliberately no demand term in this
-/// computation at all. Every edge weight (a line's capacity, or an
-/// unbounded `Virtual` hop) is non-negative, so - exactly like Dijkstra's
-/// shortest-path algorithm - a greatest-bottleneck-first priority queue
-/// finalizes each vertex's optimal value the moment it is first popped and
-/// never needs to revisit it: termination is "the queue is empty", a
-/// well-ordered structural fact, never a float-magnitude comparison against
-/// an epsilon (docs/phase9-spec.md "2. 決定論"'s "打ち切り条件を反復回数で
-/// 固定する" is about the *other* algorithm in this module,
-/// `compute_transport_flow`'s contended proportional-flow rounds, which
-/// cannot terminate this way since a round's outcome truly does depend on
-/// every candidate sharing a resource, not a single monotone best-first
-/// order). `MaxOrd` breaks ties in the priority queue by `f32::total_cmp`
-/// (never `NaN` here - every capacity is a finite, non-negative float or
-/// `f32::INFINITY`) so the heap's internal order is a pure function of
-/// `World` state, not of insertion timing.
-fn compute_port_source_capacity(world: &World) -> Vec<Vec<f32>> {
-    let n_regions = world.regions.len();
-    let n_factions = world.factions.len();
-
-    let graph = build_transport_graph(world);
-    let n_vertices = graph.n_vertices();
-
-    let blockaded: Vec<bool> = world.regions.iter().map(|r| naval::is_port_blockaded(world, r.id)).collect();
-    let mut vertex_budget = vec![0.0f32; n_vertices];
-    for r in 0..n_regions {
-        let region = &world.regions[r];
-        vertex_budget[graph.prod(r)] = production_source(region);
-        vertex_budget[graph.import(r)] = import_source(region, blockaded[r]);
-        vertex_budget[graph.inbound(r)] = region.node_throughput();
-    }
-
-    // Every `Port` node's own vertex index, grouped by region - `result`
-    // below only ever reports a value for these, but the widest-path search
-    // itself runs over the full graph (a port's own capacity can be relayed
-    // through any node, not only reached directly from `Import`).
-    let mut port_nodes_by_region: Vec<Vec<usize>> = vec![Vec::new(); n_regions];
-    for (n_idx, node) in world.transport_nodes.iter().enumerate() {
-        if node.kind == TransportNodeKind::Port {
-            port_nodes_by_region[node.region.index()].push(n_idx);
-        }
-    }
-    if port_nodes_by_region.iter().all(Vec::is_empty) {
-        return vec![vec![0.0f32; n_factions]; n_regions];
-    }
-
-    let mut result = vec![vec![0.0f32; n_factions]; n_regions];
-    for f in 0..n_factions {
-        let mut widest = vec![0.0f32; n_vertices];
-        let mut finalized = vec![false; n_vertices];
-        let mut heap: BinaryHeap<(MaxOrd, usize)> = BinaryHeap::new();
-        for r in 0..n_regions {
-            if world.regions[r].owner.index() != f {
-                continue;
-            }
-            for v in [graph.prod(r), graph.import(r)] {
-                if vertex_budget[v] > 0.0 {
-                    widest[v] = vertex_budget[v];
-                    heap.push((MaxOrd(vertex_budget[v]), v));
-                }
-            }
-        }
-        while let Some((MaxOrd(cap), u)) = heap.pop() {
-            if finalized[u] || cap < widest[u] {
-                continue; // a stale, since-superseded queue entry
-            }
-            finalized[u] = true;
-            for edge in &graph.adj[u] {
-                let line_cap = match edge.kind {
-                    EdgeKind::Line { line, .. } => {
-                        if !graph.line_eligible_for(line, f) {
-                            continue;
-                        }
-                        graph.line_capacity[line]
-                    }
-                    EdgeKind::Virtual => f32::INFINITY,
-                };
-                let mut candidate = widest[u].min(line_cap);
-                if graph.is_inbound(edge.to) {
-                    candidate = candidate.min(vertex_budget[edge.to]);
-                }
-                if candidate > widest[edge.to] {
-                    widest[edge.to] = candidate;
-                    heap.push((MaxOrd(candidate), edge.to));
-                }
-            }
-        }
-        for (r, nodes) in port_nodes_by_region.iter().enumerate() {
-            result[r][f] = nodes.iter().map(|&n_idx| widest[n_idx]).fold(0.0f32, f32::max);
-        }
-    }
-    result
-}
-
-/// A total order over `f32` for `compute_port_source_capacity`'s
-/// greatest-first `BinaryHeap` - `f32::total_cmp` rather than
-/// `partial_cmp().unwrap()` so this can never panic, though every value it
-/// is ever built from (a capacity, or `f32::INFINITY`) is already never
-/// `NaN`.
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct MaxOrd(f32);
-
-impl Eq for MaxOrd {}
-
-impl PartialOrd for MaxOrd {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for MaxOrd {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0)
-    }
+    TransportFlow { served, served_sea, line_flow: line_flow_accum, line_capacity, leftover }
 }
 
 /// Rations each faction's stockpiled Munitions across its units, region by
@@ -1161,15 +1549,40 @@ fn split_munitions_arms(
 /// (always numerically the same after a real `recompute_supply` - `World`'s
 /// own doc - but tests that drive `world.supply` directly without going
 /// through a full tick must keep working unchanged).
+///
+/// Land-side counterpart of `codex review`'s P1 fix to
+/// `naval::fleet_unit_supply_avail`: both `world.supply` and
+/// `world.supply_by_faction` are written once a tick, by `recompute_supply`,
+/// from unit positions as of *before* that same tick's `military::
+/// tick_movement` runs. A unit that finishes marching into `region` during
+/// that tick's movement is therefore not among the demand `region_demand`
+/// counted when that entry was computed - if no *other* same-faction unit
+/// already stood in `region` at flow time, the cached entry is necessarily
+/// `0.0` regardless of how well-connected `region` actually is, exactly
+/// `instantaneous_sea_avail`'s own doc's account one domain over. Detected
+/// the same way `action::apply_reinforce` already detects a stale `arms_
+/// delivery`/`arms_budget` for this same unit: `Unit::arms_delivery_station`
+/// is stamped onto the unit's *then-current* station every time `distribute_
+/// supply` runs (before movement, same as the naval stamp in `naval::
+/// apply_fleet_supply`), so a mismatch against the unit's current `station`
+/// means this unit's own presence here hasn't gone through a flow pass yet -
+/// the cached `world.supply`/`world.supply_by_faction` entry can't be
+/// trusted and `instantaneous_land_avail` is asked instead (`SupplyLeftover`'s
+/// own doc has the full account of why that reads this tick's already-
+/// spent-down leftover rather than a second, fresh full-capacity flow run).
 pub fn land_unit_supply_avail(world: &World, unit_id: crate::ids::UnitId) -> f32 {
     let unit = world.unit(unit_id);
     let region = unit
         .station
         .region()
         .expect("land_unit_supply_avail is land-only; callers must route fleets to naval::fleet_unit_supply_avail");
-    let r = region.index();
     let faction = unit.owner;
 
+    if unit.arms_delivery_station != unit.station {
+        return instantaneous_land_avail(world, unit_id);
+    }
+
+    let r = region.index();
     if world.regions[r].owner == faction {
         world.supply[r]
     } else {
