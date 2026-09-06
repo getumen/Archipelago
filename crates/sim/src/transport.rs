@@ -81,9 +81,11 @@ pub struct TransportNode {
 /// distinctions about *which region link* a unit can use; in the transport
 /// layer a tunnel is simply a (low-capacity) `Rail` line and a strait a
 /// `Sea` line between two `Port` nodes (see `tools/transport_network.py`'s
-/// module doc for exactly how the three shipped scenarios map one to the
-/// other, and why that mapping is what keeps 関門/青函/瀬戸内 meaningful
-/// chokepoints in the new layer too).
+/// module doc for exactly how `mvp.json`/`japan47.json` map one to the
+/// other, and `tools/hexmap/transport_real.py`'s doc for the same mapping
+/// applied to `japan_hex.json`'s Stage 9C real-data-derived network - and
+/// why that mapping is what keeps 関門/青函/瀬戸内 meaningful chokepoints in
+/// the new layer too).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TransportLineKind {
     Rail,

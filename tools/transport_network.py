@@ -29,23 +29,20 @@ re-expresses facts a scenario author already chose:
                  chokepoints docs/phase9-spec.md §3 asks for
     - every line starts at `condition: 1.0` (undamaged)
 
-**PROVISIONAL for `scenarios/japan_hex.json`.** For `mvp.json`/`japan47.json`
-this mechanical rule *is* the finished Stage 9A network — those maps are
-already hand-authored abstractions, not tied to real prefecture-level rail
-alignments. For `japan_hex.json` it is only a Stage 9A placeholder that lets
-the schema/validation/round-trip work land without inventing route
-geography from memory (docs/phase8-spec.md's "地形を推測で置かない",
-applied here to routes). Stage 9C (docs/phase9-spec.md §3) replaces
-`japan_hex.json`'s transport block with one derived from 国土数値情報
-rail/port geodata — the same DEM-driven-instead-of-memory discipline
-`tools/hexmap/build_scenario.py` already applies to terrain. Do not read
-capacity/condition numbers out of the generated `japan_hex.json` as if they
-meant anything about real Japanese infrastructure; they are this script's
-placeholder constants, not measurements.
+**Used for `mvp.json`/`japan47.json` only.** Those two maps are already
+hand-authored abstractions, not tied to real prefecture-level rail
+alignments, so this mechanical re-expression of their own region links *is*
+their finished transport network. `scenarios/japan_hex.json` used to get
+this same placeholder treatment (Stage 9A, docs/phase9-spec.md §3) but no
+longer does: Stage 9C replaced its transport block with one derived from
+real 国土数値情報 rail/port geodata — the same DEM-driven-instead-of-memory
+discipline `tools/hexmap/build_scenario.py` already applies to terrain. See
+`tools/hexmap/rail_data.py`, `tools/hexmap/port_data.py` and
+`tools/hexmap/transport_real.py` for that derivation; this module is no
+longer involved in generating `japan_hex.json` at all.
 
 Usage:
     python3 tools/transport_network.py --in scenarios/japan47.json --write
-    python3 tools/transport_network.py --in scenarios/japan_hex.json --write --note "..."
     python3 tools/transport_network.py --in scenarios/mvp.json          # prints the block only
 """
 

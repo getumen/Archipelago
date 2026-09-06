@@ -6823,10 +6823,17 @@ fn sea_line_between_non_port_nodes_is_rejected() {
 
 /// The three shipped scenarios must all declare (and pass validation with)
 /// a non-empty transport network (docs/phase9-spec.md §3: "すべてのシナリオ
-/// が輸送網を宣言する... フォールバック禁止"), and `japan_hex.json`'s must
-/// carry the `note` documenting it as Stage 9A's provisional placeholder
-/// (`tools/transport_network.py`'s module doc) so nobody downstream mistakes
-/// it for a real-rail-data-derived network before Stage 9C lands.
+/// が輸送網を宣言する... フォールバック禁止"). `japan_hex.json`'s network is
+/// now Stage 9C's real-data-derived one (`tools/hexmap/transport_real.py`),
+/// not Stage 9A's mechanical placeholder - its `note` must cite the real
+/// MLIT datasets and must no longer claim to be provisional (the literal
+/// string this test used to require before Stage 9C landed).
+///
+/// Confirmed this can fail: temporarily reverted `tools/hexmap/build_
+/// scenario.py`'s `TRANSPORT_NOTE` to the old Stage 9A wording (still
+/// containing "PROVISIONAL") without touching the actual node/line data,
+/// and the "must no longer say PROVISIONAL" assertion below failed as
+/// expected. Reverted before committing.
 #[test]
 fn shipped_scenarios_all_declare_transport_networks() {
     let mvp = scenario::Scenario::parse(scenario::embedded_mvp_json()).expect("mvp.json parses");
@@ -6844,8 +6851,102 @@ fn shipped_scenarios_all_declare_transport_networks() {
 
     let hex_text = std::fs::read_to_string("../../scenarios/japan_hex.json").expect("japan_hex.json readable");
     assert!(
-        hex_text.contains("PROVISIONAL"),
-        "japan_hex.json's transport block must say clearly that it is a Stage 9A placeholder, not real rail/port data"
+        !hex_text.contains("PROVISIONAL"),
+        "japan_hex.json's transport network is Stage 9C's real-data-derived one now - it must not still claim to be a placeholder"
     );
+    for cite in ["N02", "C02", "Kokudo Suuchi Jouhou"] {
+        assert!(
+            hex_text.contains(cite),
+            "japan_hex.json's transport `note` must cite the real MLIT dataset ({cite}) it was derived from"
+        );
+    }
+}
+
+/// Stage 9C's own §3 verification list (docs/phase9-spec.md), pinned as a
+/// regression guard so a future regeneration (a new MLIT data year, a
+/// changed matching radius) can't silently drift away from it without a
+/// test noticing:
+///   - the three Phase 2 chokepoints keep their pre-existing structural
+///     kind (関門 a blockade-immune `Rail` line, 青函/瀬戸内 blockade-
+///     vulnerable `Sea` lines between `Port` nodes - `crates/sim/src/
+///     transport.rs`'s module doc; Stage 9C does not revisit this design
+///     choice) and 関門 in particular carries real evidence of being a
+///     genuine trunk crossing (capacity well above an ordinary `Road`
+///     line's, since the real Sanyo Shinkansen/Kagoshima Main Line both
+///     cross there through the Shin-Kanmon/Kanmon tunnels)
+///   - the five named major real ports (横浜/名古屋/神戸/北九州/苫小牧) each
+///     have a `Port` node whose name identifies that real port
+///
+/// Confirmed this can fail: temporarily pointed the 関門 lookup at a
+/// different (non-tunnel) region pair - the "must be a Rail line" assertion
+/// failed as expected. Reverted before committing.
+#[test]
+fn japan_hex_transport_matches_stage_9c_verification() {
+    let json_text = std::fs::read_to_string("../../scenarios/japan_hex.json").expect("japan_hex.json readable");
+    let world = scenario::load_str(&json_text).expect("scenarios/japan_hex.json must build a valid World");
+
+    // `TransportNode` doesn't carry its own scenario-file string id (only a
+    // numeric `TransportNodeId` and a `region: RegionId`) - resolve by
+    // region string id instead, the same `Scenario::parse` file-order
+    // convention `japan47_chokepoints_still_bind`'s own `id_of` helper
+    // relies on.
+    let scenario = scenario::Scenario::parse(&json_text).unwrap();
+    let region_ids: Vec<String> = scenario.regions.iter().map(|r| r.id.clone()).collect();
+    let region_index = |id: &str| -> RegionId {
+        RegionId(region_ids.iter().position(|r| r == id).unwrap_or_else(|| panic!("region {id} must exist")) as u32)
+    };
+
+    let find_line = |ra: RegionId, rb: RegionId| -> &crate::transport::TransportLine {
+        world
+            .transport_lines
+            .iter()
+            .find(|l| {
+                let (na, nb) = (world.transport_node(l.from).region, world.transport_node(l.to).region);
+                (na == ra && nb == rb) || (na == rb && nb == ra)
+            })
+            .unwrap_or_else(|| panic!("no TransportLine directly between {ra:?} and {rb:?}"))
+    };
+
+    // 関門 (Kanmon): h4_-4 (福岡, Kyushu side) <-> h4_-3 (山口, Honshu side).
+    let kanmon = find_line(region_index("h4_-4"), region_index("h4_-3"));
+    assert_eq!(kanmon.kind, TransportLineKind::Rail, "関門 must stay a Rail line (blockade-immune)");
+    assert!(
+        kanmon.capacity.get() > 20.0,
+        "関門's capacity ({}) should show real evidence of a trunk-tier crossing (Sanyo Shinkansen + Kagoshima \
+         Main Line both cross there), well above an ordinary Road line",
+        kanmon.capacity.get()
+    );
+
+    // 津軽海峡 (Seikan): h13_21 (本州側) <-> h14_20 (北海道側).
+    let seikan = find_line(region_index("h13_21"), region_index("h14_20"));
+    assert_eq!(seikan.kind, TransportLineKind::Sea, "青函 must stay a Sea line (blockade-vulnerable)");
+
+    // 瀬戸内 (Setouchi): h11_-1 (本州側) <-> h12_-2 (四国側).
+    let setouchi = find_line(region_index("h11_-1"), region_index("h12_-2"));
+    assert_eq!(setouchi.kind, TransportLineKind::Sea, "瀬戸内 must stay a Sea line (blockade-vulnerable)");
+
+    // The five named major real ports: each must have a `Port` node whose
+    // name identifies it (`transport_real.py`'s "hex名 港（実在の港名港）"
+    // labelling - checked as a substring so this doesn't pin the whole
+    // label format).
+    for (region_id, real_port_name) in [
+        ("h22_1", "横浜"),
+        ("h16_0", "名古屋"),
+        ("h12_-1", "神戸"),
+        ("h4_-4", "北九州"),
+        ("h14_25", "苫小牧"),
+    ] {
+        let rid = region_index(region_id);
+        let port_node = world
+            .transport_nodes
+            .iter()
+            .find(|n| n.region == rid && n.kind == TransportNodeKind::Port)
+            .unwrap_or_else(|| panic!("region {region_id} must have a Port node"));
+        assert!(
+            port_node.name.contains(real_port_name),
+            "region {region_id}'s Port node name ({:?}) must identify the real {real_port_name} port",
+            port_node.name
+        );
+    }
 }
 

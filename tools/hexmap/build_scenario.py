@@ -87,40 +87,38 @@ from collections import defaultdict
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# `transport_network.py` lives one level up, in `tools/` proper (it derives a
-# transport block for any scenario, not just the hex map) - see the import of
-# it below and its own module doc for why this generator reuses it instead
-# of re-deriving nodes/lines here.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import constants
 import dem
 import hexgrid
+import port_data
 import prefecture_population
+import rail_data
 import regions as region_mod
 import sea_zones as sea_zone_mod
 import terrain as terrain_mod
-import transport_network
+import transport_real
 from prefecture_capitals import CAPITALS
 from terrain_kind import Terrain
 
-# docs/phase9-spec.md §3 "japan_hex の路線は実データから導出する": until
-# Stage 9C derives routes from real 国土数値情報 rail/port geodata, the
-# network this generator writes is `transport_network.py`'s mechanical
-# placeholder (region links/ports re-expressed as Depot/Port nodes and
-# lines - see that module's own doc for exactly what it does and doesn't
-# derive). This note must stay on the emitted scenario so nobody downstream
-# mistakes it for real rail data - `tests::shipped_scenarios_all_declare_
-# transport_networks` checks for the literal string "PROVISIONAL".
+# Stage 9C (docs/phase9-spec.md §3 "japan_hex の路線は実データから導出する"):
+# the network this generator writes is derived from real 国土数値情報
+# rail (N02, CC BY 4.0) / port (C02) data - see rail_data.py/port_data.py/
+# transport_real.py's own module docs for exactly what is and isn't
+# derived, their licences, and how the raw datasets are cached (never
+# committed). This citation must stay on the emitted scenario so anyone
+# reading it can trace the source; tests::shipped_scenarios_all_declare_
+# transport_networks checks for it.
 TRANSPORT_NOTE = (
-    "PROVISIONAL (Stage 9A, docs/phase9-spec.md sec3): mechanically derived "
-    "by tools/transport_network.py from this scenario's own region "
-    "links/ports (one Depot node per region, a Port node + Depot<->Port "
-    "Rail line where port>0, one line per region link). NOT derived from "
-    "real rail/port geodata. Stage 9C replaces this block with a network "
-    "derived from real Kokudo Suuchi Jouhou rail/port data, the same way "
-    "tools/hexmap/build_scenario.py derives terrain from DEM tiles instead "
-    "of memory."
+    "Stage 9C (docs/phase9-spec.md sec3): derived from real MLIT Kokudo "
+    "Suuchi Jouhou (National Land Numerical Information) data - rail lines "
+    "N02-24 (CC BY 4.0, FY2024) and ports C02-14 (non-commercial use, "
+    "FY2014). See tools/hexmap/rail_data.py, tools/hexmap/port_data.py and "
+    "tools/hexmap/transport_real.py for the derivation, licence terms and "
+    "exactly what is/isn't reproduced from each dataset. "
+    "出典：国土交通省 国土数値情報（鉄道データ N02-24 / 港湾データ C02-14）"
+    "https://nlftp.mlit.go.jp/ksj/"
 )
 
 
@@ -700,6 +698,8 @@ def build_scenario_json(
     terrain_final: dict,
     ports: dict,
     infra: dict,
+    layout: hexgrid.HexLayout,
+    cache_dir: str,
     log=print,
 ) -> dict:
     ordered_ids = sorted(hexes.keys())
@@ -746,16 +746,19 @@ def build_scenario_json(
     # docs/phase9-spec.md §3 "すべてのシナリオが輸送網を宣言する... フォール
     # バック禁止": `Scenario::validate` hard-rejects a scenario with no
     # `transport` field at all, so this generator must emit one rather than
-    # leaving regeneration to produce an unloadable file. Reuses
-    # `transport_network.py`'s `derive_transport` (the same mechanical
-    # rule already applied by hand to `mvp.json`/`japan47.json`) rather than
-    # re-deriving nodes/lines here - it only needs `region["id"/"port"/
-    # "links"]`, all already present on `region_json` above. Marked
-    # `TRANSPORT_NOTE`-provisional exactly as it was when this block used to
-    # be added by a separate manual `transport_network.py --write` step:
-    # Stage 9C is what replaces this with a network derived from real
-    # rail/port geodata.
-    transport_json = transport_network.derive_transport({"regions": region_json})
+    # leaving regeneration to produce an unloadable file.
+    #
+    # Stage 9C (docs/phase9-spec.md §3 "japan_hex の路線は実データから導出
+    # する"): unlike `mvp.json`/`japan47.json` (which keep
+    # `transport_network.py`'s mechanical region-link-mirroring rule -
+    # small, hand-authored abstractions, not tied to real alignments), this
+    # generator now derives `japan_hex.json`'s network from real 国土数値
+    # 情報 rail/port data (`transport_real.py`) - the same DEM-driven-
+    # instead-of-memory discipline this generator already applies to
+    # terrain. See `transport_real.py`'s module doc for exactly what is and
+    # isn't derived, and `TRANSPORT_NOTE` below for the citation this
+    # scenario file itself carries.
+    transport_json = transport_real.derive_transport_real(region_json, cache_dir, layout, log=log)
     transport_json = {"note": TRANSPORT_NOTE, **transport_json}
 
     return {
@@ -857,7 +860,8 @@ def main():
     remapped_link_zones = remap_zones_to_real_seas(zones, pref_of, log=print)
 
     scenario = build_scenario_json(
-        hexes, links, remapped_link_zones, pref_of, population, capacities, terrain_final, ports, infra, log=print,
+        hexes, links, remapped_link_zones, pref_of, population, capacities, terrain_final, ports, infra,
+        layout, args.cache_dir, log=print,
     )
     print(f"regions: {len(scenario['regions'])}, sea_zones: {len(scenario['sea_zones'])}, "
           f"factions: {len(scenario['factions'])}")
