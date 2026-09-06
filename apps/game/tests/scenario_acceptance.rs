@@ -62,6 +62,11 @@ use archipelago_sim::world::{Domain, World};
 const SEED: u64 = 2;
 const DAYS: u32 = 720;
 
+/// Seed for the 関東府 military-delegation check below (`kanto_faction`,
+/// `run_ai_only_baseline_kanto`, `delegated_military_matches_ai_baseline_for_kanto`)
+/// - deliberately different from `SEED` above, which is 近畿府's own.
+const SEED_KANTO: u64 = 1;
+
 fn load_japan_hex() -> World {
     scenario::load_file("../../scenarios/japan_hex.json").expect("scenarios/japan_hex.json must load")
 }
@@ -234,6 +239,19 @@ fn land_unit_count(world: &World, faction: FactionId) -> usize {
     world.units.iter().filter(|u| u.alive && u.owner == faction && u.station.domain() == Domain::Land).count()
 }
 
+/// All-AI baseline for 関東府, same seed/scenario as the delegated run below
+/// - `SimDriver::new` (every faction `HeuristicAgent`, no player at all),
+/// exactly the same pattern `run_ai_only_baseline` already uses for 近畿府
+/// above. Measured fresh on every run rather than hardcoded, so this can't
+/// go stale the way the old `~5516` comment did.
+fn run_ai_only_baseline_kanto() -> f32 {
+    let world = load_japan_hex();
+    let faction = kanto_faction(&world);
+    let mut driver = SimDriver::new(world, SEED_KANTO);
+    run_to_completion(&mut driver);
+    munitions(driver.world(), faction)
+}
+
 /// Military delegation's scenario-scale check, exercised through the exact
 /// operation a player performs: **one** `driver.delegate_military()` call
 /// before play starts (mirroring `--delegate-military`, `main.rs`'s own
@@ -293,11 +311,27 @@ fn land_unit_count(world: &World, faction: FactionId) -> usize {
 /// dropped), 関東府 never grows past its starting handful of units and this
 /// test's `units`/`territory` assertions below fail immediately. Reverted
 /// before committing.
+///
+/// Confirmed the Munitions same-league assertion below can actually fail,
+/// too (replacing a prior version of that check, `munitions_final.is_finite()
+/// && munitions_final >= 0.0`, that could not - see that assertion's own
+/// doc): temporarily credited the replay run's 関東府 with a flat +20
+/// Munitions every tick after `replay_driver.tick()` (simulating "the
+/// delegated path stopped drawing its own upkeep"), which is a small
+/// fraction of what garrisoning ~100 occupied regions actually costs per
+/// day. Final Munitions came back 10831.5 against a freshly-measured AI
+/// baseline of 0.0 (`SAME_LEAGUE_ABS_SLACK` is 2000.0) - the assertion
+/// failed exactly as intended, and both `territory`/`units` still passed on
+/// that same run (80/33), so this was not just piggybacking on those two
+/// checks. A much larger +50/tick leak came back 32431.5, an order of
+/// magnitude past the slack; a much smaller +3/tick leak was fully absorbed
+/// by `distribute_supply`'s own daily `.max(0.0)` floor and never
+/// accumulated at all, i.e. too small a leak to matter is indistinguishable
+/// from no leak, which is the correct behavior for a wide band. Reverted
+/// before committing.
 #[test]
 #[ignore]
 fn delegated_military_matches_ai_baseline_for_kanto() {
-    const SEED_KANTO: u64 = 1;
-
     let world = load_japan_hex();
     let faction = kanto_faction(&world);
 
@@ -354,7 +388,8 @@ fn delegated_military_matches_ai_baseline_for_kanto() {
     let territory = world.region_count(faction);
     let units = land_unit_count(world, faction);
     let munitions_final = munitions(world, faction);
-    println!("delegated 関東府 via --delegate-military: territory={territory} units={units} munitions={munitions_final:.1} (AI baseline: 101/32/~5516)");
+    let ai_baseline_munitions = run_ai_only_baseline_kanto();
+    println!("delegated 関東府 via --delegate-military: territory={territory} units={units} munitions={munitions_final:.1} (AI baseline munitions: {ai_baseline_munitions:.1})");
 
     // "Same league" as the all-AI baseline (territory 101 / units 32 /
     // munitions ≈5516) - loose bounds, not a tight regression guard: the
@@ -362,5 +397,83 @@ fn delegated_military_matches_ai_baseline_for_kanto() {
     // AI control, not that it reproduces the baseline's exact numbers.
     assert!(territory >= 50, "delegated 関東府 should hold a substantial fraction of the AI baseline's 101 regions, got {territory}");
     assert!(units >= 15, "delegated 関東府 should field a substantial fraction of the AI baseline's 32 units, got {units}");
-    assert!(munitions_final > 500.0, "delegated 関東府 should not be running a chronically insolvent war economy, got {munitions_final:.1} munitions");
+    // A defect fix to `distribute_supply`'s/`land_unit_supply_avail`'s
+    // non-owner branch (an occupier's demand used to be silently dropped
+    // from `compute_transport_flow` entirely - see `logistics`'s own module
+    // doc) re-measured this: 関東府's aggressive delegated expansion here
+    // holds ~100 occupied regions by day 720, and every one of them now
+    // actually draws its garrison's real Munitions upkeep from the national
+    // stock instead of a large share of that upkeep silently vanishing
+    // (the old "non-owner" projection read near-zero for most of them, so
+    // the stock was rarely taxed by holding conquered territory at all).
+    // Holding this much ground now costs what it should, so the national
+    // stock legitimately runs to zero and stays there while conquest
+    // continues faster than production - not a broken war economy, but an
+    // over-extended one, which is exactly what design.md §2 wants
+    // logistics to be able to do.
+    //
+    // The fixed `500.0` floor this assertion used to check went stale the
+    // instant that fix landed (it was measured against a war chest only a
+    // *bugged* pre-fix run could coast to - re-measured post-fix, the real
+    // all-AI baseline for this exact seed is itself ~0, not ~5516: see
+    // `run_ai_only_baseline_kanto` below). Widening it to
+    // `is_finite() && >= 0.0` made it worse, not better - a finite
+    // non-negative float is what `Faction::stock` already guarantees by
+    // construction (the `.max(0.0)` clamp in `logistics::distribute_supply`
+    // - see that module's own doc), so that check could not fail short of a
+    // NaN/overflow bug nothing here exercises. Two vacuous regression
+    // guards already sit in this repo's history for exactly this reason
+    // (CLAUDE.md "検証についての教訓") - this was becoming a third.
+    //
+    // Fixed the actual defect (a stale hardcoded number), not by loosening
+    // further: `run_ai_only_baseline_kanto` below runs the *exact same*
+    // seed/scenario under full `HeuristicAgent` control (no `HumanAgent`,
+    // no delegation, no replay) and measures its own day-720 Munitions
+    // fresh, every time this test runs, so the comparison below can never
+    // go stale the way a hardcoded number did twice already. "Same league"
+    // still means a wide band (docs/conventions.md/CLAUDE.md's own
+    // "許容幅は広く取る" - a threshold that trips on every balance/seed
+    // change is noise, not signal), not near-equality: the two runs are
+    // driven by structurally different code (a real `HeuristicAgent`
+    // directly vs. one wrapped in `HumanAgent`/`CompositeAgent`, on
+    // divergent 720-day histories - this test's own doc above has the full
+    // account of why) and are not expected to land on the same number, only
+    // the same rough scale.
+    //
+    // What this band is actually for, in both directions. Above the
+    // baseline: delegation failing to tax 関東府 the way full AI control
+    // does - a bug letting delegated units dodge their own Munitions upkeep
+    // leaves the delegated run hoarding stock far past what the very same
+    // seed's AI baseline ever reaches, even though the baseline itself may
+    // sit near zero. Below it: delegation collapsing a war economy that
+    // full AI control sustained, which is this test's original job (it
+    // began life as a hardcoded `> 500.0` floor) and the direction that
+    // goes unguarded if the band is written one-sided. Both sides matter,
+    // so the band is on the absolute difference; today both runs sit at
+    // 0.0 and the floor at zero happens to bound the low side anyway, but
+    // that is a property of the current balance, not something this
+    // assertion should quietly depend on.
+    // `SAME_LEAGUE_ABS_SLACK` is sized well above the spread this
+    // test's own development measurements produced across genuinely
+    // different delegated-military play styles, so ordinary variance across
+    // seeds/tuning passes should not trip it, while a mechanism that stops
+    // charging upkeep at all - draining nothing for ~100 occupied regions
+    // across 720 days - overshoots it by an order of magnitude. Confirmed
+    // both directions (trips on a real leak, stays quiet on none) - see this
+    // test's own "Confirmed the Munitions same-league assertion below can
+    // actually fail" doc above for the exact numbers.
+    const SAME_LEAGUE_ABS_SLACK: f32 = 2000.0;
+    assert!(
+        munitions_final.is_finite() && munitions_final >= 0.0,
+        "national Munitions stock must never go negative or non-finite, however hard an over-extended \
+         conquest draws it down: got {munitions_final}"
+    );
+    assert!(
+        (munitions_final - ai_baseline_munitions).abs() <= SAME_LEAGUE_ABS_SLACK,
+        "delegated 関東府's final Munitions stock should stay in the same league as this exact seed's \
+         freshly-measured all-AI baseline ({ai_baseline_munitions:.1}) - far above it means the delegated path is \
+         escaping Munitions upkeep full AI control still pays, far below it means delegation collapsed a war \
+         economy full AI control sustained: delegated={munitions_final:.1}, \
+         baseline={ai_baseline_munitions:.1}, allowed slack={SAME_LEAGUE_ABS_SLACK}"
+    );
 }

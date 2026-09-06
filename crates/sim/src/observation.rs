@@ -7,6 +7,9 @@ use crate::diplomacy::Treaty;
 use crate::good::GOOD_COUNT;
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::logistics;
+use crate::naval;
+use crate::transport::TransportNodeKind;
 use crate::world::{Station, World};
 
 /// Per-region field count in `Observation::encode()`: `[owned, population,
@@ -35,25 +38,79 @@ pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2;
 /// when there's no pending proposal in that direction.
 pub const DIPLOMACY_FIELD_COUNT: usize = 9;
 
+/// Stage 9D (docs/phase9-spec.md "4. 観測ベクトル": "路線ごとに出す... 少なく
+/// とも `capacity` / `condition` / 現在の流量 / 自勢力が使えるか"): per-line
+/// field count in `Observation::encode()`, in `world.transport_lines` order
+/// (`ids::TransportLineId`) - `[capacity, condition, flow, usable_by_self]`.
+/// `capacity` is the line's raw declared `Capacity` (before `condition`/
+/// devastation scale it down - a consumer that wants the current ceiling
+/// multiplies the two fields itself, the same way `TransportLine::
+/// effective_capacity` does internally); `flow` is this tick's committed
+/// throughput in both directions combined (`logistics::
+/// transport_line_flows`); `usable_by_self` is `1.0` only when *both*
+/// endpoint regions currently belong to the observing faction - the same
+/// same-owner gate `logistics::compute_transport_flow` itself enforces
+/// before a line can carry any flow at all, so this tells an agent, without
+/// re-deriving it, whether flow reading `0.0` here means "cut/contested" or
+/// "not even yours to route across".
+pub const TRANSPORT_LINE_FIELD_COUNT: usize = 4;
+
+/// Stage 9D (docs/phase9-spec.md "4. 観測ベクトル": "ノードについても封鎖・
+/// 所属を出す"): per-node field count, in `world.transport_nodes` order
+/// (`ids::TransportNodeId`) - `[owned_by_self, blockaded]`. `owned_by_self`
+/// mirrors the per-region "owned" flag's own convention (`encode`'s per-
+/// region loop); `blockaded` is `naval::is_port_blockaded` for the node's
+/// own region - `false` for every non-`Port` node and for an unblockaded
+/// port, never a distinct "not applicable" encoding, since a consumer that
+/// doesn't already know this node's `TransportNodeKind` (not itself part of
+/// this numeric vector - see this field's own doc for why kind isn't
+/// encoded per-line either) gains nothing from a third state here.
+pub const TRANSPORT_NODE_FIELD_COUNT: usize = 2;
+
 /// `Observation::encode()`'s output length for a scenario with the given
-/// region/sea-zone/faction counts - the general form of `ENCODING_LEN`
-/// below. Stage 6A (docs/phase6-spec.md "Stage 6A"): scenario data is no
-/// longer fixed at compile time (`--scenario` can load a differently-sized
-/// map), so `encode()` itself computes its expected length this way rather
-/// than trusting the compile-time `ENCODING_LEN` constant, which only ever
-/// describes the embedded default scenario.
-pub const fn encoding_len(region_count: usize, sea_zone_count: usize, faction_count: usize) -> usize {
-    region_count * REGION_FIELD_COUNT + sea_zone_count * SEA_ZONE_FIELD_COUNT + FACTION_FIELD_COUNT + faction_count * DIPLOMACY_FIELD_COUNT
+/// region/sea-zone/faction/transport-line/transport-node counts - the
+/// general form of `ENCODING_LEN` below. Stage 6A (docs/phase6-spec.md
+/// "Stage 6A"): scenario data is no longer fixed at compile time
+/// (`--scenario` can load a differently-sized map), so `encode()` itself
+/// computes its expected length this way rather than trusting the
+/// compile-time `ENCODING_LEN` constant, which only ever describes the
+/// embedded default scenario.
+pub const fn encoding_len(
+    region_count: usize,
+    sea_zone_count: usize,
+    faction_count: usize,
+    transport_line_count: usize,
+    transport_node_count: usize,
+) -> usize {
+    region_count * REGION_FIELD_COUNT
+        + sea_zone_count * SEA_ZONE_FIELD_COUNT
+        + FACTION_FIELD_COUNT
+        + faction_count * DIPLOMACY_FIELD_COUNT
+        + transport_line_count * TRANSPORT_LINE_FIELD_COUNT
+        + transport_node_count * TRANSPORT_NODE_FIELD_COUNT
 }
 
 /// Fixed total length of `Observation::encode()`'s output for the embedded
 /// default scenario (`scenario::REGION_COUNT` regions,
 /// `scenario::SEA_ZONE_COUNT` sea zones, `scenario::FACTION_COUNT`
-/// factions) - i.e. `scenarios/mvp.json`. A `--scenario`-loaded world with
+/// factions, `scenario::TRANSPORT_LINE_COUNT`/`TRANSPORT_NODE_COUNT` transport
+/// lines/nodes) - i.e. `scenarios/mvp.json`. A `--scenario`-loaded world with
 /// different counts has a different real length; compute it with
 /// `encoding_len` from that world's actual sizes instead of assuming this
 /// constant, the same way `encode()` itself does.
-pub const ENCODING_LEN: usize = encoding_len(crate::scenario::REGION_COUNT, crate::scenario::SEA_ZONE_COUNT, crate::scenario::FACTION_COUNT);
+///
+/// Stage 9D grew this length (docs/phase9-spec.md "4. 観測ベクトル":
+/// "観測長は伸びる...保存済みの方策は無効になる。これは受け入れる") - a
+/// policy trained against the pre-Stage-9D length is no longer valid; `GET
+/// /schema`'s `observation.length` is what a live client should read
+/// instead of assuming this constant never moves.
+pub const ENCODING_LEN: usize = encoding_len(
+    crate::scenario::REGION_COUNT,
+    crate::scenario::SEA_ZONE_COUNT,
+    crate::scenario::FACTION_COUNT,
+    crate::scenario::TRANSPORT_LINE_COUNT,
+    crate::scenario::TRANSPORT_NODE_COUNT,
+);
 
 pub struct Observation<'a> {
     pub faction: FactionId,
@@ -248,7 +305,13 @@ impl<'a> Observation<'a> {
     /// import volume and per-node supply throughput cap
     /// (`trade::tick_imports`, `Region::node_throughput`).
     pub fn encode(&self) -> Vec<f32> {
-        let expected_len = encoding_len(self.world.regions.len(), self.world.sea_zones.len(), self.world.factions.len());
+        let expected_len = encoding_len(
+            self.world.regions.len(),
+            self.world.sea_zones.len(),
+            self.world.factions.len(),
+            self.world.transport_lines.len(),
+            self.world.transport_nodes.len(),
+        );
         let mut out = Vec::with_capacity(expected_len);
         let (region_power, zone_power) = self.power_tables();
         for region in &self.world.regions {
@@ -319,6 +382,49 @@ impl<'a> Observation<'a> {
             let outgoing = dip.pending.iter().find(|p| p.from == self.faction && p.to == other);
             out.push(if outgoing.is_some() { 1.0 } else { 0.0 });
             out.push(outgoing.map(|p| p.treaty.index() as f32).unwrap_or(-1.0));
+        }
+
+        // Stage 9D (docs/phase9-spec.md "4. 観測ベクトル"): the transport
+        // network itself, one `TRANSPORT_LINE_FIELD_COUNT` block per line in
+        // `world.transport_lines` order, then one `TRANSPORT_NODE_FIELD_COUNT`
+        // block per node in `world.transport_nodes` order - see those two
+        // constants' own docs for exactly what each field means.
+        let flows = logistics::transport_line_flows(self.world);
+        for (line, &flow) in self.world.transport_lines.iter().zip(flows.iter()) {
+            let ra = self.world.transport_node(line.from).region;
+            let rb = self.world.transport_node(line.to).region;
+            // `codex review` (P2): this used to test plain ownership of both
+            // endpoints, which contradicts the simulator for exactly the
+            // case Stage 9D's occupier-supply fix introduced - a faction
+            // that *occupies* both ends without owning them does haul supply
+            // over the line (`TransportGraph::line_eligible_for` keys off
+            // `controlled`, which is ownership **or** having live units
+            // there), so reporting `0.0` would teach an RL or API consumer
+            // that a line currently carrying its own supply is unusable.
+            // Same rule as the flow model, not a second one that can drift.
+            let controls = |r| {
+                self.world.region(r).owner == self.faction
+                    || self.world.units.iter().any(|u| u.alive && u.owner == self.faction && u.station.region() == Some(r))
+            };
+            let usable = controls(ra) && controls(rb);
+            out.push(line.capacity.get());
+            out.push(line.condition.get());
+            out.push(flow);
+            out.push(if usable { 1.0 } else { 0.0 });
+        }
+        for node in &self.world.transport_nodes {
+            out.push(if self.world.region(node.region).owner == self.faction { 1.0 } else { 0.0 });
+            // `naval::is_port_blockaded` only ever asks a *region's*
+            // question ("is this region's port(s) blockaded"), so calling
+            // it for every node regardless of kind reported every Depot and
+            // Junction sharing a blockaded region's territory as blockaded
+            // too - wrong on every scenario shipped, since every `mvp.json`
+            // region carries both a depot and a port. Gated on the node
+            // actually being a `Port`, matching this field's own doc above
+            // ("`false` for every non-`Port` node").
+            let blockaded =
+                node.kind == TransportNodeKind::Port && naval::is_port_blockaded(self.world, node.region);
+            out.push(if blockaded { 1.0 } else { 0.0 });
         }
 
         debug_assert_eq!(out.len(), expected_len);

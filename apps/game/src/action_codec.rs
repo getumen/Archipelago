@@ -30,7 +30,7 @@ use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm};
 use archipelago_sim::focus::NationalFocus;
 use archipelago_sim::good::{Good, ALL_GOODS};
-use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, UnitId};
 use archipelago_sim::json::{self, Value};
 use archipelago_sim::world::{Domain, Station};
 
@@ -104,6 +104,7 @@ fn project_to_value(p: Project) -> Value {
         Project::Port => Value::str("port"),
         Project::Repair => Value::str("repair"),
         Project::Capacity(good) => Value::obj(vec![("capacity", Value::str(good_key(good)))]),
+        Project::TransportLine(line) => Value::obj(vec![("transport_line", Value::num(line.0 as f64))]),
     }
 }
 
@@ -115,11 +116,15 @@ fn project_from_value(v: &Value) -> Result<Project, String> {
             "repair" => Ok(Project::Repair),
             other => Err(format!("unknown project `{other}`")),
         },
-        Value::Object(_) => {
+        Value::Object(_) if v.get("capacity").is_some() => {
             let good_key = v.get("capacity").and_then(Value::as_str).ok_or("expected `capacity` to name a good")?;
             Ok(Project::Capacity(good_from_key(good_key).ok_or_else(|| format!("unknown good `{good_key}`"))?))
         }
-        _ => Err("project must be a string or {\"capacity\":<good>}".to_string()),
+        Value::Object(_) if v.get("transport_line").is_some() => {
+            let line = v.get("transport_line").and_then(Value::as_u32).ok_or("expected integer `transport_line`")?;
+            Ok(Project::TransportLine(TransportLineId(line)))
+        }
+        _ => Err("project must be a string, {\"capacity\":<good>}, or {\"transport_line\":<id>}".to_string()),
     }
 }
 
@@ -219,6 +224,9 @@ pub fn action_to_value(action: &Action) -> Value {
             ("accept", Value::Bool(accept)),
             ("terms", Value::arr(terms.into_iter().map(treaty_term_to_value).collect())),
         ]),
+        Action::InterdictLine { line } => {
+            Value::obj(vec![("type", Value::str("interdict_line")), ("line", Value::num(line.0 as f64))])
+        }
     }
 }
 
@@ -308,6 +316,7 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             }
             Ok(Action::RespondToNaturalLanguageProposal { from, terms, accept })
         }
+        "interdict_line" => Ok(Action::InterdictLine { line: TransportLineId(u32_field("line")?) }),
         other => Err(format!("unknown action type `{other}`")),
     }
 }
@@ -326,6 +335,9 @@ pub fn action_error_ja(e: ActionError) -> &'static str {
         ActionError::AlreadyBuilding => "この地域はすでに建設中",
         ActionError::NoConstruction => "この地域に建設中の工事がない",
         ActionError::NoPort => "この地域に港湾がない",
+        ActionError::InvalidLine => "指定した輸送路線が存在しない",
+        ActionError::LineNotOwned => "自国の輸送路線ではない",
+        ActionError::LineNotHostile => "交戦中の敵の輸送路線ではない",
     }
 }
 
@@ -494,6 +506,8 @@ mod tests {
                 terms: vec![TreatyTerm::Sign(Treaty::PortAccess), TreatyTerm::Deliver { good: Good::Steel, amount: 3.0 }],
                 accept: true,
             },
+            Action::InterdictLine { line: archipelago_sim::ids::TransportLineId(4) },
+            Action::Build { region: RegionId(2), project: Project::TransportLine(archipelago_sim::ids::TransportLineId(4)) },
         ];
         for action in samples {
             let value = action_to_value(&action);

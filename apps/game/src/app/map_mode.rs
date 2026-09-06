@@ -213,9 +213,11 @@ pub(super) struct ModeLegendRow(pub usize);
 pub(super) struct ModeLegendHeader;
 
 /// How many `ModeLegendRow` slots `setup::spawn_legend` pre-spawns - the
-/// largest `legend_entries` list any mode actually needs (`Industry`'s six
-/// goods, tied with `Supply`'s six existing rows).
-pub(super) const MODE_LEGEND_ROWS: usize = 6;
+/// largest `legend_entries` list any mode actually needs. `Industry`'s six
+/// goods used to tie with `Supply`'s own six rows; Stage 9D added a seventh
+/// `Supply` row (`overlay::COLOR_LINE_CUT`, distinguishing a severed route
+/// from a merely idle one), so `Supply` alone now sets this bound.
+pub(super) const MODE_LEGEND_ROWS: usize = 7;
 
 /// Fixed, categorical terrain palette - deliberately earthy/desaturated
 /// (never a fully-saturated primary the way `palette::faction_color` is),
@@ -430,7 +432,7 @@ pub(super) fn legend_header(mode: MapMode, active_good: Good) -> String {
         MapMode::Population => "人口の分布（現状から自動区分）".to_string(),
         MapMode::Industry => format!("{}：明るさ=実効生産力", active_good.label()),
         MapMode::Unrest => "不穏度と戦災、悪い方を表示".to_string(),
-        MapMode::Supply => "供給路と詰まり箇所（旧Lキー表示）".to_string(),
+        MapMode::Supply => "輸送網：太さ/色=流量、赤=飽和、暗赤=遮断".to_string(),
     }
 }
 
@@ -489,7 +491,8 @@ pub(super) fn legend_entries(mode: MapMode, world: &SimWorld, active_good: Good)
             (UNREST_ALARM, "高い（不穏・荒廃）".to_string(), false),
         ],
         MapMode::Supply => vec![
-            (super::overlay::COLOR_CHOKEPOINT, "chokepoint（飽和）".to_string(), false),
+            (super::overlay::COLOR_CHOKEPOINT, "chokepoint（飽和・太い線）".to_string(), false),
+            (super::overlay::COLOR_LINE_CUT, "遮断（輸送不能）".to_string(), false),
             (super::overlay::COLOR_ACTIVE_ROUTE, "active route".to_string(), false),
             (super::overlay::COLOR_RELAY_FULL, "relay route（余力あり）".to_string(), false),
             (super::overlay::RING_STARVED, "ring: starved".to_string(), false),

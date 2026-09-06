@@ -85,8 +85,8 @@ use super::map_mode::{MapMode, MapModeRes};
 use super::palette::Unit01;
 use super::setup::{link_style, Z_LINK, Z_LINK_CHOKEPOINT, Z_LINK_HIGHLIGHT};
 use super::{
-    BlockadeVisual, ChokepointMarker, ConstructionMarker, LinkVisualMarker, MainCamera,
-    RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion, SelectedSeaZone, SimRes,
+    BlockadeVisual, ChokepointMarker, ConstructionMarker, CutLineMarker, LinkVisualMarker,
+    MainCamera, RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion, SelectedSeaZone, SimRes,
     SupplyRingMarker,
 };
 
@@ -114,6 +114,29 @@ pub(super) const COLOR_RELAY_FULL: Color = Color::srgb(0.35, 0.85, 0.35);
 /// A same-owner link whose source can't currently relay at all (contested)
 /// - present in the graph but structurally inert this instant.
 const COLOR_RELAY_DEAD: Color = Color::srgb(0.30, 0.30, 0.33);
+/// Stage 9D (docs/phase9-spec.md "5. クライアント": "遮断されている路線を区別
+/// する"): every real `transport::TransportLine` between this region pair
+/// has dropped to (essentially) zero effective capacity - a route severed by
+/// `Action::InterdictLine`, sustained war damage, or devastation, as opposed
+/// to `COLOR_RELAY_DEAD` (no transport line connects this pair at all) or a
+/// merely idle-but-healthy one (`COLOR_RELAY_LOW`). A burnt copper/rust,
+/// deliberately in the same "this route is a problem" warm-red family as
+/// `COLOR_CHOKEPOINT` but shifted toward orange and away from its piercing
+/// saturation, so the two read as related-but-distinct severities on the map
+/// (a chokepoint is still carrying everything it can; a cut line is
+/// carrying nothing) without either vanishing into the other. Bright enough
+/// to double as this mode's own legend *text* color (`map_mode::
+/// sync_mode_legend` colors a row's label with its swatch directly) -
+/// confirmed by screenshot: an earlier, much darker candidate
+/// (`srgb(0.32, 0.04, 0.04)`) read fine as a map line but was nearly
+/// illegible as a legend row's label text against the panel's near-black
+/// background.
+pub(super) const COLOR_LINE_CUT: Color = Color::srgb(0.80, 0.35, 0.10);
+/// How small a link's own summed `LinkThroughput::capacity()` has to be to
+/// count as "cut" rather than merely "very constrained" - guards against
+/// float noise in the flow allocation, the same role `SATURATION_EPSILON`
+/// plays for the opposite (saturated) extreme.
+const CUT_EPSILON: f32 = 1e-3;
 
 /// The supply ring's low-fulfillment end - a warm rose, not pure red
 /// (`COLOR_CHOKEPOINT` already owns pure red for this overlay's single most
@@ -193,6 +216,11 @@ fn ring_color(route: &SupplyRegionRoute, node_throughput: f32) -> Color {
 type ChokepointMarkerQuery = (&'static ChokepointMarker, &'static mut Visibility, &'static mut Transform);
 type ChokepointMarkerFilter = (Without<LinkVisualMarker>, Without<SupplyRingMarker>);
 
+/// The `CutLineMarker` counterpart of `ChokepointMarkerQuery`/`ChokepointMarkerFilter`
+/// above - same reasoning, same shape, a different marker component.
+type CutMarkerQuery = (&'static CutLineMarker, &'static mut Visibility, &'static mut Transform);
+type CutMarkerFilter = (Without<LinkVisualMarker>, Without<SupplyRingMarker>, Without<ChokepointMarker>);
+
 /// `sync_blockade_visuals`'s change-detection cache (External code review
 /// fix A2), factored out for the same reason as `ChokepointMarkerQuery`
 /// above (clippy's `type_complexity`): the exact state - `naval::
@@ -201,13 +229,14 @@ type ChokepointMarkerFilter = (Without<LinkVisualMarker>, Without<SupplyRingMark
 type BlockadeVisualState = (Vec<PortBlockade>, (Option<RegionId>, Option<SeaZoneId>));
 
 /// Recolors every region's supply ring and every same-owner link's
-/// geometry, shows/hides the rings and the chokepoint markers, and rescales
-/// each chokepoint marker to the camera's current zoom, while
-/// `MapMode::Supply` is the active map mode (docs/phase7-spec.md "1. 補給網
-/// の可視化", now reached via `M` instead of a standalone `L` toggle - see
-/// `map_mode`'s own module doc). See this module's own doc ("Visual
+/// geometry, shows/hides the rings, chokepoint markers and (Stage 9D)
+/// cut-line markers, and rescales each marker to the camera's current zoom,
+/// while `MapMode::Supply` is the active map mode (docs/phase7-spec.md "1.
+/// 補給網の可視化", now reached via `M` instead of a standalone `L` toggle -
+/// see `map_mode`'s own module doc). See this module's own doc ("Visual
 /// hierarchy") for why the chokepoint marker's scale is tied to the camera
-/// at all.
+/// at all - `CutLineMarker` needs the exact same treatment for the exact
+/// same reason.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sync_supply_overlay(
     sim: Res<SimRes>,
@@ -224,6 +253,7 @@ pub(super) fn sync_supply_overlay(
     // shared `&mut Visibility`/`&mut Transform` writes against `rings`/
     // `links` above panic as B0001 at startup.
     mut chokepoints: Query<'_, '_, ChokepointMarkerQuery, ChokepointMarkerFilter>,
+    mut cut_markers: Query<'_, '_, CutMarkerQuery, CutMarkerFilter>,
     camera: Query<&Projection, With<MainCamera>>,
 ) {
     let world = sim.0.world();
@@ -247,6 +277,9 @@ pub(super) fn sync_supply_overlay(
         for (_, mut visibility, _) in &mut chokepoints {
             *visibility = Visibility::Hidden;
         }
+        for (_, mut visibility, _) in &mut cut_markers {
+            *visibility = Visibility::Hidden;
+        }
         return;
     }
 
@@ -268,6 +301,10 @@ pub(super) fn sync_supply_overlay(
     // twice (the marker's `(a, b)` always matches its link's, since
     // `setup::setup` pre-spawns both from the same loop iteration).
     let mut chokepoint_pairs: BTreeMap<(RegionId, RegionId), bool> = BTreeMap::new();
+    // Same shape as `chokepoint_pairs`, for `CutLineMarker` below - "is this
+    // link cut right now", computed once here and reused rather than
+    // recomputed in the marker loop.
+    let mut cut_pairs: BTreeMap<(RegionId, RegionId), bool> = BTreeMap::new();
 
     for (marker, material_handle, mut transform) in &mut links {
         let a = marker.a;
@@ -297,8 +334,20 @@ pub(super) fn sync_supply_overlay(
             chokepoint_pairs.insert((a, b), is_chokepoint);
             let is_active_route = routes.get(&b).map(|r| r.source) == Some(SupplySource::Relay(a))
                 || routes.get(&a).map(|r| r.source) == Some(SupplySource::Relay(b));
+            // Stage 9D: a line present in the graph (so not `COLOR_RELAY_DEAD`
+            // below - that means "no transport line connects this pair at
+            // all") whose own summed capacity has dropped to (essentially)
+            // zero - severed rather than merely idle. Every `TransportLine`
+            // between this pair has to be this reduced (`supply_link_flows`
+            // sums every line's capacity for the pair), not just one of
+            // several parallel routes, so this never fires while a healthy
+            // alternate route still keeps the pair usable.
+            let is_cut = flow_ab.is_some_and(|t| t.capacity() <= CUT_EPSILON) || flow_ba.is_some_and(|t| t.capacity() <= CUT_EPSILON);
+            cut_pairs.insert((a, b), is_cut);
             if is_chokepoint {
                 (COLOR_CHOKEPOINT, Z_LINK_CHOKEPOINT, CHOKEPOINT_SCALE)
+            } else if is_cut {
+                (COLOR_LINE_CUT, Z_LINK_HIGHLIGHT, 1.0)
             } else if is_active_route {
                 (COLOR_ACTIVE_ROUTE, Z_LINK_HIGHLIGHT, 1.0)
             } else if let (None, None) = (flow_ab, flow_ba) {
@@ -330,6 +379,11 @@ pub(super) fn sync_supply_overlay(
     for (marker, mut visibility, mut transform) in &mut chokepoints {
         let is_chokepoint = chokepoint_pairs.get(&(marker.a, marker.b)).copied().unwrap_or(false);
         *visibility = if is_chokepoint { Visibility::Visible } else { Visibility::Hidden };
+        transform.scale = Vec3::splat(zoom);
+    }
+    for (marker, mut visibility, mut transform) in &mut cut_markers {
+        let is_cut = cut_pairs.get(&(marker.a, marker.b)).copied().unwrap_or(false);
+        *visibility = if is_cut { Visibility::Visible } else { Visibility::Hidden };
         transform.scale = Vec3::splat(zoom);
     }
 }

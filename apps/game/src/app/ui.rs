@@ -174,6 +174,7 @@ fn project_label(project: Project) -> String {
         Project::Port => "港湾建設".to_string(),
         Project::Capacity(good) => format!("{}生産設備建設", good.label()),
         Project::Repair => "修復".to_string(),
+        Project::TransportLine(_) => "輸送路線修復".to_string(),
     }
 }
 

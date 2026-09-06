@@ -598,7 +598,51 @@ pub struct World {
     /// independent-of-demand capacity figure (`node_throughput_limits_supply`
     /// is the one place that mattered) was re-examined for Stage 9B - see
     /// that test's own doc for how it was adapted.
+    ///
+    /// Always `supply_by_faction[r][regions[r].owner.index()]` - kept as its
+    /// own field rather than computed on every read since it is the one
+    /// entry almost every reader outside `logistics`/`naval` themselves ever
+    /// wants (JSON/observation export, the API, the headless report, a
+    /// fleet's own facing-port lookup).
     pub supply: Vec<f32>,
+    /// The same Munitions+Arms throughput, indexed by `[RegionId][FactionId]`
+    /// rather than `RegionId` alone - the post-Stage-9B-fix generalization
+    /// that lets a faction's demand be met even in a region it does not own.
+    /// `supply[r]` is this region's own owner's entry; every other faction's
+    /// entry here is `0.0` unless that faction has alive units physically
+    /// standing in `r` (an occupier mid-invasion, before
+    /// `military::tick_occupation` flips `Region::owner`) - see
+    /// `logistics::compute_transport_flow`'s own doc, "Which lines an
+    /// occupier may use", for how that demand is routed. Read by
+    /// `logistics::distribute_supply`'s and `logistics::land_unit_supply_avail`'s
+    /// non-owner branches in place of the pre-fix `0.4 * a neighbor's
+    /// world.supply` projection, which read near-zero whenever that neighbor
+    /// happened to have no units of its own to draw the figure up regardless
+    /// of how much the network could actually carry.
+    pub supply_by_faction: Vec<Vec<f32>>,
+    /// A structural "what could the network deliver here" figure, indexed
+    /// like `supply_by_faction` but independent of `region_demand` - the
+    /// widest-path (max-min-capacity) source capacity `logistics::
+    /// compute_port_source_capacity` finds reaching each `Port` transport
+    /// node from that faction's own production/import, over the same
+    /// eligible lines `compute_transport_flow` uses (`0.0` for a region with
+    /// no `Port` node, or for a faction that cannot reach one). Meaningful
+    /// only at regions with a port - `naval::best_facing_port_supply`'s sole
+    /// reader.
+    ///
+    /// This exists because `supply`/`supply_by_faction` answer "what
+    /// actually flowed to this region's own *land* demand" - `0.0` for a
+    /// healthy, fully-connected port with no land unit garrisoned there,
+    /// since `compute_transport_flow` never creates a demand candidate for a
+    /// region with none. A fleet facing exactly such a port used to read
+    /// that same `0.0` and be judged unreachable regardless of how much
+    /// capacity the network actually carried - the third sibling of the
+    /// occupier-supply defect `supply_by_faction`'s own doc already
+    /// explains two fixes for (`distribute_supply`'s and `land_unit_supply_
+    /// avail`'s non-owner branches): another unmigrated reader answering a
+    /// "what flowed to a specific demander" question, asked in a context
+    /// that actually wanted "what the network can carry" instead.
+    pub port_capacity: Vec<Vec<f32>>,
     /// Stage 2D (docs/phase2-spec.md "海域"): the map's sea zones, separate
     /// from the region graph.
     pub sea_zones: Vec<SeaZone>,
@@ -781,6 +825,10 @@ impl World {
 
     pub fn transport_node(&self, id: crate::ids::TransportNodeId) -> &TransportNode {
         &self.transport_nodes[id.index()]
+    }
+
+    pub fn transport_line(&self, id: crate::ids::TransportLineId) -> &TransportLine {
+        &self.transport_lines[id.index()]
     }
 
     /// The first (lowest `TransportNodeId`, so this is deterministic even if

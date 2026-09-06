@@ -3,17 +3,18 @@
 
 use crate::balance::{
     CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS,
-    IMPORT_PLAN_RATE_MAX, NL_PROPOSAL_TEXT_MAX_CHARS, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
-    UNIT_START_ORG_RATIO,
+    IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_TEXT_MAX_CHARS, UNIT_EQUIPMENT,
+    UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
 use crate::focus::{self, NationalFocus};
 use crate::good::Good;
-use crate::ids::{FactionId, RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, TransportLineId, UnitId};
 use crate::logistics;
 use crate::military::{fleet_move_required, move_required, Movement, Unit};
 use crate::naval;
+use crate::transport::Condition;
 use crate::world::{Domain, Station, World};
 
 /// Stage 4B (docs/phase4-spec.md "Stage 4B"): `RespondToNaturalLanguageProposal`
@@ -100,6 +101,17 @@ pub enum Action {
     /// see `diplomacy::apply_treaty_terms` - so an interpretation that says
     /// "accept" can still produce no change at all.
     RespondToNaturalLanguageProposal { from: FactionId, terms: Vec<TreatyTerm>, accept: bool },
+    /// Stage 9D (docs/phase9-spec.md "4. 行動": "路線の遮断・復旧に関わる行動"):
+    /// a deliberate strike against one route of the transport network
+    /// (`crate::transport`), lowering its `Condition` by
+    /// `balance::LINE_INTERDICTION_DAMAGE` outright rather than waiting on
+    /// `transport::tick_transport_condition`'s passive contested-region
+    /// damage. Only valid against a line owned entirely by a faction this
+    /// one is currently at war with (`apply_interdict_line`'s own doc) - the
+    /// repair counterpart lives on `Build`'s own `Project::TransportLine`
+    /// instead, since restoring a route is funded, gradual infrastructure
+    /// work, not a one-shot strike.
+    InterdictLine { line: TransportLineId },
 }
 
 /// One of the four decision domains every `Action` belongs to (design.md
@@ -204,7 +216,17 @@ impl Action {
             | Action::HoldUnit { .. }
             | Action::DisbandUnit { .. }
             | Action::ReinforceUnit { .. }
-            | Action::RecruitUnit { .. } => Layer::Military,
+            | Action::RecruitUnit { .. }
+            // `InterdictLine` (Stage 9D): a wartime strike against the
+            // enemy's own capability, the same category `RecruitUnit`
+            // itself argues for above ("inseparable from the other
+            // force-structure actions") - this is inseparable from the
+            // rest of conducting the war, not a standing economic policy
+            // (`Economy`'s own boundary is national resource *policy*,
+            // which this isn't: it's a one-shot combat-like act against a
+            // specific enemy target, the same shape `MoveUnit` into
+            // contact already has).
+            | Action::InterdictLine { .. } => Layer::Military,
 
             Action::SetConscription(_)
             | Action::SetCivilianRation(_)
@@ -263,7 +285,8 @@ impl Action {
             | Action::DeclareWar { .. }
             | Action::BreakTreaty { .. }
             | Action::ProposeInNaturalLanguage { .. }
-            | Action::RespondToNaturalLanguageProposal { .. } => None,
+            | Action::RespondToNaturalLanguageProposal { .. }
+            | Action::InterdictLine { .. } => None,
         }
     }
 }
@@ -286,6 +309,19 @@ pub enum ActionError {
     /// Stage 2D: `Action::RecruitUnit { domain: Domain::Sea, .. }` against a
     /// region with no port (or, in principle, no facing sea zone at all).
     NoPort,
+    /// Stage 9D: `Action::InterdictLine`/`Action::Build`'s
+    /// `Project::TransportLine` named a `TransportLineId` past the end of
+    /// `World::transport_lines` - no such route exists.
+    InvalidLine,
+    /// Stage 9D: `Action::Build`'s `Project::TransportLine` named a line
+    /// with an endpoint this faction doesn't own - only a faction's own
+    /// route can be invested in.
+    LineNotOwned,
+    /// Stage 9D: `Action::InterdictLine` named a line that isn't owned
+    /// entirely by a single faction this one is currently at war with (a
+    /// line with mixed ownership, one owned by the acting faction itself,
+    /// or one whose owner isn't a current war opponent).
+    LineNotHostile,
 }
 
 pub fn apply_action(
@@ -320,6 +356,7 @@ pub fn apply_action(
         Action::RespondToNaturalLanguageProposal { from, terms, accept } => {
             apply_respond_nl(world, faction, from, terms, accept)
         }
+        Action::InterdictLine { line } => apply_interdict_line(world, faction, line),
     }
 }
 
@@ -581,7 +618,38 @@ fn apply_reinforce(
         unit.arms_delivery_station = unit.station;
     }
 
+    // Stage 9D fix (docs/conventions.md §6's "状態には必ず回復経路を持たせる"):
+    // unlike equipment (gated above by `arms_budget`, itself derived from
+    // the transport network), manpower reinforcement used to refill
+    // straight from the faction's national manpower pool with no reference
+    // to the network at all. `military::tick_recovery`'s own attrition
+    // (`ATTRITION_MANPOWER`, driven by `unit.supply`) is the recovery path
+    // that is supposed to eventually stand down a unit stranded beyond
+    // every supply route - but an unconstrained manpower refill here undid
+    // every tick's attrition loss the moment `strength()` dipped low enough
+    // to trigger `HeuristicAgent::reinforce_weak_units`, well before manpower
+    // ever neared `UNIT_DEATH_MANPOWER`, forever. Measured on
+    // `scenarios/japan47.json` seed 1: several factions read `supply_ratio
+    // == 0.0` with hundreds of units of *national* Munitions stock never
+    // reaching their own cut-off fronts, and the same disconnect applies to
+    // manpower - a conscript can no more march down a severed line than a
+    // shell can ride one. Gated on the same reachability question
+    // `instantaneous_arms_delivery`/`instantaneous_fleet_arms_delivery`
+    // already ask for equipment (extracted as `land_unit_supply_avail`/
+    // `naval::fleet_unit_supply_avail` so both can share it) - a binary
+    // "does the network deliver anything at all to this unit's current
+    // station", not a ratio, so repeated `ReinforceUnit` actions in one
+    // batch can't compound past what an already-connected front could
+    // deliver today (nothing changes there at all: `network_reachable` is
+    // simply `true`). Once it reads `false`, manpower stops being an
+    // avenue back to full strength and `tick_recovery`'s attrition is left
+    // to run its course - the recovery path this project's own convention
+    // requires.
     let unit = world.unit(unit_id);
+    let network_reachable = match unit.station.domain() {
+        Domain::Land => logistics::land_unit_supply_avail(world, unit_id) > 0.0,
+        Domain::Sea => naval::fleet_unit_supply_avail(world, unit_id) > 0.0,
+    };
     let need_manpower = (UNIT_MANPOWER - unit.manpower).max(0.0);
     let need_equipment = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
     // External code review fix (Stage 2C): `arms_budget` is a real
@@ -593,7 +661,7 @@ fn apply_reinforce(
     let deliverable_equipment = need_equipment.min(unit.arms_budget.max(0.0));
 
     let f = world.faction(faction);
-    let fill_manpower = need_manpower.min(f.manpower);
+    let fill_manpower = if network_reachable { need_manpower.min(f.manpower) } else { 0.0 };
     let fill_equipment = deliverable_equipment.min(f.stock[Good::Arms.index()]);
 
     world.faction_mut(faction).manpower -= fill_manpower;
@@ -695,6 +763,25 @@ fn apply_build(
     }
     if region.construction.is_some() {
         return Err(ActionError::AlreadyBuilding);
+    }
+
+    // Stage 9D (docs/phase9-spec.md "4. 行動"): a `Project::TransportLine`
+    // must be hosted at one of its own two endpoint regions - so an agent
+    // can't invest a distant region's Machinery/Steel into an unrelated
+    // route - and the line must be entirely this faction's own (both
+    // endpoints), the same "own network only" boundary
+    // `logistics::compute_transport_flow` itself enforces for whether a
+    // line is usable at all.
+    if let Project::TransportLine(line_id) = project {
+        let line = world.transport_lines.get(line_id.index()).ok_or(ActionError::InvalidLine)?;
+        let ra = world.transport_node(line.from).region;
+        let rb = world.transport_node(line.to).region;
+        if region_id != ra && region_id != rb {
+            return Err(ActionError::InvalidValue);
+        }
+        if world.region(ra).owner != faction || world.region(rb).owner != faction {
+            return Err(ActionError::LineNotOwned);
+        }
     }
 
     world.region_mut(region_id).construction = Some(Construction {
@@ -935,6 +1022,39 @@ fn apply_propose_nl(
 /// `apply_accept_treaty`/`apply_reject_treaty` already use for `pending`.
 /// Whether the deal actually takes effect is entirely
 /// `diplomacy::apply_treaty_terms`'s call, not this function's - see its doc.
+/// `Action::InterdictLine` (docs/phase9-spec.md "4. 行動"). Valid only
+/// against a line owned entirely by one other faction (both endpoint
+/// regions share the same owner, distinct from `faction`) that `faction` is
+/// currently at war with — a line straddling two different owners (a
+/// contested front) or already fully this faction's own is rejected, the
+/// same way `apply_declare_war`/`apply_break_treaty` reject a target that
+/// isn't in the state their action assumes. No locality requirement (no
+/// need for `faction` to already hold a region near either endpoint):
+/// docs/phase9-spec.md's whole case for this layer is that a *route*, not
+/// merely a region, is a legitimate strategic target in its own right, so
+/// this is deliberately as unconstrained by geography as `ProposeTreaty`
+/// already is by it.
+fn apply_interdict_line(
+    world: &mut World,
+    faction: FactionId,
+    line: TransportLineId,
+) -> Result<(), ActionError> {
+    let existing = world.transport_lines.get(line.index()).ok_or(ActionError::InvalidLine)?;
+    let owner_a = world.region(world.transport_node(existing.from).region).owner;
+    let owner_b = world.region(world.transport_node(existing.to).region).owner;
+    if owner_a != owner_b || owner_a == faction {
+        return Err(ActionError::LineNotHostile);
+    }
+    if !world.diplomacy.is_at_war(faction, owner_a) {
+        return Err(ActionError::LineNotHostile);
+    }
+
+    let next = (existing.condition.get() - LINE_INTERDICTION_DAMAGE).max(0.0);
+    world.transport_lines[line.index()].condition =
+        Condition::new(next).expect("clamped into 0.0..=1.0 above");
+    Ok(())
+}
+
 fn apply_respond_nl(
     world: &mut World,
     faction: FactionId,

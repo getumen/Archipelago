@@ -214,9 +214,21 @@ pub fn tick_naval_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Even
 }
 
 /// docs/phase2-spec.md "艦隊": a fleet's best source of supply — the
-/// highest `world.supply[region]` among the zone's coastal regions this
-/// faction owns, has a port in, and doesn't currently contest with the
-/// enemy. `0.0` if no such port faces this zone at all.
+/// highest `world.port_capacity[region][faction]` among the zone's coastal
+/// regions this faction owns, has a port in, and doesn't currently contest
+/// with the enemy. `0.0` if no such port faces this zone at all.
+///
+/// Stage 9B fix (the third sibling of the occupier-supply defect
+/// `logistics`'s own module doc already documents two fixes for): this used
+/// to read `world.supply[r]`, which since Stage 9B means "delivered to this
+/// region's own *land* demand" - `0.0` for a perfectly healthy, fully
+/// connected port with no land unit garrisoned there, since
+/// `logistics::compute_transport_flow` never creates a demand candidate for
+/// a region with none, regardless of how much capacity the network could
+/// actually carry. `world.port_capacity` (`World`'s own doc) answers the
+/// question this function actually needs instead: what could the network
+/// structurally deliver here, independent of whether any local land demand
+/// happened to ask for it.
 fn best_facing_port_supply(world: &World, zone: SeaZoneId, faction: FactionId) -> f32 {
     world
         .sea_zone(zone)
@@ -226,7 +238,7 @@ fn best_facing_port_supply(world: &World, zone: SeaZoneId, faction: FactionId) -
             let region = world.region(r);
             region.owner == faction && world.has_port_node(r) && !world.has_enemy_units(r, faction)
         })
-        .map(|&r| world.supply[r.index()])
+        .map(|&r| world.port_capacity[r.index()][faction.index()])
         .fold(0.0f32, f32::max)
 }
 
@@ -366,18 +378,33 @@ pub fn blockaded_ports(world: &World) -> Vec<PortBlockade> {
         .collect()
 }
 
+/// The transport network's current delivery reaching `unit`'s own sea
+/// station, for its own faction - sea-domain counterpart of
+/// `logistics::land_unit_supply_avail`; see that function's own doc for why
+/// `action::apply_reinforce` needs this independent of any equipment gap.
+/// `0.0` for a unit with no sea zone at all (never true for a real
+/// `Domain::Sea` unit - `apply_reinforce` only reaches this arm when
+/// `unit.station.domain() == Domain::Sea`, which implies `Station::Sea`).
+pub fn fleet_unit_supply_avail(world: &World, unit_id: UnitId) -> f32 {
+    let unit = world.unit(unit_id);
+    let Some(zone) = unit.station.sea_zone() else {
+        return 0.0;
+    };
+    best_facing_port_supply(world, zone, unit.owner) * PROJECTED_SUPPLY_FACTOR
+}
+
 pub fn instantaneous_fleet_arms_delivery(world: &World, unit_id: UnitId) -> (f32, f32) {
     let unit = world.unit(unit_id);
     let need_equipment = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
     if need_equipment <= 0.0 {
         return (1.0, 0.0);
     }
-    let Some(zone) = unit.station.sea_zone() else {
+    if unit.station.sea_zone().is_none() {
         return (1.0, 0.0);
-    };
+    }
     let faction = unit.owner;
 
-    let avail = best_facing_port_supply(world, zone, faction) * PROJECTED_SUPPLY_FACTOR;
+    let avail = fleet_unit_supply_avail(world, unit_id);
     if avail <= 0.0 {
         return (0.0, 0.0);
     }

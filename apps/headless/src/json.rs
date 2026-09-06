@@ -60,6 +60,7 @@ fn project_key(project: Project) -> String {
         Project::Port => "port".to_string(),
         Project::Capacity(good) => format!("capacity:{}", good.key()),
         Project::Repair => "repair".to_string(),
+        Project::TransportLine(line) => format!("transport_line:{}", line.index()),
     }
 }
 

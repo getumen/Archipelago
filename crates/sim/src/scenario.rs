@@ -23,7 +23,7 @@ use crate::diplomacy::Diplomacy;
 use crate::focus::NationalFocus;
 use crate::good::{ALL_GOODS, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
-use crate::ids::{FactionId, RegionId, SeaZoneId, TransportNodeId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use crate::json::{self, Value};
 use crate::military::Unit;
 use crate::transport::{Capacity, Condition, TransportLine, TransportLineKind, TransportNode, TransportNodeKind};
@@ -47,6 +47,13 @@ const MVP_JSON: &str = include_str!("../../../scenarios/mvp.json");
 pub const REGION_COUNT: usize = 10;
 pub const SEA_ZONE_COUNT: usize = 5;
 pub const FACTION_COUNT: usize = 3;
+/// Stage 9D (docs/phase9-spec.md "4. 観測ベクトル"): the embedded default
+/// scenario's transport-network shape, alongside `REGION_COUNT`/
+/// `SEA_ZONE_COUNT`/`FACTION_COUNT` above for exactly the same reason
+/// (`observation::ENCODING_LEN` needs a compile-time constant) - guarded by
+/// the same `default_scenario_dimensions_match_embedded_json` test.
+pub const TRANSPORT_NODE_COUNT: usize = 20;
+pub const TRANSPORT_LINE_COUNT: usize = 22;
 
 const FACTION_MANPOWER: f32 = 12.0;
 /// Initial stock per commodity, in `Good::index()` order (Food, Energy,
@@ -1093,7 +1100,9 @@ impl Scenario {
         let transport_lines: Vec<TransportLine> = self
             .transport_lines
             .iter()
-            .map(|def| TransportLine {
+            .enumerate()
+            .map(|(i, def)| TransportLine {
+                id: TransportLineId(i as u32),
                 from: TransportNodeId(transport_node_index_of[def.from.as_str()]),
                 to: TransportNodeId(transport_node_index_of[def.to.as_str()]),
                 kind: def.kind,
@@ -1103,6 +1112,50 @@ impl Scenario {
             .collect();
 
         let supply: Vec<f32> = regions.iter().map(Region::supply_source).collect();
+        // Initial value only - `logistics::recompute_supply` overwrites both
+        // this and `supply` from `compute_transport_flow` before either is
+        // ever read for real. Seeded the same way `supply` itself is: only
+        // each region's own owner has a non-zero entry, since no faction has
+        // occupied any foreign territory yet at scenario start.
+        let supply_by_faction: Vec<Vec<f32>> = regions
+            .iter()
+            .zip(supply.iter())
+            .map(|(region, &s)| {
+                let mut row = vec![0.0f32; factions.len()];
+                row[region.owner.index()] = s;
+                row
+            })
+            .collect();
+
+        // Initial value only, like `supply_by_faction` above - and seeded
+        // the same local way rather than left at zero.
+        //
+        // `codex review` (P2): "overwritten before it is ever read" was not
+        // actually true. `Simulation::with_world` accepts actions, and an
+        // agent may inspect the world, *before* the first `step` ever calls
+        // `logistics::recompute_supply`. A zero here made
+        // `naval::best_facing_port_supply` report every starting fleet as
+        // having no route home on turn one, so a perfectly valid pre-step
+        // `ReinforceUnit` against a healthy owned port was refused. Seeding
+        // it from the region's own `supply_source` (exactly how `supply` and
+        // `supply_by_faction` above are seeded) means the pre-step value is
+        // a coarse local approximation rather than a wrong one, and the
+        // first `recompute_supply` replaces it with the real widest-path
+        // figure as before.
+        let port_capacity: Vec<Vec<f32>> = regions
+            .iter()
+            .zip(supply.iter())
+            .map(|(region, &s)| {
+                let mut row = vec![0.0f32; factions.len()];
+                let has_port_node = transport_nodes
+                    .iter()
+                    .any(|n| n.kind == crate::transport::TransportNodeKind::Port && n.region == region.id);
+                if has_port_node {
+                    row[region.owner.index()] = s;
+                }
+                row
+            })
+            .collect();
 
         // Scenario-scoped starting diplomacy (this type's own doc): every
         // pair inside a declared bloc starts at `Stance::Alliance`, every
@@ -1123,6 +1176,8 @@ impl Scenario {
             factions,
             units,
             supply,
+            supply_by_faction,
+            port_capacity,
             sea_zones,
             transport_nodes,
             transport_lines,

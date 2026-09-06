@@ -20,7 +20,7 @@ use archipelago_sim::diplomacy::{Stance, Treaty, TreatyTerm};
 use archipelago_sim::focus::{self, NationalFocus};
 use archipelago_sim::good::Good;
 use archipelago_sim::group::Group;
-use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, UnitId};
 use archipelago_sim::military::Unit;
 use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
@@ -134,6 +134,17 @@ const CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM: u32 = 15;
 /// zero. A flow ratio above 0.5 does not mean the stockpile is recovering;
 /// only the stock itself can say that.
 const CHRONIC_LOW_MUNITIONS_FLOOR: f32 = 0.01;
+/// Stage 9D (docs/phase9-spec.md "4. AI"): a faction-owned `TransportLine`
+/// below this `Condition` is worth funding a `Project::TransportLine` for
+/// (`transport_repair_ai`) - well below `1.0` so a line merely nicked by a
+/// skirmish isn't fought over every decision cycle, but comfortably above
+/// zero so a line worth restoring is caught before it's a near-total loss.
+const TRANSPORT_REPAIR_CONDITION_FLOOR: f32 = 0.5;
+/// Stage 9D: an enemy-owned `TransportLine` at or below this `Condition` is
+/// treated as already effectively cut - `transport_interdict_ai` skips it in
+/// favor of a line still worth striking, rather than spending an order on a
+/// route that has nothing meaningful left to lose.
+const TRANSPORT_INTERDICT_MIN_CONDITION: f32 = 0.05;
 /// `civilian_ration` used when Munitions/Arms are critically short and
 /// stability can still absorb it (design.md §9's civilian/war trade-off):
 /// squeeze civilian Food/Energy/Machinery delivery down to this fraction to
@@ -1172,6 +1183,7 @@ impl HeuristicAgent {
         naval_recruit(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         disband_excess_naval(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         build(self.faction, obs, &mut actions);
+        transport_repair_ai(self.faction, obs, &mut actions);
 
         // Stage 3A AI (docs/phase3-spec.md: "stability が REGIME_CHANGE_THRESHOLD
         // に近いときは、軍事行動より内政を優先する"): raise the force-ratio
@@ -1209,6 +1221,7 @@ impl HeuristicAgent {
 
         if allow_offense {
             offensive(self.faction, caution, obs, avoid, primary_target, &mut actions);
+            transport_interdict_ai(self.faction, obs, &mut actions);
         }
         naval_ops(self.faction, caution, obs, allow_offense, &mut actions);
 
@@ -1567,6 +1580,33 @@ fn recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation,
     {
         return;
     }
+    // Stage 9D (docs/phase9-spec.md "4. AI"): the transport network is now a
+    // finite, capacity-constrained resource (Stage 9B), and `unit_cap` above
+    // has no notion of it at all - it is derived purely from industry, so a
+    // faction can keep recruiting straight through a network that's already
+    // failing to deliver to the force it has. Measured on `scenarios/mvp.json`
+    // seed 1 before this gate: reaching `Outcome::Conquest` on day 265 with
+    // 10 units at `supply_ratio` 0.500 (pre-Stage-9B) regressed, after
+    // Stage 9B alone, to a 720-day stalemate with 15 units at `supply_ratio`
+    // 0.095 - the AI kept adding units the network could not feed at all.
+    //
+    // The rule: stop recruiting the instant nationwide delivered/demanded
+    // supply already reads below `DISBAND_SOLVENCY_SUPPLY_RATIO` (reusing
+    // the same threshold `munitions_insolvent` already uses for "the network
+    // is failing to serve at least half of demand" - not a new tuning
+    // constant), *without* also requiring `munitions_buffer_days` to have
+    // run out the way `munitions_insolvent` does for `disband_excess`. A
+    // faction can carry a comfortable Munitions stockpile (say, built up
+    // before the front thinned out) while its *flow* ratio is already
+    // failing - `munitions_insolvent` alone would keep waving new recruits
+    // through right up until that stockpile is actually drained, by which
+    // point the network was already unable to carry the existing force.
+    // Recruiting more mouths only makes a network that already can't feed
+    // half of demand relay less to everyone, never more - so this checks
+    // the flow signal on its own, strictly ahead of stock depletion.
+    if f.supply_ratio < DISBAND_SOLVENCY_SUPPLY_RATIO {
+        return;
+    }
     // Munitions solvency gate (`munitions_insolvent`'s own doc): a faction
     // that can't feed the force it already has must not add another mouth
     // to feed, and must not immediately rebuild whatever `disband_excess`
@@ -1862,6 +1902,14 @@ fn naval_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observ
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
         || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
     {
+        return;
+    }
+    // Stage 9D: the same network-aware gate `recruit` carries (see its own
+    // doc for the full reasoning) - a fleet draws on the exact same
+    // national Munitions demand a land unit does, so a network already
+    // failing to serve half of demand must not get another mouth to feed
+    // here either.
+    if f.supply_ratio < DISBAND_SOLVENCY_SUPPLY_RATIO {
         return;
     }
     // Only blocks once `disband_excess_naval` would actually be cutting
@@ -2167,6 +2215,99 @@ fn repair_target(faction: FactionId, obs: &Observation) -> Option<RegionId> {
             }
         })
         .map(|(r, _)| r)
+}
+
+/// Stage 9D (docs/phase9-spec.md "4. AI": "自勢力の補給が細っている路線を認識
+/// して優先度を上げる"): the worst-condition line this faction owns outright
+/// (both endpoint regions its own territory) below `TRANSPORT_REPAIR_
+/// CONDITION_FLOOR`, if it can actually be invested in right now - hosted at
+/// whichever of its two endpoint regions isn't already mid-construction and
+/// isn't under enemy contact (`action::apply_build`'s own requirements).
+/// `None` when no owned line is damaged enough to bother with, or none of
+/// the damaged ones has an eligible host region this tick.
+///
+/// `codex review` (P2): host eligibility is part of *choosing*, not a filter
+/// applied afterwards. Picking the single worst line first and only then
+/// asking whether it can be hosted made the whole AI sit idle whenever that
+/// one line happened to be mid-construction or under enemy contact at both
+/// ends - every other damaged line went unrepaired until the worst one
+/// freed up. Worst *repairable* is the actual intent.
+fn transport_repair_target(faction: FactionId, obs: &Observation) -> Option<(RegionId, TransportLineId)> {
+    let world = obs.world;
+    world
+        .transport_lines
+        .iter()
+        .filter_map(|line| {
+            let ra = world.transport_node(line.from).region;
+            let rb = world.transport_node(line.to).region;
+            if world.region(ra).owner != faction
+                || world.region(rb).owner != faction
+                || line.condition.get() >= TRANSPORT_REPAIR_CONDITION_FLOOR
+            {
+                return None;
+            }
+            let region = [ra, rb]
+                .into_iter()
+                .find(|&r| world.region(r).construction.is_none() && !world.has_enemy_units(r, faction))?;
+            Some((region, line))
+        })
+        .fold(None, |best: Option<(RegionId, &archipelago_sim::transport::TransportLine)>, candidate| match best {
+            Some((_, b)) if b.condition.get() <= candidate.1.condition.get() => best,
+            _ => Some(candidate),
+        })
+        .map(|(region, line)| (region, line.id))
+}
+
+/// Stage 9D AI: funds restoring the network's own worst-damaged own route
+/// (`transport_repair_target`) via `Build`'s `Project::TransportLine` -
+/// called alongside `build` (`decide_for_llm`), independently of it, so a
+/// tick that has nothing else worth building still keeps the network itself
+/// in mind. Shares the region-level "one project at a time" constraint
+/// `action::apply_build` enforces with every other `Project`, so this can
+/// occasionally lose out to `build`'s own choice for the same region in the
+/// same tick - a harmless, self-correcting no-op the next cycle re-evaluates
+/// fresh, the same way `recruit`/`disband_excess` already tolerate losing to
+/// each other on a given tick.
+fn transport_repair_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    if let Some((region, line)) = transport_repair_target(faction, obs) {
+        actions.push(Action::Build { region, project: Project::TransportLine(line) });
+    }
+}
+
+/// Stage 9D (docs/phase9-spec.md "4. AI"): while at war, the most valuable
+/// route (highest current `TransportLine::effective_capacity`) owned
+/// entirely by an enemy faction and not already reduced to near nothing
+/// (`TRANSPORT_INTERDICT_MIN_CONDITION`) - picked by capacity rather than by
+/// front proximity, since docs/phase9-spec.md's whole case for this layer is
+/// that a *route* is now a legitimate target in its own right
+/// (`Action::InterdictLine`'s own doc: no locality requirement). Called only
+/// when `offensive`'s own `allow_offense` gate is open (`decide_for_llm`),
+/// the same doctrine-respecting condition every other offensive act shares.
+fn transport_interdict_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    let best = world
+        .transport_lines
+        .iter()
+        .filter(|line| {
+            let ra = world.transport_node(line.from).region;
+            let rb = world.transport_node(line.to).region;
+            let owner_a = world.region(ra).owner;
+            let owner_b = world.region(rb).owner;
+            owner_a == owner_b
+                && owner_a != faction
+                && world.diplomacy.is_at_war(faction, owner_a)
+                && line.condition.get() > TRANSPORT_INTERDICT_MIN_CONDITION
+        })
+        .fold(None, |best: Option<&archipelago_sim::transport::TransportLine>, line| {
+            let cap = line.effective_capacity(world);
+            match best {
+                Some(b) if b.effective_capacity(world) >= cap => best,
+                _ => Some(line),
+            }
+        });
+    if let Some(line) = best {
+        actions.push(Action::InterdictLine { line: line.id });
+    }
 }
 
 /// The good whose *national* effective capacity structurally can't fund

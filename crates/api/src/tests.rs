@@ -181,6 +181,43 @@ fn invalid_action_is_rejected_not_fatal() {
     assert_eq!(status, 200);
 }
 
+/// Stage 9D (docs/phase9-spec.md "4. 行動"): `Action::InterdictLine` reaches
+/// the simulation through the real HTTP/JSON codec (`action_codec::
+/// action_from_value`'s `"interdict_line"` arm) and is accepted or rejected
+/// exactly like every other action - "invalid actions rejected with
+/// `ActionError`, not a panic" (mvp-spec.md §5) applies here too.
+/// `scenarios/mvp.json` transport line index 4 (`shinetsu_hokuriku_depot
+/// <-> shinetsu_hokuriku_port`) is owned entirely by faction 1
+/// (`chuo_domei`), and mvp's factions start at unconditional war
+/// (`"diplomacy": {"blocs": []}`), so it's a valid target for faction 0.
+#[test]
+fn interdict_line_action_round_trips_through_the_http_codec() {
+    let handle = start(Duration::from_secs(3600), Duration::from_secs(3600));
+    let reset_body = reset(handle.addr, 1, &[0]);
+    let session_id = reset_body.get("session_id").and_then(Value::as_str).unwrap().to_string();
+
+    // Valid: an enemy-owned line.
+    let body = format!(r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"interdict_line","line":4}}]}}"#);
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&body)));
+    assert_eq!(status, 200);
+    let accepted = response.get("accepted").and_then(Value::as_array).expect("accepted[] present");
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(accepted.len(), 1, "interdicting an enemy-owned line must be accepted: {response:?}");
+    assert!(rejected.is_empty(), "{response:?}");
+
+    // Invalid: an out-of-range line id must be rejected, not panic the
+    // server or the session.
+    let body = format!(r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"interdict_line","line":999999}}]}}"#);
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&body)));
+    assert_eq!(status, 200);
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(rejected.len(), 1, "an out-of-range line id must be rejected: {response:?}");
+    assert_eq!(rejected[0].get("reason").and_then(Value::as_str), Some("invalid_line"));
+
+    let (status, _) = step(handle.addr, &session_id, 1);
+    assert_eq!(status, 200, "the session must still be usable after both requests");
+}
+
 /// docs/phase5-spec.md "並列セッションが互いの結果に影響しないこと": two
 /// sessions from the *same* seed but different action sequences must
 /// diverge exactly as expected, and two sessions from different seeds must

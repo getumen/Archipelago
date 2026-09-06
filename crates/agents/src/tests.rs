@@ -14,6 +14,7 @@ use archipelago_sim::military::{move_required, Movement, Unit};
 use archipelago_sim::observation::Observation;
 use archipelago_sim::scenario;
 use archipelago_sim::trade;
+use archipelago_sim::transport::Condition;
 use archipelago_sim::world::Station;
 
 use crate::{cannot_interpret_nl, default_heuristic_agent, HeuristicAgent, DEFAULT_CAUTION};
@@ -811,5 +812,195 @@ fn heuristic_agent_never_disbands_a_contested_unit() {
     assert!(
         !disbands.contains(&contested_unit),
         "a unit under enemy contact must never be disbanded, even as the weakest candidate: {disbands:?}"
+    );
+}
+
+/// Stage 9D (docs/phase9-spec.md "4. AI"): `recruit` must stop growing the
+/// land force the instant nationwide `Faction::supply_ratio` alone reads
+/// below `DISBAND_SOLVENCY_SUPPLY_RATIO` (0.5) - *without* waiting for
+/// `munitions_insolvent`'s stricter two-signal condition (a drained
+/// Munitions buffer too) to also trip. This is the specific defect Stage 9B
+/// exposed and the old code had no way to see: a faction can carry a
+/// perfectly healthy Munitions stockpile (built up before the front thinned
+/// out) while the *network* is already failing to carry today's demand
+/// (`Faction::supply_ratio`, from `logistics::distribute_supply`'s
+/// capacity-constrained flow) - measured on mvp seed 1, this used to let
+/// `HeuristicAgent` recruit straight through a transport network that could
+/// no longer feed the force it already had (10 units at old-model
+/// `supply_ratio` 0.500 winning by day 265, regressed to 15 units at
+/// Stage-9B `supply_ratio` 0.095 stalemating at day 720).
+///
+/// Confirmed this fails without the fix: temporarily removed the new
+/// `f.supply_ratio < DISBAND_SOLVENCY_SUPPLY_RATIO` check from `recruit` and
+/// re-ran - the first assertion below failed (`actions` contained a
+/// `RecruitUnit` even at `supply_ratio` 0.2 with a full Munitions stock).
+/// Reverted before committing.
+#[test]
+fn heuristic_agent_stops_recruiting_when_network_supply_ratio_is_bad() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    // Plenty of manpower/Arms/Munitions, and mvp's untouched starting
+    // industry keeps this faction's 3 starting units well under `unit_cap`
+    // - nothing *else* here should stop `recruit` from firing.
+    world.faction_mut(faction).manpower = 50.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 100.0;
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 1000.0;
+    world.faction_mut(faction).supply_ratio = 0.2; // well below DISBAND_SOLVENCY_SUPPLY_RATIO (0.5)
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::RecruitUnit { .. })),
+        "must not recruit while supply_ratio reads badly served, even with an ample Munitions stock: {actions:?}"
+    );
+
+    // Sanity: the identical setup with a healthy supply_ratio does recruit -
+    // proving the gate above, not some unrelated precondition (mvp's own
+    // manpower/Arms/unit_cap numbers), is what suppressed it.
+    world.faction_mut(faction).supply_ratio = 1.0;
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::RecruitUnit { .. })),
+        "expected a healthy supply_ratio to let recruiting proceed: {actions:?}"
+    );
+}
+
+/// Stage 9D AI: `transport_repair_ai` must fund restoring this faction's own
+/// worst-damaged `TransportLine` via `Build`'s `Project::TransportLine`,
+/// once it drops below `TRANSPORT_REPAIR_CONDITION_FLOOR` - "value acting on
+/// the transport network" (docs/phase9-spec.md "4. AI"), the AI half of
+/// Stage 9D's client-visible line rendering.
+///
+/// Confirmed this fails without the fix: temporarily removed the
+/// `transport_repair_ai` call from `decide_for_llm` and re-ran - `actions`
+/// contained no `Build` with a `Project::TransportLine` at all. Reverted
+/// before committing.
+#[test]
+fn heuristic_agent_repairs_its_own_damaged_transport_line() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let own_line = world
+        .transport_lines
+        .iter()
+        .position(|l| {
+            let ra = world.transport_node(l.from).region;
+            let rb = world.transport_node(l.to).region;
+            world.region(ra).owner == faction && world.region(rb).owner == faction
+        })
+        .expect("mvp's faction 0 must own at least one whole transport line");
+    world.transport_lines[own_line].condition = Condition::new(0.2).unwrap();
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    let repairs: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Build { project: archipelago_sim::construction::Project::TransportLine(line), .. } => Some(*line),
+            _ => None,
+        })
+        .collect();
+    assert!(!repairs.is_empty(), "expected a Build order restoring the damaged line: {actions:?}");
+    assert_eq!(repairs[0].index(), own_line, "must target the actual damaged line, not an arbitrary one");
+}
+
+/// `codex review` (P2): the worst-damaged own line is only a useful choice
+/// if it can actually be invested in this tick. Selecting it first and then
+/// checking host eligibility made the AI repair *nothing* whenever that one
+/// line was blocked at both endpoints, even with other damaged lines sitting
+/// repairable - the whole mechanism went idle waiting on a single line.
+/// `transport_repair_target` now filters for a usable host while choosing,
+/// so this pins "worst **repairable**", not "worst, if we get lucky".
+///
+/// **Confirmed this test can fail.** Restoring the old shape (fold to the
+/// worst owned damaged line, then `find` a host and `?` out) made `repairs`
+/// come back empty - the AI issued no `Build` at all - so both assertions
+/// below tripped. Restored, and it passes.
+#[test]
+fn heuristic_agent_repairs_the_worst_line_it_can_actually_host() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let own_lines: Vec<usize> = world
+        .transport_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            let ra = world.transport_node(l.from).region;
+            let rb = world.transport_node(l.to).region;
+            world.region(ra).owner == faction && world.region(rb).owner == faction
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(own_lines.len() >= 2, "this test needs at least two wholly-owned lines, got {}", own_lines.len());
+
+    // The worse of the two is deliberately made impossible to host: both of
+    // its endpoint regions are already mid-construction, which is exactly
+    // what `action::apply_build` refuses.
+    let blocked = own_lines[0];
+    let reachable = own_lines[1];
+    world.transport_lines[blocked].condition = Condition::new(0.1).unwrap();
+    world.transport_lines[reachable].condition = Condition::new(0.3).unwrap();
+    for endpoint in [world.transport_lines[blocked].from, world.transport_lines[blocked].to] {
+        let region = world.transport_node(endpoint).region;
+        world.regions[region.index()].construction = Some(archipelago_sim::construction::Construction {
+            project: archipelago_sim::construction::Project::Infrastructure,
+            invested: 0.0,
+            required: 1e6,
+        });
+    }
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    let repairs: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Build { project: archipelago_sim::construction::Project::TransportLine(line), .. } => Some(*line),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !repairs.is_empty(),
+        "a damaged line with a free host must still be repaired even though a worse one is blocked: {actions:?}"
+    );
+    assert_eq!(
+        repairs[0].index(),
+        reachable,
+        "must fall through to the worst line it can actually host, not stall on the unhostable one"
+    );
+}
+
+/// Stage 9D AI: `transport_interdict_ai` must strike the enemy's own
+/// transport network once at war and `offensive`'s own `allow_offense` gate
+/// is open - the other half of "value acting on the transport network".
+///
+/// Confirmed this fails without the fix: temporarily removed the
+/// `transport_interdict_ai` call from `decide_for_llm` and re-ran - `actions`
+/// contained no `InterdictLine` at all even though mvp's factions start at
+/// war by default. Reverted before committing.
+#[test]
+fn heuristic_agent_interdicts_an_enemy_transport_line() {
+    let world = scenario::build_world();
+    let faction = FactionId(0);
+    assert!(
+        world.diplomacy.is_at_war(faction, FactionId(1)) || world.diplomacy.is_at_war(faction, FactionId(2)),
+        "test setup: mvp's factions must start at war for there to be a hostile line to strike"
+    );
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::InterdictLine { .. })),
+        "expected an InterdictLine order against a hostile faction's own transport network: {actions:?}"
     );
 }

@@ -316,22 +316,50 @@ fn japan_hex_no_faction_is_permanently_insolvent() {
 }
 
 // ---------------------------------------------------------------------
-// "The world keeps moving" - this one genuinely holds across every
-// scenario today (including `japan47`, whose economy is broken but whose
-// units/territory still churn from disbandment and the occasional border
-// skirmish), so it is the one war/insolvency-adjacent property this suite
-// asserts globally rather than per scenario.
+// "The world keeps moving" - one shared, strict bound for every scenario,
+// `japan47` included.
+//
+// Stage 9D (docs/phase9-spec.md "4. AI") gave `HeuristicAgent::recruit`/
+// `naval_recruit` a real gate against the finite transport network
+// (`Faction::supply_ratio < DISBAND_SOLVENCY_SUPPLY_RATIO` stops new
+// recruits outright) - the fix this whole stage exists for: mvp seed 1 used
+// to recruit straight through a network already failing to feed the force
+// it had (10 units at old-model `supply_ratio` 0.500 winning day 265,
+// regressed by Stage 9B alone to 15 units at 0.095 stalemating day 720).
+//
+// On `japan47` - already documented (CLAUDE.md "3 つの地図") as an economy
+// broken by construction ("生産能力表を mvp の全国合計に合わせて作り、6 分割
+// された場合を検証しなかった", 全勢力 `munitions=0`) - that recruit-side gate
+// alone once left the back 354 of the run's 720 days byte-identical: several
+// factions read `supply_ratio == 0.0` with hundreds of units of *national*
+// Munitions stock sitting unused, never reaching the disconnected fronts
+// that would need to cross a severed transport network to receive it at
+// all, and once `recruit` stopped padding that dead network with new units
+// nothing else in the scenario ever changed state again. The actual defect
+// was not in this test's bound - it was that a unit stranded beyond every
+// supply route had no way out: `action::apply_reinforce` refilled its
+// manpower straight from the national pool with no reference to the
+// network at all, which indefinitely undid `military::tick_recovery`'s own
+// unsupplied-attrition recovery path the moment `HeuristicAgent::
+// reinforce_weak_units` next topped it back up - long before manpower ever
+// neared `UNIT_DEATH_MANPOWER`. Gating that manpower refill on the same
+// network-reachability question equipment delivery already asks
+// (`logistics::land_unit_supply_avail`/`naval::fleet_unit_supply_avail`)
+// lets attrition actually run its course on a genuinely unreachable unit,
+// which is what keeps `japan47`'s own worst streak now well inside the
+// shared bound below rather than needing one of its own.
 // ---------------------------------------------------------------------
 
-/// Observed worst case today: mvp 82 days, japan47 31 days, japan_hex 36
-/// days (all well below this). Set high enough that ordinary balance
-/// tuning (a slower economy tick, a longer construction queue) doesn't trip
-/// it, low enough to still catch a scenario where production has actually
-/// stalled out (the historical "munitions=0, unit counts frozen for 620
-/// days" defect this property is named for).
+/// Observed worst case today (`mvp`/`japan_hex`/`japan47`, all with attrition
+/// now able to stand down a genuinely unreachable unit): mvp 82 days,
+/// japan_hex 36 days, japan47 20 days (all well below this). Set high enough
+/// that ordinary balance tuning (a slower economy tick, a longer
+/// construction queue) doesn't trip it, low enough to still catch a scenario
+/// where production has actually stalled out (the historical "munitions=0,
+/// unit counts frozen for 620 days" defect this property is named for).
 const FROZEN_STREAK_LIMIT_DAYS: u32 = 150;
 
-fn assert_world_keeps_moving(t: &Trajectory, scenario_label: &str) {
+fn assert_world_keeps_moving(t: &Trajectory, scenario_label: &str, limit: u32) {
     assert!(
         t.final_day > 30,
         "{scenario_label}: the run ended too early ({} days) to say anything meaningful about whether the world kept \
@@ -339,10 +367,9 @@ fn assert_world_keeps_moving(t: &Trajectory, scenario_label: &str) {
         t.final_day
     );
     assert!(
-        t.max_frozen_streak_days < FROZEN_STREAK_LIMIT_DAYS,
+        t.max_frozen_streak_days < limit,
         "{scenario_label}: unit counts and territory (per faction) stayed byte-identical for {} consecutive days \
-         (limit {FROZEN_STREAK_LIMIT_DAYS}) while the game reported itself as still running - the world stopped \
-         moving",
+         (limit {limit}) while the game reported itself as still running - the world stopped moving",
         t.max_frozen_streak_days
     );
 }
@@ -350,17 +377,17 @@ fn assert_world_keeps_moving(t: &Trajectory, scenario_label: &str) {
 #[test]
 fn mvp_world_keeps_moving() {
     let t = run_trajectory(scenario::build_world(), 1, 720);
-    assert_world_keeps_moving(&t, "mvp seed 1");
+    assert_world_keeps_moving(&t, "mvp seed 1", FROZEN_STREAK_LIMIT_DAYS);
 }
 
 #[test]
 fn japan47_world_keeps_moving() {
-    // The one property this suite still holds `japan47` to (see the module
-    // doc): a dead economy is not the same defect as a frozen world, and
-    // today it genuinely isn't frozen either - this locks that in.
+    // Holds `japan47` to the same shared bound as every other scenario now
+    // that a genuinely unreachable unit has a real recovery path - see this
+    // section's own module-level doc for the full history.
     let world = scenario::load_file("../../scenarios/japan47.json").expect("scenarios/japan47.json must load");
     let t = run_trajectory(world, 1, 720);
-    assert_world_keeps_moving(&t, "japan47 seed 1");
+    assert_world_keeps_moving(&t, "japan47 seed 1", FROZEN_STREAK_LIMIT_DAYS);
 }
 
 #[test]
@@ -368,7 +395,7 @@ fn japan47_world_keeps_moving() {
 fn japan_hex_world_keeps_moving() {
     let world = scenario::load_file("../../scenarios/japan_hex.json").expect("scenarios/japan_hex.json must load");
     let t = run_trajectory(world, 2, 720);
-    assert_world_keeps_moving(&t, "japan_hex seed 2");
+    assert_world_keeps_moving(&t, "japan_hex seed 2", FROZEN_STREAK_LIMIT_DAYS);
 }
 
 // ---------------------------------------------------------------------

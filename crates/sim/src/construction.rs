@@ -9,22 +9,38 @@
 use crate::balance::{
     CAPACITY_STEP, CAPITAL_FLIGHT_CONSTRUCTION_MULT, CONSTRUCTION_MACHINERY_PER_POINT,
     CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_REQUIRED_INFRASTRUCTURE,
-    CONSTRUCTION_REQUIRED_PORT, CONSTRUCTION_REQUIRED_REPAIR, CONSTRUCTION_STEEL_PER_POINT,
-    DEVASTATION_RECOVERY, FOCUS_DEFENSIVE_DEVASTATION_RECOVERY_MULT,
-    FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT, INFRA_STEP, PORT_STEP, REPAIR_STEP,
+    CONSTRUCTION_REQUIRED_PORT, CONSTRUCTION_REQUIRED_REPAIR,
+    CONSTRUCTION_REQUIRED_TRANSPORT_LINE, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_RECOVERY,
+    FOCUS_DEFENSIVE_DEVASTATION_RECOVERY_MULT, FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT,
+    INFRA_STEP, PORT_STEP, REPAIR_STEP, TRANSPORT_LINE_REPAIR_STEP,
 };
 use crate::focus::{self, NationalFocus};
 use crate::good::Good;
-use crate::world::{Region, World};
+use crate::ids::TransportLineId;
+use crate::transport::Condition;
+use crate::world::World;
 
-/// A region-improvement project (docs/phase2-spec.md Stage 2B). Only one
-/// can be in progress per region (`Region::construction`).
+/// A region-improvement project (docs/phase2-spec.md Stage 2B), plus, since
+/// Stage 9D (docs/phase9-spec.md "4. 行動": "`Build` の `Project` に輸送網に
+/// 対するものを追加する"), a transport-network one. Only one project can be
+/// in progress per region at a time (`Region::construction`) - `TransportLine`
+/// is hosted at one of its own two endpoint regions (`action::apply_build`'s
+/// validation), the same way every other project is hosted at the region it
+/// improves, even though what it actually improves lives in
+/// `World::transport_lines` rather than on that `Region` itself.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Project {
     Infrastructure,
     Port,
     Capacity(Good),
     Repair,
+    /// Invests in restoring one of the network's own routes
+    /// (`TRANSPORT_LINE_REPAIR_STEP` per completion, capped at
+    /// `Condition::FULL`) - the funded, gradual counterpart of
+    /// `Action::InterdictLine`'s instant damage and of the passive
+    /// `transport::tick_transport_condition` recovery every line already
+    /// gets for free once it stops touching a contested region.
+    TransportLine(TransportLineId),
 }
 
 /// In-progress work on a region's `Project`: `invested` building points
@@ -44,18 +60,66 @@ pub fn required_points(project: Project) -> f32 {
         Project::Port => CONSTRUCTION_REQUIRED_PORT,
         Project::Capacity(_) => CONSTRUCTION_REQUIRED_CAPACITY,
         Project::Repair => CONSTRUCTION_REQUIRED_REPAIR,
+        Project::TransportLine(_) => CONSTRUCTION_REQUIRED_TRANSPORT_LINE,
     }
 }
 
 /// Applies a completed project's one-time effect (docs/phase2-spec.md Stage
-/// 2B's completion-effect table).
-fn apply_completion(region: &mut Region, project: Project) {
+/// 2B's completion-effect table, extended by Stage 9D's `TransportLine`).
+/// Every variant but `TransportLine` only ever touches the hosting `Region`
+/// itself; `TransportLine` reaches past it into `World::transport_lines`,
+/// which is why this takes the whole `World` plus which region hosted the
+/// project rather than just `&mut Region` the way it used to - see
+/// `tick_construction`'s own call site for why that split is safe to do
+/// without a second, overlapping mutable borrow.
+fn apply_completion(world: &mut World, region_index: usize, project: Project) {
     match project {
-        Project::Infrastructure => region.infrastructure = (region.infrastructure + INFRA_STEP).min(1.0),
-        Project::Port => region.port += PORT_STEP,
-        Project::Capacity(good) => region.capacity[good.index()] += CAPACITY_STEP,
-        Project::Repair => region.devastation = (region.devastation - REPAIR_STEP).max(0.0),
+        Project::TransportLine(line) => {
+            let line = &mut world.transport_lines[line.index()];
+            let next = (line.condition.get() + TRANSPORT_LINE_REPAIR_STEP).min(1.0);
+            line.condition = Condition::new(next).expect("clamped into 0.0..=1.0 above");
+        }
+        other => {
+            let region = &mut world.regions[region_index];
+            match other {
+                Project::Infrastructure => region.infrastructure = (region.infrastructure + INFRA_STEP).min(1.0),
+                Project::Port => region.port += PORT_STEP,
+                Project::Capacity(good) => region.capacity[good.index()] += CAPACITY_STEP,
+                Project::Repair => region.devastation = (region.devastation - REPAIR_STEP).max(0.0),
+                Project::TransportLine(_) => unreachable!("handled in the outer match arm above"),
+            }
+        }
     }
+}
+
+/// Whether a `Project::TransportLine(line)` project hosted at
+/// `world.regions[host]` is still eligible to complete - the same
+/// both-endpoints-owned-by-the-hosting-faction rule `action::apply_build`
+/// checks when the project is first ordered (that function's own doc).
+///
+/// Re-checked every tick (`tick_construction`, below) rather than trusted
+/// from order time (CLAUDE.md「繰り返し踏んだ欠陥」: "発令時点の値を焼き
+/// 込まない" — "don't bake in a value from when the order was issued;
+/// don't sample a value that should track current state only once"): a
+/// `TransportLineId` is the one `Project` payload that reaches past its own
+/// hosting region into another entity (`World::transport_lines`) whose
+/// *other* endpoint region can change hands without anything about that
+/// change ever touching the hosting region's own `Construction` -
+/// `military::tick_occupation`, `diplomacy::transfer_region`, and
+/// `politics::tick_separatism` (the three places `Region::owner` changes)
+/// each only ever know to clear the *captured* region's own `construction`,
+/// never to go looking for some other region's `TransportLine` project that
+/// happens to name it as an endpoint. Left unchecked, the hosting region
+/// (never itself captured) would keep investing its current owner's
+/// Machinery/Steel into - and eventually unconditionally repair - a line no
+/// longer entirely that owner's, which `apply_build` would reject outright
+/// if the same faction tried to start it fresh in this state.
+fn transport_line_still_owned(world: &World, host: usize, line_id: TransportLineId) -> bool {
+    let line = &world.transport_lines[line_id.index()];
+    let owner = world.regions[host].owner;
+    let ra = world.transport_node(line.from).region;
+    let rb = world.transport_node(line.to).region;
+    world.region(ra).owner == owner && world.region(rb).owner == owner
 }
 
 /// Advances every region's in-progress construction by up to
@@ -73,6 +137,22 @@ pub fn tick_construction(world: &mut World) {
             continue;
         };
         let owner = world.regions[i].owner;
+
+        // A `TransportLine` project whose other endpoint has since changed
+        // hands (this function's own doc, `transport_line_still_owned`) is
+        // cancelled outright rather than silently finished or silently
+        // stalled - exactly `action::apply_cancel_build`'s own semantics
+        // (resources already invested are forfeited, never refunded), so a
+        // region can never be left funding, forever, a repair that can no
+        // longer legitimately land: the region's build slot is freed
+        // immediately, the same tick the mismatch is found, for a fresh
+        // (re-validated) project to take its place.
+        if let Project::TransportLine(line_id) = constr.project {
+            if !transport_line_still_owned(world, i, line_id) {
+                world.regions[i].construction = None;
+                continue;
+            }
+        }
 
         // Stage 3A (docs/phase3-spec.md "資本逃避": "建設速度と Machinery 生
         // 産に係数"): a faction under active capital flight builds slower -
@@ -117,7 +197,7 @@ pub fn tick_construction(world: &mut World) {
 
         constr.invested += attempted * funded_ratio;
         if constr.invested >= constr.required {
-            apply_completion(&mut world.regions[i], constr.project);
+            apply_completion(world, i, constr.project);
             world.regions[i].construction = None;
         } else {
             world.regions[i].construction = Some(constr);

@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
-use archipelago_sim::observation::{DIPLOMACY_FIELD_COUNT, FACTION_FIELD_COUNT, REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT};
+use archipelago_sim::observation::{
+    DIPLOMACY_FIELD_COUNT, FACTION_FIELD_COUNT, REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT,
+    TRANSPORT_LINE_FIELD_COUNT, TRANSPORT_NODE_FIELD_COUNT,
+};
 use archipelago_sim::sim::{Outcome, Simulation};
 use archipelago_sim::world::VictoryCondition;
 
@@ -179,7 +182,15 @@ fn handle_schema(manager: &SessionManager) -> Value {
     let region_count = manager.scenario.regions.len();
     let sea_zone_count = manager.scenario.sea_zones.len();
     let faction_count = faction_count(manager);
-    let encoding_len = archipelago_sim::observation::encoding_len(region_count, sea_zone_count, faction_count);
+    let transport_line_count = manager.scenario.transport_lines.len();
+    let transport_node_count = manager.scenario.transport_nodes.len();
+    let encoding_len = archipelago_sim::observation::encoding_len(
+        region_count,
+        sea_zone_count,
+        faction_count,
+        transport_line_count,
+        transport_node_count,
+    );
 
     let observation = Value::obj(vec![
         ("length", Value::num(encoding_len as f64)),
@@ -210,6 +221,23 @@ fn handle_schema(manager: &SessionManager) -> Value {
                     ("fields_per_item", Value::num(DIPLOMACY_FIELD_COUNT as f64)),
                     ("total", Value::num((faction_count * DIPLOMACY_FIELD_COUNT) as f64)),
                 ]),
+                // Stage 9D (docs/phase9-spec.md "4. 観測ベクトル"): the
+                // transport network's own per-line/per-node facts, appended
+                // after every pre-existing segment - see `observation::
+                // TRANSPORT_LINE_FIELD_COUNT`/`TRANSPORT_NODE_FIELD_COUNT`'s
+                // own docs for exactly what each field means.
+                Value::obj(vec![
+                    ("segment", Value::str("transport_lines")),
+                    ("count", Value::num(transport_line_count as f64)),
+                    ("fields_per_item", Value::num(TRANSPORT_LINE_FIELD_COUNT as f64)),
+                    ("total", Value::num((transport_line_count * TRANSPORT_LINE_FIELD_COUNT) as f64)),
+                ]),
+                Value::obj(vec![
+                    ("segment", Value::str("transport_nodes")),
+                    ("count", Value::num(transport_node_count as f64)),
+                    ("fields_per_item", Value::num(TRANSPORT_NODE_FIELD_COUNT as f64)),
+                    ("total", Value::num((transport_node_count * TRANSPORT_NODE_FIELD_COUNT) as f64)),
+                ]),
             ]),
         ),
     ]);
@@ -217,6 +245,8 @@ fn handle_schema(manager: &SessionManager) -> Value {
         ("faction_count", Value::num(faction_count as f64)),
         ("region_count", Value::num(region_count as f64)),
         ("sea_zone_count", Value::num(sea_zone_count as f64)),
+        ("transport_line_count", Value::num(transport_line_count as f64)),
+        ("transport_node_count", Value::num(transport_node_count as f64)),
     ]);
 
     let mut merged = match action_codec::schema() {

@@ -5,8 +5,9 @@ use crate::balance::{
     CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
     CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
     CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR,
-    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, INDUSTRIAL_STABILITY_FLOOR, NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE,
-    SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, TREATY_ACCEPT_OPINION_BONUS,
+    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE,
+    NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS,
+    STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
     UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
 };
 use crate::construction::{self, Construction, Project};
@@ -16,11 +17,14 @@ use crate::event::Event;
 use crate::focus::{self, NationalFocus};
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::{Group, GROUP_COUNT};
-use crate::ids::{FactionId, RegionId, SeaZoneId, TransportNodeId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use crate::logistics;
 use crate::military;
 use crate::naval;
-use crate::observation::{Observation, ENCODING_LEN};
+use crate::observation::{
+    encoding_len, Observation, DIPLOMACY_FIELD_COUNT, ENCODING_LEN, FACTION_FIELD_COUNT,
+    REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT, TRANSPORT_LINE_FIELD_COUNT, TRANSPORT_NODE_FIELD_COUNT,
+};
 use crate::politics;
 use crate::rng::Rng;
 use crate::scenario;
@@ -1930,6 +1934,155 @@ fn reinforcement_uses_current_region_supply() {
     );
 }
 
+/// Stage 9D fix (docs/conventions.md §6's "状態には必ず回復経路を持たせる" -
+/// "state must always have a recovery path, never one that's entered and
+/// never left"): a unit stranded beyond every supply route
+/// (`world.supply[region] == 0.0` for its own faction, forever) must
+/// eventually stop being stuck. `military::tick_recovery`'s own
+/// unsupplied-attrition (`ATTRITION_MANPOWER`, gated on `unit.supply`) is
+/// the mechanism meant to shrink such a unit toward `UNIT_DEATH_MANPOWER`
+/// and out of play - but `action::apply_reinforce` used to refill manpower
+/// straight from the faction's national pool with no reference to the
+/// network at all, which undid every tick's attrition loss the moment
+/// anything called `ReinforceUnit` on it, forever. In real play this
+/// happens every single tick: `HeuristicAgent::reinforce_weak_units` issues
+/// `ReinforceUnit` for any unit under `REINFORCE_THRESHOLD` strength every
+/// time the AI decides, without ever checking whether the network can
+/// actually reach it.
+///
+/// Confirmed this can fail: temporarily removed the `network_reachable`
+/// gate in `apply_reinforce` (letting `fill_manpower` refill unconditionally
+/// from the national pool again, as before this fix) and re-ran with the
+/// same 400-day cap below - the unit never died at all (a full refill every
+/// day trivially outpaces `ATTRITION_MANPOWER`'s 0.006/day loss, so manpower
+/// stayed pinned near full for the entire run). Reverted before committing.
+#[test]
+fn stranded_unit_eventually_dies_despite_being_reinforced_every_tick() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let unit_id = world.units.iter().find(|u| u.owner == faction).unwrap().id;
+    let region = world.unit(unit_id).station.region().expect("test needs a land unit");
+    assert_eq!(world.region(region).owner, faction, "test setup requires the unit's own region");
+
+    // Sever the region from the transport network for good - nothing in
+    // this test ever calls `logistics::recompute_supply`, so this stays
+    // zero for every simulated day below, standing in for a front cut off
+    // behind a severed line permanently rather than for one tick.
+    world.supply[region.index()] = 0.0;
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.supply = 0.0; // already eased down to zero, as a real cut-off unit would be within a handful of ticks
+        unit.manpower = UNIT_MANPOWER;
+        unit.equipment = UNIT_EQUIPMENT; // no equipment gap - isolates the manpower question this fix is about
+    }
+    // An abundant national pool an unconstrained refill could draw from
+    // forever, so nothing but the fix itself stops the unit being topped up.
+    world.faction_mut(faction).manpower = 1_000_000.0;
+
+    let worst_case_days = ((UNIT_MANPOWER - UNIT_DEATH_MANPOWER) / crate::balance::ATTRITION_MANPOWER).ceil() as u32;
+    let max_days = worst_case_days + 50; // headroom past the theoretical worst case, not a tight bound
+    let mut day = 0u32;
+    loop {
+        // Simulates `HeuristicAgent::reinforce_weak_units` calling
+        // `ReinforceUnit` on this unit every single day - the worst case
+        // for the trap this fix closes.
+        let _ = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+        let fought = vec![false; world.units.len()];
+        let mut events = Vec::new();
+        military::tick_recovery(&mut world, &fought, &mut events);
+        day += 1;
+        if !world.unit(unit_id).alive || day >= max_days {
+            break;
+        }
+    }
+
+    assert!(
+        !world.unit(unit_id).alive,
+        "a unit cut off from every supply route must eventually stop being stuck (die to attrition) even when \
+         something calls ReinforceUnit on it every single day - it survived past day {max_days} (worst case \
+         {worst_case_days}), which means manpower reinforcement is undoing the network's own attrition again"
+    );
+}
+
+/// The third sibling of the occupier-supply defect `logistics`'s own
+/// module doc already documents two fixes for (`distribute_supply`'s and
+/// `land_unit_supply_avail`'s non-owner branches): `naval::
+/// best_facing_port_supply` used to read `world.supply[region]`, which
+/// since Stage 9B means "delivered to this region's own *land* demand" -
+/// `0.0` whenever no land unit happens to be garrisoned there, regardless
+/// of how healthy and fully connected the port actually is (`logistics::
+/// compute_transport_flow` never creates a demand candidate for a region
+/// with none). A damaged fleet facing exactly such a port could then never
+/// reinforce its manpower even though the network was fully intact - fixed
+/// by `world.port_capacity` (`World`'s own doc), a structural
+/// capacity/source figure independent of local demand.
+///
+/// Confirmed this can fail: reverted `naval::best_facing_port_supply` to
+/// read `world.supply[r.index()]` again (the pre-fix formula) and reran -
+/// `world.supply[port_region]` reads `0.0` with no land garrison (asserted
+/// below as the demand-bounded reading the test setup relies on), so
+/// `naval::fleet_unit_supply_avail` also reads `0.0`, `network_reachable`
+/// is `false`, and the fleet's manpower does not move at all (`after ==
+/// before`), failing the final assertion. Reverted before committing.
+#[test]
+fn damaged_fleet_at_undegarrisoned_port_can_reinforce() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let port_region = world.faction(faction).capital;
+    assert!(world.has_port_node(port_region), "test setup requires the capital to have a port");
+    let zone = naval::home_zone(&world, port_region).expect("test setup requires a facing sea zone");
+
+    // `naval::best_facing_port_supply` takes the *max* over every one of the
+    // zone's coastal regions this faction owns - so it isn't enough to clear
+    // the port region alone; every same-faction coastal region sharing this
+    // zone must also lose its land garrison, or that neighbor's own nonzero
+    // `world.supply` would mask exactly the defect this test exists to
+    // catch. `elsewhere` is deliberately outside this zone's own coast.
+    let coastal_regions: Vec<RegionId> = world.sea_zone(zone).coast.clone();
+    let elsewhere = world
+        .regions
+        .iter()
+        .find(|r| r.owner == faction && !coastal_regions.contains(&r.id))
+        .expect("test setup requires the faction to own a region off this zone's coast")
+        .id;
+    for unit in world.units.iter_mut() {
+        if unit.owner == faction
+            && matches!(unit.station, Station::Region(r) if coastal_regions.contains(&r))
+        {
+            unit.station = Station::Region(elsewhere);
+        }
+    }
+
+    world.faction_mut(faction).manpower = 1_000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1_000.0;
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region: port_region, domain: Domain::Sea })
+        .unwrap();
+    let fleet_id = world.units.last().unwrap().id;
+    assert_eq!(world.unit(fleet_id).station.domain(), Domain::Sea);
+
+    logistics::recompute_supply(&mut world);
+    assert_eq!(
+        world.supply[port_region.index()], 0.0,
+        "test setup requires the demand-bounded region reading to be zero with no land garrison present"
+    );
+    assert!(
+        world.port_capacity[port_region.index()][faction.index()] > 0.0,
+        "test setup requires the port to be structurally reachable"
+    );
+
+    world.unit_mut(fleet_id).manpower = UNIT_MANPOWER * 0.5;
+    let before = world.unit(fleet_id).manpower;
+
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: fleet_id });
+    assert_eq!(result, Ok(()));
+    let after = world.unit(fleet_id).manpower;
+
+    assert!(
+        after > before,
+        "a damaged fleet facing a healthy, fully-connected port with no land garrison must still be able to \
+         reinforce manpower: before={before}, after={after}"
+    );
+}
 
 // ===== Stage 2D — 海軍・制海権・海上封鎖 (docs/phase2-spec.md "Stage 2D") =====
 
@@ -4879,6 +5032,8 @@ fn default_scenario_dimensions_match_embedded_json() {
     assert_eq!(world.regions.len(), scenario::REGION_COUNT);
     assert_eq!(world.sea_zones.len(), scenario::SEA_ZONE_COUNT);
     assert_eq!(world.factions.len(), scenario::FACTION_COUNT);
+    assert_eq!(world.transport_nodes.len(), scenario::TRANSPORT_NODE_COUNT);
+    assert_eq!(world.transport_lines.len(), scenario::TRANSPORT_LINE_COUNT);
 }
 
 // ---------------------------------------------------------------------------
@@ -5651,7 +5806,9 @@ fn cutting_a_line_falls_to_the_detour_capacity_not_zero() {
     station_units(&mut with_detour, left, 2);
     let hub_node = with_detour.transport_nodes.iter().find(|n| n.region == hub).unwrap().id;
     let source_node = with_detour.transport_nodes.iter().find(|n| n.region == source).unwrap().id;
+    let new_line_id = crate::ids::TransportLineId(with_detour.transport_lines.len() as u32);
     with_detour.transport_lines.push(crate::transport::TransportLine {
+        id: new_line_id,
         from: source_node,
         to: hub_node,
         kind: TransportLineKind::Rail,
@@ -6151,6 +6308,57 @@ fn blockaded_port_is_flagged() {
     );
 }
 
+/// Code review fix: `Observation::encode()`'s per-transport-node
+/// `blockaded` field is documented (`TRANSPORT_NODE_FIELD_COUNT`'s own doc)
+/// as `false` for every non-`Port` node, but used to call
+/// `naval::is_port_blockaded` for *every* node regardless of `kind` - that
+/// function only ever answers a *region's* question, so a blockaded
+/// region's `Depot`/`Junction` nodes read blockaded too. Wrong on every
+/// shipped scenario: every `mvp.json` region carries both a depot and a
+/// port node (CLAUDE.md's own FIX 1 note), so this was live on the
+/// reference scenario, not a hypothetical.
+///
+/// Confirmed this can fail: reverted the `node.kind == TransportNodeKind::
+/// Port` gate in `observation.rs` (calling `is_port_blockaded` for every
+/// node again) and re-ran - the negative assertion below failed immediately
+/// (東海's depot read `1.0` blockaded). Reverted before committing.
+#[test]
+fn blockade_flag_is_port_only_in_observation() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1); // owns 東海 (region 5), same setup as `blockade_stops_import`
+    let tokai = RegionId(5);
+
+    for zone in world.zones_touching(tokai) {
+        world.sea_zone_mut(zone).control = vec![1.0, 0.0, 0.0];
+    }
+    assert!(naval::is_port_blockaded(&world, tokai), "sanity: this setup must actually blockade the port");
+
+    let depot = world
+        .transport_nodes
+        .iter()
+        .position(|n| n.region == tokai && n.kind == TransportNodeKind::Depot)
+        .expect("東海 must have its own depot node, per CLAUDE.md's own FIX 1 note");
+    let port = world
+        .transport_nodes
+        .iter()
+        .position(|n| n.region == tokai && n.kind == TransportNodeKind::Port)
+        .expect("東海 must have its own port node");
+
+    let obs = Observation { faction, world: &world };
+    let encoded = obs.encode();
+
+    let nodes_offset = encoded.len()
+        - world.transport_nodes.len() * TRANSPORT_NODE_FIELD_COUNT;
+    let blockaded_field = |node_index: usize| encoded[nodes_offset + node_index * TRANSPORT_NODE_FIELD_COUNT + 1];
+
+    assert_eq!(
+        blockaded_field(depot),
+        0.0,
+        "a blockaded region's own Depot node must not read blockaded - only its Port node is under blockade"
+    );
+    assert_eq!(blockaded_field(port), 1.0, "the blockaded region's own Port node must read blockaded");
+}
+
 // ---------------------------------------------------------------------------
 // Scenario-declared victory conditions (design.md §5: "勝利条件は一つに限定
 // しない"; docs/future-work.md "japan47 が 720 日で決着しない"). Every
@@ -6438,6 +6646,7 @@ fn action_layer_samples() -> Vec<(Action, Layer)> {
             Action::RespondToNaturalLanguageProposal { from: faction, terms: vec![], accept: true },
             Layer::Diplomacy,
         ),
+        (Action::InterdictLine { line: crate::ids::TransportLineId(0) }, Layer::Military),
     ]
 }
 
@@ -6460,7 +6669,7 @@ fn every_action_variant_has_the_expected_layer() {
 }
 
 /// `action_layer_samples` must itself list exactly one sample per `Action`
-/// variant - 20 entries, matching the count in this module's own doc and in
+/// variant - 21 entries, matching the count in this module's own doc and in
 /// `crates/api/src/action_codec.rs`'s decoder. This is what stands in for
 /// the compiler's own exhaustiveness check (which `Action::layer`'s
 /// wildcard-free `match` already enforces at the type level) at the level
@@ -6471,7 +6680,7 @@ fn every_action_variant_has_the_expected_layer() {
 /// otherwise).
 #[test]
 fn layer_classification_is_exhaustive_over_all_samples() {
-    assert_eq!(action_layer_samples().len(), 20, "one sample per Action variant - update this alongside any new variant");
+    assert_eq!(action_layer_samples().len(), 21, "one sample per Action variant - update this alongside any new variant");
 }
 
 /// `ALL_LAYERS` must list every `Layer` variant exactly once, in the fixed
@@ -6514,6 +6723,7 @@ fn target_unit_identifies_exactly_the_unit_orders() {
         (Action::SetConscription(0.5), None),
         (Action::SetNationalFocus(NationalFocus::Technocracy), None),
         (Action::ProposeTreaty { to: faction, treaty: Treaty::Ceasefire }, None),
+        (Action::InterdictLine { line: crate::ids::TransportLineId(0) }, None),
     ];
     for (action, expected) in cases {
         assert_eq!(action.target_unit(), expected, "{action:?} should target {expected:?}");
@@ -6950,3 +7160,497 @@ fn japan_hex_transport_matches_stage_9c_verification() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Stage 9D (docs/phase9-spec.md "4. 観測・行動・AI"): the transport network's
+// own observation fields, `Action::InterdictLine`, and `Build`'s new
+// `Project::TransportLine`.
+// ---------------------------------------------------------------------------
+
+/// docs/phase9-spec.md §7 Stage 9D: "観測長が... 取れ" - and, more than just
+/// the *length* growing by the right count, the new per-line/per-node
+/// fields must actually carry the facts the spec asks for (capacity/
+/// condition/flow/usable per line, owned/blockaded per node).
+///
+/// Confirmed this can fail: temporarily left the new per-line/per-node
+/// loops in `Observation::encode()` unimplemented while leaving
+/// `encoding_len`'s formula updated - the trailing `debug_assert_eq!`
+/// inside `encode()` itself failed immediately (length mismatch). Separately,
+/// temporarily made `usable_by_self` always `true` regardless of ownership -
+/// this test's own `b_depot<->c_depot` assertion below failed. Reverted both
+/// before committing.
+#[test]
+fn observation_encodes_transport_network() {
+    let world = scenario::load_str(MINI_VALID_SCENARIO).expect("MINI_VALID_SCENARIO must be valid");
+    let f1 = world.regions[0].owner; // "a" is f1's own region
+    let obs = Observation { faction: f1, world: &world };
+    let encoded = obs.encode();
+
+    let expected_len = encoding_len(
+        world.regions.len(),
+        world.sea_zones.len(),
+        world.factions.len(),
+        world.transport_lines.len(),
+        world.transport_nodes.len(),
+    );
+    assert_eq!(encoded.len(), expected_len, "encode() must actually grow by the transport section's own length");
+
+    let lines_offset = world.regions.len() * REGION_FIELD_COUNT
+        + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+        + FACTION_FIELD_COUNT
+        + world.factions.len() * DIPLOMACY_FIELD_COUNT;
+
+    // Line 0 (declaration order - `transport_network_builds_correctly`'s own
+    // doc): a_depot -> b_depot, both f1's own territory.
+    let line0 = world.transport_lines[0];
+    let base0 = lines_offset;
+    assert_eq!(encoded[base0], line0.capacity.get(), "capacity field");
+    assert_eq!(encoded[base0 + 1], line0.condition.get(), "condition field");
+    assert_eq!(encoded[base0 + 3], 1.0, "a_depot<->b_depot is entirely f1's own network, so f1 must see it usable");
+
+    // Line 1: b_depot -> c_depot, straddling f1 (b) and f2 (c) - unusable
+    // for either side, per `logistics::compute_transport_flow`'s own
+    // same-owner rule.
+    let base1 = lines_offset + TRANSPORT_LINE_FIELD_COUNT;
+    assert_eq!(encoded[base1 + 3], 0.0, "a line straddling two owners must not read usable");
+
+    let nodes_offset = lines_offset + world.transport_lines.len() * TRANSPORT_LINE_FIELD_COUNT;
+    // Node 0: a_depot, in f1's own region "a".
+    assert_eq!(encoded[nodes_offset], 1.0, "a_depot's region belongs to f1");
+    // Node 2: c_depot, in f2's region "c".
+    assert_eq!(encoded[nodes_offset + 2 * TRANSPORT_NODE_FIELD_COUNT], 0.0, "c_depot's region does not belong to f1");
+}
+
+/// `MINI_VALID_SCENARIO` extended with a fourth region `d`, owned by `f2`
+/// alongside `c` and connected only to `c` - so `c_depot<->d_depot` is a
+/// transport line owned entirely by `f2`, the shape `Action::InterdictLine`
+/// needs a legitimate target to test against (`b_depot<->c_depot` alone,
+/// straddling both owners, can't exercise the "line is hostile but valid"
+/// path at all).
+fn scenario_with_enemy_owned_line() -> String {
+    MINI_VALID_SCENARIO
+        .replacen(
+            r#"{ "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
+      "links": [ { "to": "b", "kind": "rail" } ] }
+  ],"#,
+            r#"{ "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
+      "links": [ { "to": "b", "kind": "rail" }, { "to": "d", "kind": "rail" } ] },
+    { "id": "d", "name": "D", "terrain": "plain", "population": 10.0,
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"arms":1.0},
+      "infrastructure": 0.5, "port": 0.0, "position": [3.0, 0.0],
+      "links": [ { "to": "c", "kind": "rail" } ] }
+  ],"#,
+            1,
+        )
+        .replacen(
+            r#""nodes": [
+      { "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },
+      { "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },
+      { "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" }
+    ],"#,
+            r#""nodes": [
+      { "id": "a_depot", "name": "A Depot", "kind": "depot", "region": "a" },
+      { "id": "b_depot", "name": "B Depot", "kind": "depot", "region": "b" },
+      { "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" },
+      { "id": "d_depot", "name": "D Depot", "kind": "depot", "region": "d" }
+    ],"#,
+            1,
+        )
+        .replacen(
+            r#""lines": [
+      { "from": "a_depot", "to": "b_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }
+    ]"#,
+            r#""lines": [
+      { "from": "a_depot", "to": "b_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "b_depot", "to": "c_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
+      { "from": "c_depot", "to": "d_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 }
+    ]"#,
+            1,
+        )
+        .replacen(r#""regions": ["c"]"#, r#""regions": ["c", "d"]"#, 1)
+}
+
+/// `Action::InterdictLine` (docs/phase9-spec.md "4. 行動"): rejected against
+/// a line this faction has no legitimate reason to strike - its own line, a
+/// line straddling two different owners, or an out-of-range id - and
+/// otherwise lowers the targeted (single-owner, hostile) line's `Condition`
+/// by exactly `LINE_INTERDICTION_DAMAGE`.
+///
+/// Confirmed this can fail: temporarily dropped the `owner_a == faction`
+/// check from `apply_interdict_line` and re-ran - the "own line" assertion
+/// below failed (f1 was able to interdict its own a_depot<->b_depot line).
+/// Reverted before committing.
+#[test]
+fn interdict_line_validates_target_and_damages_condition() {
+    let text = scenario_with_enemy_owned_line();
+    let mut world = scenario::load_str(&text).expect("scenario_with_enemy_owned_line must be valid");
+    let f1 = FactionId(0); // owns a, b
+    fn find_line(world: &World, ra_name: &str, rb_name: &str) -> TransportLineId {
+        let region_named =
+            |name: &str| -> RegionId { RegionId(["a", "b", "c", "d"].iter().position(|n| *n == name).unwrap() as u32) };
+        let (ra, rb) = (region_named(ra_name), region_named(rb_name));
+        let idx = world
+            .transport_lines
+            .iter()
+            .position(|l| {
+                let (na, nb) = (world.transport_node(l.from).region, world.transport_node(l.to).region);
+                (na == ra && nb == rb) || (na == rb && nb == ra)
+            })
+            .unwrap_or_else(|| panic!("no line between {ra_name} and {rb_name}"));
+        TransportLineId(idx as u32)
+    }
+
+    // Own line (a<->b, both f1): rejected, condition untouched.
+    let own_line = find_line(&world, "a", "b");
+    let before = world.transport_line(own_line).condition.get();
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::InterdictLine { line: own_line }),
+        Err(ActionError::LineNotHostile)
+    );
+    assert_eq!(world.transport_line(own_line).condition.get(), before);
+
+    // Mixed-ownership line (b:f1 <-> c:f2): rejected.
+    let mixed_line = find_line(&world, "b", "c");
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::InterdictLine { line: mixed_line }),
+        Err(ActionError::LineNotHostile)
+    );
+
+    // Out-of-range line id: rejected as InvalidLine, never a panic.
+    let bogus = TransportLineId(world.transport_lines.len() as u32 + 3);
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::InterdictLine { line: bogus }),
+        Err(ActionError::InvalidLine)
+    );
+
+    // Enemy-owned line (c<->d, both f2, and f1 is at war with f2 by
+    // MINI_VALID_SCENARIO's default `"blocs": []` unconditional War):
+    // accepted, damages condition by exactly LINE_INTERDICTION_DAMAGE.
+    let enemy_line = find_line(&world, "c", "d");
+    let before_enemy = world.transport_line(enemy_line).condition.get();
+    action::apply_action(&mut world, f1, Action::InterdictLine { line: enemy_line })
+        .expect("a single-owner hostile line must be a valid InterdictLine target");
+    let after_enemy = world.transport_line(enemy_line).condition.get();
+    assert!(
+        (before_enemy - after_enemy - LINE_INTERDICTION_DAMAGE).abs() < 1e-6,
+        "expected condition to drop by exactly LINE_INTERDICTION_DAMAGE ({LINE_INTERDICTION_DAMAGE}), \
+         went from {before_enemy} to {after_enemy}"
+    );
+}
+
+/// `Action::Build`'s `Project::TransportLine` (docs/phase9-spec.md "4. 行動":
+/// "`Build` の `Project` に輸送網に対するものを追加する"): rejected when the
+/// hosting region isn't actually one of the line's own two endpoints, or
+/// when the line isn't entirely this faction's own network - and, once
+/// validly queued and fully funded to completion, raises the line's
+/// `Condition` by exactly `TRANSPORT_LINE_REPAIR_STEP`.
+///
+/// Confirmed this can fail: temporarily dropped the endpoint-ownership check
+/// from `apply_build`'s `Project::TransportLine` branch and re-ran - the
+/// "mixed-ownership line" assertion below failed (f1 was able to queue an
+/// investment in a line half-owned by f2). Reverted before committing.
+#[test]
+fn build_transport_line_project_validates_and_repairs_on_completion() {
+    let mut world = scenario::load_str(MINI_VALID_SCENARIO).expect("MINI_VALID_SCENARIO must be valid");
+    let f1 = FactionId(0);
+    let a = RegionId(0);
+    let b = RegionId(1);
+
+    let own_line = TransportLineId(0); // a_depot -> b_depot, declared first
+    let mixed_line = TransportLineId(1); // b_depot -> c_depot, declared second
+
+    // Wrong host: `a` is f1's own region (so this isn't merely the ordinary
+    // "not your region" rejection), but it isn't an endpoint of the b<->c
+    // line at all.
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::Build { region: a, project: Project::TransportLine(mixed_line) }),
+        Err(ActionError::InvalidValue)
+    );
+
+    // Mixed-ownership line: `b` *is* an endpoint, but the line's other end
+    // (c) belongs to f2, so this must still be rejected.
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::Build { region: b, project: Project::TransportLine(mixed_line) }),
+        Err(ActionError::LineNotOwned)
+    );
+
+    // Out-of-range line id.
+    let bogus = TransportLineId(world.transport_lines.len() as u32 + 3);
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::Build { region: a, project: Project::TransportLine(bogus) }),
+        Err(ActionError::InvalidLine)
+    );
+
+    // Valid: damage the line, queue the repair project at `a`, fund it to
+    // completion, and check the completion effect.
+    world.transport_lines[own_line.index()].condition = Condition::new(0.4).unwrap();
+    action::apply_action(&mut world, f1, Action::Build { region: a, project: Project::TransportLine(own_line) })
+        .expect("a's own line, hosted at a's own endpoint, must be a valid Build target");
+    assert_eq!(world.region(a).construction.map(|c| c.project), Some(Project::TransportLine(own_line)));
+
+    world.faction_mut(f1).stock[Good::Machinery.index()] = 1e6;
+    world.faction_mut(f1).stock[Good::Steel.index()] = 1e6;
+    for _ in 0..200 {
+        if world.region(a).construction.is_none() {
+            break;
+        }
+        construction::tick_construction(&mut world);
+    }
+    assert!(world.region(a).construction.is_none(), "a fully-funded project must complete within 200 ticks");
+    let after = world.transport_lines[own_line.index()].condition.get();
+    assert!(
+        (after - (0.4 + TRANSPORT_LINE_REPAIR_STEP)).abs() < 1e-4,
+        "completion must raise condition by exactly TRANSPORT_LINE_REPAIR_STEP (0.4 + {TRANSPORT_LINE_REPAIR_STEP} = {}), got {after}",
+        0.4 + TRANSPORT_LINE_REPAIR_STEP
+    );
+}
+
+/// A transport-line repair validated at order time must not still be applied
+/// once the line stopped qualifying (`codex review`, P2). `apply_build`
+/// checks that both of the line's endpoint regions belong to the ordering
+/// faction, but that check ran when the order was issued; the front can move
+/// underneath a project that takes many ticks to fund. Without revalidation
+/// at completion, capturing the host region hands the captor a free repair of
+/// a line it does not own - and more generally it is CLAUDE.md's 「発令時点の
+/// 値を焼き込まない」: a condition that must hold *now* was sampled once.
+///
+/// Cancelling (rather than stalling) is what keeps this from creating a
+/// different listed defect: a project that could neither complete nor be
+/// cleared would be a state with no exit, so the region's `construction`
+/// slot is released and it is free to order something legal.
+///
+/// **Confirmed this test can fail.** Removing `tick_construction`'s
+/// `transport_line_still_owned` guard makes it repair the now-foreign line
+/// anyway: `condition` went 0.4 -> 0.55 and `construction` reported
+/// `None` by completion rather than by cancellation, tripping both
+/// assertions below. Restored, and it passes.
+#[test]
+fn transport_line_repair_is_abandoned_when_the_line_stops_qualifying() {
+    let mut world = scenario::load_str(MINI_VALID_SCENARIO).expect("MINI_VALID_SCENARIO must be valid");
+    let f1 = FactionId(0);
+    let f2 = FactionId(1);
+    let a = RegionId(0);
+    let b = RegionId(1);
+    let own_line = TransportLineId(0); // a_depot <-> b_depot, both f1's at load time
+
+    world.transport_lines[own_line.index()].condition = Condition::new(0.4).unwrap();
+    action::apply_action(&mut world, f1, Action::Build { region: a, project: Project::TransportLine(own_line) })
+        .expect("both endpoints are f1's at order time, so the order is legal");
+    assert_eq!(world.region(a).construction.map(|c| c.project), Some(Project::TransportLine(own_line)));
+
+    // The far endpoint changes hands while the project is still in progress.
+    world.regions[b.index()].owner = f2;
+
+    world.faction_mut(f1).stock[Good::Machinery.index()] = 1e6;
+    world.faction_mut(f1).stock[Good::Steel.index()] = 1e6;
+    for _ in 0..200 {
+        if world.region(a).construction.is_none() {
+            break;
+        }
+        construction::tick_construction(&mut world);
+    }
+
+    assert!(
+        world.region(a).construction.is_none(),
+        "the stale project must be cleared, not left occupying the region's construction slot forever"
+    );
+    let after = world.transport_lines[own_line.index()].condition.get();
+    assert!(
+        (after - 0.4).abs() < 1e-4,
+        "a line whose far endpoint was captured mid-construction must not be repaired by the order that \
+         was legal only before the capture: condition should still be 0.4, got {after}"
+    );
+}
+
+/// Defect fix (post-Stage-9B): `distribute_supply`'s/`land_unit_supply_avail`'s
+/// "non-owner" branch used to guess at an occupier's supply with
+/// `0.4 * world.supply[some same-owner neighbor]`, a formula that reads
+/// near-zero whenever that neighbor happens to have no units of its own to
+/// draw the figure up - regardless of how much the network could actually
+/// carry through it (this module's own top-of-file doc has the full
+/// account). Fixed by routing an occupier's demand into
+/// `compute_transport_flow` itself, through its own faction's network to
+/// the frontier and across into wherever it actually stands, so it is a
+/// real flow candidate rather than a downstream guess.
+///
+/// mvp's `kanto` (region 3, touhou_rengou's own, highly industrial) shares a
+/// direct `TransportLine` (`kanto_depot -> shinetsu_hokuriku_depot`) with
+/// `shinetsu_hokuriku` (region 4, owned by chuo_domei) - the only two
+/// regions in the whole map connected by a line crossing a faction
+/// boundary. Standing a lone touhou_rengou unit in `shinetsu_hokuriku`
+/// (occupying, not owning, it) is exactly the scenario the defect
+/// description names: "adjacent to a healthy, well-supplied friendly
+/// network."
+fn station_foreign_unit(world: &mut World, owner: FactionId, region: RegionId) -> UnitId {
+    let id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id,
+        owner,
+        name: "Occupier".to_string(),
+        station: Station::Region(region),
+        movement: None,
+        manpower: 1.0,
+        equipment: UNIT_EQUIPMENT,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.0,
+        arms_delivery: 0.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(region),
+        experience: 0.0,
+        alive: true,
+    });
+    id
+}
+
+/// **Confirmed this can fail**: reverting `distribute_supply`'s non-owner
+/// `avail` branch to the pre-fix `world.regions[r].links.iter()...find a
+/// same-owner, uncontested neighbor... * PROJECTED_SUPPLY_FACTOR` formula
+/// (and `land_unit_supply_avail`'s identical branch) while leaving
+/// everything else in place reproduces the exact failure this test is
+/// built to catch: `shinetsu_hokuriku` has no `Region::links` neighbor
+/// touhou_rengou owns at all (mvp's region graph, unlike the transport
+/// graph, has no edge between `shinetsu_hokuriku` and `kanto`), so the old
+/// formula's `.fold(0.0f32, f32::max)` over an empty iterator returns
+/// `0.0` - `avail_occupier` came back exactly `0.0` and this test's first
+/// assertion failed with "an occupier standing next to a healthy friendly
+/// network must actually receive supply, got 0". Restored before
+/// committing.
+/// `codex review` (P2): `usable_by_self` in the observation must follow the
+/// *same* rule the flow model does (`TransportGraph::line_eligible_for`,
+/// which keys off `controlled` — ownership **or** live units present), not a
+/// second ownership-only rule that drifts from it. A faction occupying both
+/// endpoints really does haul supply over the line after the Stage 9D
+/// occupier fix, so reporting it unusable would teach an RL or API consumer
+/// the opposite of what the simulator does.
+///
+/// **Confirmed this test can fail.** Reverting the flag to the plain
+/// `owner == self.faction` test on both endpoints makes the occupier read
+/// `0.0` for a line it is actively hauling over, tripping the second
+/// assertion. Restored, and it passes.
+#[test]
+fn transport_line_usable_flag_follows_the_flow_models_own_rule() {
+    let mut world = scenario::load_str(MINI_VALID_SCENARIO).expect("MINI_VALID_SCENARIO must be valid");
+    let f2 = FactionId(1);
+    let line = &world.transport_lines[0];
+    let ra = world.transport_node(line.from).region;
+    let rb = world.transport_node(line.to).region;
+    assert_eq!(world.region(ra).owner, world.region(rb).owner, "line 0 must start wholly owned by one faction");
+    assert_ne!(world.region(ra).owner, f2, "and that faction must not already be f2");
+
+    let usable_idx = world.regions.len() * REGION_FIELD_COUNT
+        + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+        + FACTION_FIELD_COUNT
+        + world.factions.len() * DIPLOMACY_FIELD_COUNT
+        + 3; // line 0's `usable_by_self` field
+
+    let before = Observation { faction: f2, world: &world }.encode();
+    assert_eq!(before[usable_idx], 0.0, "f2 neither owns nor occupies either endpoint yet");
+
+    // f2 physically occupies both endpoints without owning them - exactly
+    // the case `compute_transport_flow`'s `controlled` matrix admits.
+    station_foreign_unit(&mut world, f2, ra);
+    station_foreign_unit(&mut world, f2, rb);
+
+    let after = Observation { faction: f2, world: &world }.encode();
+    assert_eq!(
+        after[usable_idx], 1.0,
+        "a faction occupying both endpoints hauls supply over this line, so the observation must say so"
+    );
+}
+
+#[test]
+fn occupier_adjacent_to_healthy_network_gets_supplied() {
+    let kanto = RegionId(3);
+    let shinetsu_hokuriku = RegionId(4);
+    let touhou_rengou = FactionId(0);
+    let chuo_domei = FactionId(1);
+    assert_eq!(scenario::build_world().region(shinetsu_hokuriku).owner, chuo_domei, "test setup: shinetsu_hokuriku must be chuo_domei's own territory");
+    assert_eq!(scenario::build_world().region(kanto).owner, touhou_rengou, "test setup: kanto must be touhou_rengou's own territory");
+
+    let mut world = scenario::build_world();
+    // Give chuo_domei's own units nothing to draw shinetsu_hokuriku's line
+    // capacity down with, isolating "does the occupier get served at all"
+    // from "how does it split against the owner's own demand" (a separate,
+    // already-covered property - `oversubscribed_allocation_is_proportional_
+    // and_order_independent`).
+    world.units.retain(|u| u.owner != chuo_domei);
+    let occupier = station_foreign_unit(&mut world, touhou_rengou, shinetsu_hokuriku);
+
+    logistics::recompute_supply(&mut world);
+    let avail_occupier = world.supply_by_faction[shinetsu_hokuriku.index()][touhou_rengou.index()];
+    // `compute_transport_flow`'s `served` is demand-*bounded* (Stage 9B's
+    // whole point - a delivered amount, never a ceiling exceeding what the
+    // unit could use), so a lone unit's own demand (~1.0, `SUPPLY_NEED_PER_
+    // MANPOWER * UNIT_MANPOWER`) is also this candidate's own ceiling here.
+    // The property under test is that kanto's ample production actually
+    // clears essentially all of that demand through the direct line, not
+    // the pre-fix formula's near-zero regardless of capacity.
+    assert!(
+        avail_occupier > 0.9,
+        "an occupier standing next to a healthy friendly network must actually receive nearly all its own demand, \
+         got {avail_occupier} (kanto's own production should easily clear a lone unit's demand through the direct \
+         kanto<->shinetsu_hokuriku line)"
+    );
+    assert_eq!(
+        logistics::land_unit_supply_avail(&world, occupier),
+        avail_occupier,
+        "land_unit_supply_avail must read the exact same (region, faction) figure distribute_supply's own avail array does"
+    );
+
+    // The full pass actually raises the occupier's own `unit.supply`, not
+    // just the region-level `avail` figure - the property that ultimately
+    // matters for combat power (docs/mvp-spec.md's own supply->combat_power
+    // chain).
+    for _ in 0..30 {
+        logistics::distribute_supply(&mut world);
+    }
+    assert!(
+        world.unit(occupier).supply > 0.5,
+        "30 ticks of a healthy, uncontested supply line should ease the occupier's own supply ratio well above \
+         zero, got {}",
+        world.unit(occupier).supply
+    );
+}
+
+/// The other half of the same property: a unit genuinely beyond every
+/// route its own faction's network could ever reach must read `0.0`,
+/// because the flow search never finds a path there - not because of a
+/// projection formula guessing wrong. `kyushu` (region 9, seihou_domei's
+/// own) shares no `TransportLine` with anything touhou_rengou owns or
+/// could ever reach without crossing chuo_domei's or seihou_domei's own
+/// territory (which `compute_transport_flow`'s eligibility rule forbids -
+/// a line is only usable by a hauling faction when *both* its ends are
+/// that faction's own or physically occupied by it).
+///
+/// **Confirmed this can fail**: with the pre-fix formula restored (as
+/// above), this assertion is *not* what catches the defect - the old
+/// formula also reads `0.0` here (there being no `Region::links` neighbor
+/// either) for the wrong reason, which is exactly why this test also pins
+/// the healthy case above: a fix that made this one pass by, say, defaulting
+/// unreachable demand to `0.0` while leaving the healthy case broken would
+/// slip through this test alone.
+#[test]
+fn occupier_with_no_route_home_gets_nothing() {
+    let kyushu = RegionId(9);
+    let touhou_rengou = FactionId(0);
+    let seihou_domei = FactionId(2);
+    assert_eq!(scenario::build_world().region(kyushu).owner, seihou_domei, "test setup: kyushu must be seihou_domei's own territory");
+
+    let mut world = scenario::build_world();
+    let occupier = station_foreign_unit(&mut world, touhou_rengou, kyushu);
+
+    logistics::recompute_supply(&mut world);
+    let avail_occupier = world.supply_by_faction[kyushu.index()][touhou_rengou.index()];
+    assert_eq!(
+        avail_occupier, 0.0,
+        "a unit with no possible route back to its own faction's network must read exactly 0.0, not a nonzero \
+         guess: got {avail_occupier}"
+    );
+    assert_eq!(logistics::land_unit_supply_avail(&world, occupier), 0.0);
+}

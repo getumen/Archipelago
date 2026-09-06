@@ -264,6 +264,13 @@ pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
         | Action::BreakTreaty { .. }
         | Action::ProposeInNaturalLanguage { .. }
         | Action::RespondToNaturalLanguageProposal { .. } => RejectionTarget::Diplomacy,
+        // Stage 9D (docs/phase9-spec.md "4. 行動"): no panel in this client
+        // issues `InterdictLine` yet (this task's client scope is the
+        // `MapMode::Supply` line rendering, not a new interactive order) -
+        // bucketed with the other broad, no-specific-panel strategic orders
+        // (`SetNationalFocus`'s own bucket) rather than inventing a
+        // `RejectionTarget` variant nothing can route to yet.
+        Action::InterdictLine { .. } => RejectionTarget::Policy,
     }
 }
 
@@ -376,6 +383,21 @@ pub(crate) struct ConstructionMarker(pub RegionId);
 /// `LinkVisualMarker::{a,b}`.
 #[derive(Component)]
 pub(crate) struct ChokepointMarker {
+    pub a: RegionId,
+    pub b: RegionId,
+}
+
+/// Stage 9D (docs/phase9-spec.md "5. クライアント"): the same zoom-invariant-
+/// marker treatment `ChokepointMarker` gets, for a severed line instead of a
+/// saturated one (`overlay::COLOR_LINE_CUT`'s own doc) - a thin line segment
+/// alone shrinks to nothing at the default whole-map fitted zoom exactly the
+/// way an ordinary chokepoint link would without its own marker
+/// (`overlay`'s module doc, "Visual hierarchy"). Mutually exclusive with
+/// `ChokepointMarker` on any given link pair (a saturated line is still
+/// carrying its own full capacity; a cut line carries none), so the two
+/// never need to coexist visually on the same link.
+#[derive(Component)]
+pub(crate) struct CutLineMarker {
     pub a: RegionId,
     pub b: RegionId,
 }

@@ -18,7 +18,7 @@
 use crate::balance::{
     INFRA_DAMAGE_SHARE, LINE_CONDITION_DAMAGE_PER_TICK, LINE_CONDITION_REPAIR_PER_TICK,
 };
-use crate::ids::{RegionId, TransportNodeId};
+use crate::ids::{RegionId, TransportLineId, TransportNodeId};
 use crate::world::World;
 
 /// docs/phase9-spec.md "輸送ノード": what a `TransportNode` is for.
@@ -182,6 +182,11 @@ impl Capacity {
 /// *is* a separate full ceiling per direction.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct TransportLine {
+    /// Stage 9D (docs/phase9-spec.md "4. 行動"): this line's own stable
+    /// address, matching its index in `World::transport_lines` - the same
+    /// "id equals declaration order" convention `TransportNode::id` already
+    /// follows (`ids::TransportLineId`'s own doc).
+    pub id: TransportLineId,
     pub from: TransportNodeId,
     pub to: TransportNodeId,
     pub kind: TransportLineKind,

@@ -939,3 +939,29 @@ pub const LINE_CONDITION_DAMAGE_PER_TICK: f32 = 0.03;
 /// siege near zero takes a real stretch of peace to fully recover, not one
 /// quiet tick.
 pub const LINE_CONDITION_REPAIR_PER_TICK: f32 = 0.015;
+
+/// Stage 9D (docs/phase9-spec.md "4. 行動"): `Condition` lost in one
+/// `Action::InterdictLine` - a deliberate, targeted strike, so meaningfully
+/// larger than a single day of `LINE_CONDITION_DAMAGE_PER_TICK`'s passive
+/// contested-region wear, but well short of severing a healthy line outright
+/// in one action - repeated interdiction (or ongoing contest at an endpoint)
+/// is what actually cuts a route, not one order.
+pub const LINE_INTERDICTION_DAMAGE: f32 = 0.2;
+
+/// Building points required to complete `construction::Project::
+/// TransportLine` (`construction::required_points`) - between `Repair`
+/// (`CONSTRUCTION_REQUIRED_REPAIR`, the cheapest existing project) and
+/// `Capacity` (`CONSTRUCTION_REQUIRED_CAPACITY`): restoring a route is real
+/// infrastructure work, not the free, everyday drip `LINE_CONDITION_REPAIR_
+/// PER_TICK` already does for free once a region stops being contested, but
+/// it is not a bigger undertaking than rebuilding the region's own
+/// devastation.
+pub const CONSTRUCTION_REQUIRED_TRANSPORT_LINE: f32 = 40.0;
+
+/// Effect of one completed `Project::TransportLine`
+/// (`construction::apply_completion`): raises the targeted line's
+/// `Condition` by this much (capped at `Condition::FULL`) - the same
+/// step-not-full-reset shape `REPAIR_STEP` already uses for region
+/// devastation, so a badly damaged line still needs more than one
+/// completed project to fully recover.
+pub const TRANSPORT_LINE_REPAIR_STEP: f32 = 0.3;

@@ -17,7 +17,7 @@ use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
-use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, UnitId};
 use archipelago_sim::world::{Domain, Station};
 
 use crate::json::Value;
@@ -34,12 +34,18 @@ fn project_from_value(v: &Value) -> Result<Project, String> {
             "repair" => Ok(Project::Repair),
             other => Err(format!("unknown project `{other}`")),
         },
-        Value::Object(_) => {
+        Value::Object(_) if v.get("capacity").is_some() => {
             let good_key = v.get("capacity").and_then(Value::as_str).ok_or("expected `capacity` to name a good")?;
             let good = good_from_key(good_key).ok_or_else(|| format!("unknown good `{good_key}`"))?;
             Ok(Project::Capacity(good))
         }
-        _ => Err("project must be a string or {\"capacity\":<good>}".to_string()),
+        // Stage 9D (docs/phase9-spec.md "4. 行動"): `Build`'s transport-
+        // network project - `{"transport_line": <line id>}`.
+        Value::Object(_) if v.get("transport_line").is_some() => {
+            let line = v.get("transport_line").and_then(Value::as_u32).ok_or("expected integer `transport_line`")?;
+            Ok(Project::TransportLine(TransportLineId(line)))
+        }
+        _ => Err("project must be a string, {\"capacity\":<good>}, or {\"transport_line\":<id>}".to_string()),
     }
 }
 
@@ -201,6 +207,10 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             }
             Ok(Action::RespondToNaturalLanguageProposal { from, terms, accept })
         }
+        "interdict_line" => {
+            let line = v.get("line").and_then(Value::as_u32).ok_or("expected integer `line`")?;
+            Ok(Action::InterdictLine { line: TransportLineId(line) })
+        }
         other => Err(format!("unknown action type `{other}`")),
     }
 }
@@ -352,6 +362,7 @@ fn actions_schema() -> Value {
                 field_array("terms", "treaty_term", true),
             ],
         ),
+        action_entry("interdict_line", Layer::Military, vec![field("line", "integer", true)]),
     ])
 }
 
@@ -374,7 +385,16 @@ fn enums_schema() -> Value {
             "treaty_term_kind",
             Value::arr(vec![Value::str("sign"), Value::str("withdraw"), Value::str("cede"), Value::str("deliver")]),
         ),
-        ("project_kind", Value::arr(vec![Value::str("infrastructure"), Value::str("port"), Value::str("repair"), Value::str("capacity")])),
+        (
+            "project_kind",
+            Value::arr(vec![
+                Value::str("infrastructure"),
+                Value::str("port"),
+                Value::str("repair"),
+                Value::str("capacity"),
+                Value::str("transport_line"),
+            ]),
+        ),
     ])
 }
 
@@ -396,9 +416,13 @@ fn objects_schema() -> Value {
             Value::obj(vec![
                 (
                     "note",
-                    Value::str("either a string naming one of enums.project_kind's non-\"capacity\" entries, or {\"capacity\":<good>}"),
+                    Value::str(
+                        "either a string naming one of enums.project_kind's non-\"capacity\"/\"transport_line\" \
+                         entries, {\"capacity\":<good>}, or {\"transport_line\":<line id>}",
+                    ),
                 ),
                 ("capacity_fields", Value::arr(vec![field_enum("capacity", "good", true)])),
+                ("transport_line_fields", Value::arr(vec![field("transport_line", "integer", true)])),
             ]),
         ),
         (
@@ -445,6 +469,9 @@ pub fn action_error_key(e: ActionError) -> &'static str {
         ActionError::AlreadyBuilding => "already_building",
         ActionError::NoConstruction => "no_construction",
         ActionError::NoPort => "no_port",
+        ActionError::InvalidLine => "invalid_line",
+        ActionError::LineNotOwned => "line_not_owned",
+        ActionError::LineNotHostile => "line_not_hostile",
     }
 }
 

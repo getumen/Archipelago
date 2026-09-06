@@ -211,6 +211,19 @@ const Z_UNIT: f32 = 1.0;
 /// only a few world units long shrinks to sub-pixel at map-fit zoom no
 /// matter how many times its own thickness is multiplied.
 pub(super) const CHOKEPOINT_MARKER_RADIUS: f32 = 6.0;
+/// Stage 9D: the same zoom-invariant treatment as `CHOKEPOINT_MARKER_RADIUS`
+/// (its own doc has the full reasoning - a short link's own geometry shrinks
+/// to nothing at map-fit zoom regardless of color or thickness), for a
+/// severed line instead of a saturated one. A distinct shape (triangle, not
+/// `ChokepointMarker`'s diamond) and a hair smaller, so the two never read
+/// as the same mark even before color is considered - the two states are
+/// mutually exclusive per link (`CutLineMarker`'s own doc) but sit at the
+/// same screen position, so shape is what tells a viewer which is which
+/// once they're used to looking for either.
+pub(super) const CUT_MARKER_RADIUS: f32 = 5.0;
+/// Same layer as `Z_CHOKEPOINT_MARKER` - the two markers never coexist on
+/// one link, so there is no stacking order to get right between them.
+const Z_CUT_MARKER: f32 = 0.4;
 
 /// Supply-ring thickness (world units) - the annulus `overlay::sync_supply_overlay`
 /// recolors every frame while the overlay is on.
@@ -350,6 +363,18 @@ pub(super) fn setup(
                 Transform::from_xyz((x1 + x2) / 2.0, (y1 + y2) / 2.0, Z_CHOKEPOINT_MARKER),
                 Visibility::Hidden,
                 super::ChokepointMarker { a: region.id, b: link.to },
+            ));
+
+            // Stage 9D: `CutLineMarker`'s own doc - the same pre-spawned,
+            // hidden-until-relevant, zoom-rescaled treatment as the
+            // chokepoint marker just above, for a severed line instead of a
+            // saturated one.
+            commands.spawn((
+                Mesh2d(meshes.add(RegularPolygon::new(CUT_MARKER_RADIUS, 3))),
+                MeshMaterial2d(materials.add(ColorMaterial::from_color(overlay::COLOR_LINE_CUT))),
+                Transform::from_xyz((x1 + x2) / 2.0, (y1 + y2) / 2.0, Z_CUT_MARKER),
+                Visibility::Hidden,
+                super::CutLineMarker { a: region.id, b: link.to },
             ));
         }
     }
