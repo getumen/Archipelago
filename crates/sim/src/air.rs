@@ -22,20 +22,32 @@
 //! `commit_instantaneous_air_grant`) - never a fresh, independent capacity
 //! query of its own.
 //!
-//! Stage 10A ships no air-vs-air combat, air superiority or interdiction
+//! Stage 10A shipped no air-vs-air combat, air superiority or interdiction
 //! (10B/10C) - "in combat" for an air unit's own upkeep multiplier below
-//! means only that the airfield's own region is currently contested by a
+//! meant only that the airfield's own region is currently contested by a
 //! hostile land force, the same fact `military::is_pinned`'s `Station::
-//! Airfield` arm already keys "pinned" off; there is no separate air-combat
-//! flag to fold in yet.
+//! Airfield` arm already keys "pinned" off; there was no separate
+//! air-combat flag to fold in yet.
+//!
+//! Stage 10B (docs/phase10-spec.md "2. 制空権") adds `tick_air_superiority`
+//! below: air superiority stands over a *region*, for whichever factions'
+//! airfields' committed air power reaches it within `AIR_OPERATING_RADIUS_
+//! KM` (straight-line geographic distance between `Region::position`s,
+//! never the transport network - aircraft don't fly along railways). It
+//! deliberately still does nothing else this stage - not wired into
+//! interdiction, supply or ground combat (10C's job) - so its correctness
+//! can be verified in isolation first, the same 8A/8B, 9A/9B split this
+//! phase's own §5 calls out by name.
 
 use crate::balance::{
-    ARMS_SUPPLY_NEED_PER_GAP, COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER, SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
+    AIR_OPERATING_RADIUS_KM, ARMS_SUPPLY_NEED_PER_GAP, COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER,
+    SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
 };
 use crate::good::Good;
-use crate::ids::UnitId;
+use crate::ids::{RegionId, UnitId};
 use crate::logistics;
-use crate::world::World;
+use crate::transport::TransportNodeKind;
+use crate::world::{AirSuperiority, World};
 
 /// Per-node, per-faction Munitions/Arms upkeep demand this tick - the
 /// air-domain twin of `logistics::region_demand`/`naval::sea_demand`.
@@ -204,4 +216,109 @@ pub fn instantaneous_air_arms_delivery(world: &World, unit_id: UnitId) -> (f32, 
     let demand_arms = need_equipment * ARMS_SUPPLY_NEED_PER_GAP;
     let ratio = (share_arms / demand_arms).min(1.0);
     (ratio, need_equipment * ratio)
+}
+
+/// Per-`Airfield`-node, per-faction committed air power - `combat_power()`
+/// summed over every alive air unit based there, in ascending `UnitId`
+/// order (`World::units`'s own storage order, never a `HashMap`). Split out
+/// of `tick_air_superiority` below so that function's O(regions ×
+/// airfields) reach test walks this once-computed, node-indexed table
+/// rather than re-scanning every unit for every region - the same
+/// single-pass-over-units shape `air_demand` above already uses, reused
+/// rather than reinvented (docs/conventions.md §1, "エクストリームプログラ
+/// ミング禁止" cuts the other way too: don't refuse to share a shape that
+/// already fits). A node that isn't an `Airfield` simply never has any
+/// `Station::Airfield(that node)` unit, so its row stays all zero.
+fn node_air_power(world: &World) -> Vec<Vec<f32>> {
+    let n_nodes = world.transport_nodes.len();
+    let n_factions = world.factions.len();
+    let mut power = vec![vec![0.0f32; n_factions]; n_nodes];
+    for unit in &world.units {
+        if !unit.alive {
+            continue;
+        }
+        let Some(node) = unit.station.airfield() else {
+            continue;
+        };
+        power[node.index()][unit.owner.index()] += unit.combat_power();
+    }
+    power
+}
+
+/// Straight-line distance between two `Region::position`s - deliberately
+/// plain Euclidean `sqrt`, no map projection: docs/phase10-spec.md "2. 制空
+/// 権" only asks for "地理的な距離" (geographic distance) as opposed to
+/// distance through the transport network, not a geodesic on an ellipsoid,
+/// and every position `crate::sim` ever sees already went through whatever
+/// projection produced it (`tools/hexmap/hexgrid.py`'s equirectangular
+/// approximation, for `scenarios/japan_hex.json`) before reaching this crate.
+fn geographic_distance(a: [f32; 2], b: [f32; 2]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Recomputes every region's `Region::air_superiority` from the committed
+/// air power of whichever factions can currently reach it - mirrors
+/// `naval::tick_sea_control`'s `control[f] = power[f] / sum(power[*])`
+/// shape exactly (all `AirSuperiority::NEUTRAL` when nobody reaches),
+/// generalized one domain further: from "the fleets sitting in this zone"
+/// to "every `Airfield` node within `AIR_OPERATING_RADIUS_KM` of this
+/// region that currently hosts at least one air unit" (docs/phase10-spec.md
+/// "2. 制空権": "0 を中立として、両勢力の投入戦力から比率で導く。固定の優
+/// 先順位を置かない" - CLAUDE.md §6's first listed defect, so this divides
+/// by the *shared* total rather than picking a side to favor).
+///
+/// Must run every tick, never cached or sampled once: an air unit that
+/// died, disbanded, or was freshly recruited today is reflected the same
+/// tick this function next runs, which is exactly what gives
+/// `Region::air_superiority` its required recovery path back to
+/// `NEUTRAL` once no reaching faction has any air unit left
+/// (CLAUDE.md「繰り返し踏んだ欠陥」: "発令時点の値を焼き込まない" /
+/// "状態には必ず回復経路を持たせる").
+///
+/// Fixed iteration order throughout for determinism (CLAUDE.md's own record
+/// of `enemy_power`'s `total - own` rewrite flipping an AI decision 300
+/// days later from a bitwise-inequivalent-but-algebraically-equal
+/// reassociation): regions in ascending `RegionId` order, airfield nodes in
+/// ascending `TransportNodeId` order (`World::transport_nodes`'s own
+/// storage order), factions in ascending `FactionId` order - never a
+/// `HashMap`/`HashSet` anywhere in the accumulation.
+pub fn tick_air_superiority(world: &mut World) {
+    let n_factions = world.factions.len();
+    let node_power = node_air_power(world);
+
+    for region_idx in 0..world.regions.len() {
+        let region_id = RegionId(region_idx as u32);
+        let target_pos = world.region(region_id).position;
+
+        let mut power = vec![0.0f32; n_factions];
+        for node in &world.transport_nodes {
+            if node.kind != TransportNodeKind::Airfield {
+                continue;
+            }
+            let node_power_row = &node_power[node.id.index()];
+            if node_power_row.iter().all(|&p| p <= 0.0) {
+                continue;
+            }
+            let base_pos = world.region(node.region).position;
+            if geographic_distance(base_pos, target_pos) > AIR_OPERATING_RADIUS_KM {
+                continue;
+            }
+            for f in 0..n_factions {
+                power[f] += node_power_row[f];
+            }
+        }
+
+        let total: f32 = power.iter().fold(0.0, |acc, &p| acc + p);
+        let shares: Vec<AirSuperiority> = if total > 0.0 {
+            power
+                .iter()
+                .map(|&p| AirSuperiority::new(p / total).expect("a share of a positive total lies in 0.0..=1.0"))
+                .collect()
+        } else {
+            vec![AirSuperiority::NEUTRAL; n_factions]
+        };
+        world.region_mut(region_id).air_superiority = shares;
+    }
 }

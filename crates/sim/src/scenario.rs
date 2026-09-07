@@ -27,7 +27,7 @@ use crate::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeI
 use crate::json::{self, Value};
 use crate::military::Unit;
 use crate::transport::{Capacity, Condition, TransportLine, TransportLineKind, TransportNode, TransportNodeKind};
-use crate::world::{DominationShare, Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, VictoryCondition, VictoryDeclaration, World};
+use crate::world::{AirSuperiority, DominationShare, Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, VictoryCondition, VictoryDeclaration, World};
 
 /// The embedded default scenario (docs/phase6-spec.md "ファイルは
 /// `scenarios/` に置く。既定は現行の 10 地域（`mvp.json`）"). Baked into the
@@ -456,6 +456,19 @@ fn parse_capacity(v: &Value, path: &str) -> Result<[f32; GOOD_COUNT], ScenarioEr
 /// missing `position` is a hard `ScenarioError::Schema` here, exactly like
 /// every other required region field `parse_region` reads - never a silent
 /// `None` a renderer downstream would have to guess a placement for.
+///
+/// **Since Stage 10B this is no longer a rendering-only field.**
+/// `air::tick_air_superiority` measures an airfield's reach against it in
+/// kilometres (`balance::AIR_OPERATING_RADIUS_KM`), so a scenario that
+/// places `Domain::Air` units needs coordinates on a real physical scale.
+/// `scenarios/japan_hex.json` has them (`tools/hexmap/build_scenario.py`
+/// divides metres by 1000); `mvp.json` and `japan47.json` carry an unscaled
+/// schematic layout, which is harmless only for as long as neither deploys
+/// an air unit. `Region::position`'s own doc records the reversal of Phase
+/// 7A's 「座標はシミュレーションに一切影響しない」 invariant in full. The
+/// schema deliberately does not try to guess or validate a scale here -
+/// there is nothing in the data to check it against, and inventing one
+/// would be the kind of silent default docs/conventions.md §3 forbids.
 fn parse_position(v: &Value, path: &str) -> Result<[f32; 2], ScenarioError> {
     let value = require_object_field(v, path, "position")?;
     let arr = value.as_array().ok_or_else(|| schema_err(format!("`{path}.position` must be an array of 2 numbers")))?;
@@ -995,6 +1008,7 @@ impl Scenario {
                 construction: None,
                 import_flow: 0.0,
                 position: def.position,
+                air_superiority: vec![AirSuperiority::NEUTRAL; self.factions.len()],
             })
             .collect();
 

@@ -210,6 +210,32 @@ pub const UNIT_START_ORG_RATIO: f32 = 0.4;
 /// first, disclosed placeholder, not a tuned constant.
 pub const AIR_UNIT_MACHINERY_COST: f32 = 20.0;
 
+/// Stage 10B (docs/phase10-spec.md "2. 制空権"): how far an airfield's own
+/// committed air power reaches, measured as straight-line geographic
+/// distance between `world::Region::position`s - never through the
+/// transport network ("航空機は線路の上を飛ばない") - in the same unit
+/// `scenarios/japan_hex.json`'s own `position` field actually carries:
+/// kilometres (`tools/hexmap/build_scenario.py`'s `x_m / 1000.0`;
+/// `tools/hexmap/hexgrid.py`'s `SPACING_M = 40_000.0` spaces that map's own
+/// hexes 40km apart center-to-center, for scale).
+///
+/// Chosen from what the number itself means, not from any scenario's
+/// outcome (docs/conventions.md's shared "測定してから直す" discipline,
+/// applied here as "don't fit the constant to a result"): 300km sits at
+/// the low end of a single-engine fighter's typical unrefuelled combat
+/// radius (roughly 300-500km for many 20th-century designs, before drop
+/// tanks or air-to-air refuelling) - the aircraft class actually contesting
+/// airspace over a single region, as distinct from a long-range bomber's
+/// much greater reach. `scenarios/mvp.json`/`japan47.json`'s own `position`
+/// fields are an unscaled schematic layout with no physical unit at all
+/// (`world::Region::position`'s own doc), so this constant is honestly
+/// meaningless there - but no shipped scenario places a `Domain::Air` unit
+/// yet (`AIR_UNIT_MACHINERY_COST`'s own doc discloses the same gap), so
+/// nothing currently exercises that mismatch. A real balance pass - which
+/// may mean rescaling the two schematic maps' own coordinates rather than
+/// this constant - is Stage 10E's job, not this one's.
+pub const AIR_OPERATING_RADIUS_KM: f32 = 300.0;
+
 pub const SUPPLY_NEED_PER_MANPOWER: f32 = 1.0;
 pub const COMBAT_SUPPLY_MULT: f32 = 2.5;
 

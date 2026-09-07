@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use crate::action::{self, Action, ActionError};
+use crate::air;
 use crate::construction;
 use crate::diplomacy;
 use crate::economy;
@@ -131,8 +132,16 @@ impl Simulation {
         // (recompute_supply, tick_imports) already follows for land. Both
         // blockade effects below (import capacity, strait throughput) read
         // this snapshot.
+        //
+        // Stage 10B: air superiority is recomputed in the same slot, for
+        // the same reason - nothing downstream reads it yet (10C wires it
+        // into interdiction), but keeping it alongside sea control keeps
+        // every "recomputed fresh from current unit positions before
+        // anything this tick reads it" system in one place rather than
+        // scattered by coincidence of when each was added.
         let t1 = Instant::now();
         naval::tick_sea_control(&mut self.world);
+        air::tick_air_superiority(&mut self.world);
         timings.military += t1.elapsed();
 
         // Imports land before production's civilian ration is served, so a

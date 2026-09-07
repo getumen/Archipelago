@@ -1,8 +1,9 @@
 //! Spec §9 acceptance tests for the simulation core.
 
 use crate::action::{self, Action, ActionError, Layer, ALL_LAYERS};
+use crate::air;
 use crate::balance::{
-    AIR_UNIT_MACHINERY_COST, CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
+    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
     CIVILIAN_RATION_MIN, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
     CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE,
     FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
@@ -8984,4 +8985,215 @@ fn air_reinforcement_without_machinery_delivers_nothing() {
         world.faction(faction).stock[Good::Machinery.index()].abs() < 1e-3,
         "Machinery stock must stay at zero, never go negative"
     );
+}
+
+// ---------------------------------------------------------------------
+// Stage 10B (docs/phase10-spec.md "2. 制空権"): air superiority stands
+// over a region, for whichever factions' airfields' committed air power
+// reaches it - `air::tick_air_superiority`'s own doc explains why it
+// reuses `naval::tick_sea_control`'s ratio shape rather than inventing a
+// second one. This stage deliberately wires nothing downstream yet (10C
+// wires it into interdiction/supply/ground combat) - these tests only
+// check the value itself: it derives from both sides' strength by ratio,
+// it returns to neutral once the air units are gone, and it has no effect
+// outside the operating radius.
+// ---------------------------------------------------------------------
+
+/// A full-strength (org/morale/supply/experience all at their
+/// `combat_power`-maximizing values) air unit based at `airfield`, so its
+/// `combat_power()` reduces to exactly `manpower` - the simplest possible
+/// "committed strength" figure to reason about ratios with.
+fn push_full_strength_air_unit(world: &mut World, faction: FactionId, airfield: TransportNodeId, manpower: f32) -> UnitId {
+    let id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id,
+        owner: faction,
+        name: "Test Squadron".to_string(),
+        station: Station::Airfield(airfield),
+        movement: None,
+        manpower,
+        equipment: UNIT_EQUIPMENT,
+        organization: UNIT_ORG,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Airfield(airfield),
+        experience: 0.0,
+        alive: true,
+    });
+    id
+}
+
+/// Stage 10B acceptance criterion 1 (docs/phase10-spec.md §6): "制空権が
+/// 両勢力の投入戦力から比率で決まる。順序に依存しない。" Two factions each
+/// base one air unit at their own airfield, both within
+/// `AIR_OPERATING_RADIUS_KM` of a shared target region but at unequal
+/// committed strength (30 vs 10 manpower, a clean 3:1 ratio) - the
+/// target's `air_superiority` must land at that same 3:1 split. Swapping
+/// *which faction id* carries the heavier unit, and separately swapping
+/// the *order the two units were pushed in* (`World::units`'s own storage
+/// order), must both leave the split unchanged - CLAUDE.md §6's first
+/// listed defect ("希少な資源に固定の優先順位を置かない") applies here
+/// exactly as it does to any other ratio-by-contribution calculation.
+///
+/// **Confirmed this test can fail.** Temporarily replaced `tick_air_
+/// superiority`'s `power[f] / total` ratio with a fixed-priority rule -
+/// "the lowest `FactionId` with any power present here gets `1.0`,
+/// everyone else `0.0`" - exactly the defect shape CLAUDE.md §6 warns
+/// against by name. Re-ran: the weak side (10 manpower) measured `1.0`
+/// instead of the expected `~0.25` whenever it happened to be
+/// `FactionId(0)`, and the "swapping which faction carries the heavier
+/// unit must not change the split" assertion failed outright (0.0/1.0
+/// instead of the expected symmetric 0.75/0.25 both ways). Reverted before
+/// committing.
+#[test]
+fn air_superiority_derives_from_both_sides_strength_by_ratio_and_is_order_independent() {
+    fn measure(strong_is_a: bool, push_strong_first: bool) -> (f32, f32) {
+        let mut world = scenario::build_world();
+        world.units.clear();
+
+        let faction_a = FactionId(0);
+        let faction_b = FactionId(1);
+        let base_a = RegionId(0);
+        let base_b = RegionId(1);
+        let target = RegionId(2);
+
+        // 100km from each base - comfortably inside AIR_OPERATING_RADIUS_KM
+        // (300) - so reach is not what this test is measuring.
+        world.region_mut(base_a).position = [0.0, 0.0];
+        world.region_mut(base_b).position = [200.0, 0.0];
+        world.region_mut(target).position = [100.0, 0.0];
+
+        let airfield_a = world.airfield_node(base_a).expect("Stage 10A scenarios declare an airfield in every region").id;
+        let airfield_b = world.airfield_node(base_b).expect("Stage 10A scenarios declare an airfield in every region").id;
+
+        let (strong, weak) = if strong_is_a { (faction_a, faction_b) } else { (faction_b, faction_a) };
+        let (strong_field, weak_field) = if strong_is_a { (airfield_a, airfield_b) } else { (airfield_b, airfield_a) };
+
+        if push_strong_first {
+            push_full_strength_air_unit(&mut world, strong, strong_field, 30.0);
+            push_full_strength_air_unit(&mut world, weak, weak_field, 10.0);
+        } else {
+            push_full_strength_air_unit(&mut world, weak, weak_field, 10.0);
+            push_full_strength_air_unit(&mut world, strong, strong_field, 30.0);
+        }
+
+        air::tick_air_superiority(&mut world);
+
+        let superiority = &world.region(target).air_superiority;
+        (superiority[strong.index()].get(), superiority[weak.index()].get())
+    }
+
+    let (strong_a, weak_a) = measure(true, true);
+    let (strong_b, weak_b) = measure(false, true);
+    let (strong_reordered, weak_reordered) = measure(true, false);
+
+    assert!((strong_a - 0.75).abs() < 1e-4, "30 vs 10 manpower must land at a 3:1 (0.75) share, got {strong_a}");
+    assert!((weak_a - 0.25).abs() < 1e-4, "the weak side's complementary share must be 0.25, got {weak_a}");
+    assert!((strong_a + weak_a - 1.0).abs() < 1e-5, "the two factions' shares over a region only they reach must sum to 1.0");
+
+    assert!(
+        (strong_a - strong_b).abs() < 1e-5 && (weak_a - weak_b).abs() < 1e-5,
+        "swapping which faction id (0 vs 1) carries the heavier unit must not change the resulting split - \
+         only committed strength should: (strong_a={strong_a}, weak_a={weak_a}) vs (strong_b={strong_b}, weak_b={weak_b})"
+    );
+    assert!(
+        (strong_a - strong_reordered).abs() < 1e-5 && (weak_a - weak_reordered).abs() < 1e-5,
+        "swapping the order the two units were pushed in (World::units's own storage order) must not \
+         change the resulting split: (strong_a={strong_a}, weak_a={weak_a}) vs \
+         (strong_reordered={strong_reordered}, weak_reordered={weak_reordered})"
+    );
+}
+
+/// Stage 10B acceptance criterion 2 (docs/phase10-spec.md §6): "航空部隊が
+/// 去れば制空権が戻る（回復経路）。" A single faction's air unit gives it
+/// full (`1.0`) superiority over a reachable region; once that unit is
+/// gone outright, the next recomputation must return every faction's
+/// share over that region to `AirSuperiority::NEUTRAL` (`0.0`) - never
+/// leave the last value standing (CLAUDE.md §6: "状態には必ず回復経路を
+/// 持たせる。入ったら出られない状態を作らない").
+///
+/// **Confirmed this test can fail.** Temporarily changed `tick_air_
+/// superiority` to only overwrite `Region::air_superiority` when `total >
+/// 0.0` (leaving whatever the previous tick computed untouched otherwise)
+/// - the one-way-accumulator shape CLAUDE.md §6 warns against by name.
+/// Re-ran: after clearing every air unit off the map, the target region's
+/// superiority stayed at `1.0` instead of returning to `0.0`. Reverted
+/// before committing.
+#[test]
+fn air_superiority_returns_to_neutral_once_air_units_are_gone() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base = RegionId(0);
+    let target = RegionId(1);
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(target).position = [50.0, 0.0];
+    let airfield = world.airfield_node(base).expect("Stage 10A scenarios declare an airfield in every region").id;
+
+    push_full_strength_air_unit(&mut world, faction, airfield, 20.0);
+    air::tick_air_superiority(&mut world);
+    assert!(
+        (world.region(target).air_superiority[faction.index()].get() - 1.0).abs() < 1e-5,
+        "the sole reaching faction must hold full (1.0) superiority over the target: got {}",
+        world.region(target).air_superiority[faction.index()].get()
+    );
+
+    world.units.clear();
+    air::tick_air_superiority(&mut world);
+    for f in 0..world.factions.len() {
+        assert_eq!(
+            world.region(target).air_superiority[f].get(),
+            0.0,
+            "every faction's share must return to AirSuperiority::NEUTRAL once no air unit reaches this region at all (faction {f})"
+        );
+    }
+}
+
+/// Stage 10B acceptance criterion 3 (docs/phase10-spec.md §6): "作戦半径の
+/// 外に効果が出ない。" A region placed far beyond `AIR_OPERATING_RADIUS_KM`
+/// from the only airfield with any air unit at all must stay fully
+/// `AirSuperiority::NEUTRAL`, no matter how much strength is committed at
+/// that airfield - reach is a hard geographic cutoff, not something a
+/// large enough force projects arbitrarily far ("フォールバック禁止": a
+/// region nothing reaches is neutral because nothing reached it, not
+/// because of a default).
+///
+/// **Confirmed this test can fail.** Temporarily deleted the `if
+/// geographic_distance(...) > AIR_OPERATING_RADIUS_KM { continue; }` reach
+/// guard inside `tick_air_superiority`. Re-ran: the far region (placed
+/// `AIR_OPERATING_RADIUS_KM * 100` away from the only airfield on the map)
+/// measured full (`1.0`) superiority for the sole faction with an air
+/// unit anywhere, identical to a region sitting right next to that
+/// airfield. Reverted before committing.
+#[test]
+fn air_superiority_has_no_effect_outside_the_operating_radius() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base = RegionId(0);
+    let near = RegionId(1);
+    let far = RegionId(2);
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(near).position = [AIR_OPERATING_RADIUS_KM * 0.5, 0.0];
+    world.region_mut(far).position = [AIR_OPERATING_RADIUS_KM * 100.0, 0.0];
+    let airfield = world.airfield_node(base).expect("Stage 10A scenarios declare an airfield in every region").id;
+
+    push_full_strength_air_unit(&mut world, faction, airfield, 50.0);
+    air::tick_air_superiority(&mut world);
+
+    assert!(
+        world.region(near).air_superiority[faction.index()].get() > 0.0,
+        "sanity: a region well inside the operating radius must be affected at all"
+    );
+    for f in 0..world.factions.len() {
+        assert_eq!(
+            world.region(far).air_superiority[f].get(),
+            0.0,
+            "a region far outside AIR_OPERATING_RADIUS_KM must stay fully neutral regardless of committed strength elsewhere (faction {f})"
+        );
+    }
 }

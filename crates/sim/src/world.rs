@@ -263,6 +263,43 @@ pub enum OccupationKind {
     Separatist,
 }
 
+/// One faction's share of the contested airspace over a region, `0.0..=1.0`
+/// (docs/phase10-spec.md "2. 制空権": "0 を中立として... 比率で導く"). Per
+/// docs/conventions.md §1 ("政策値は素の `f32` ではなく 0〜1 を保証する型で
+/// 持ち、不正な値をそもそも構築できなくする"): only ever constructed
+/// through `new` or reached at `NEUTRAL`, so a value outside `0.0..=1.0` can
+/// never exist regardless of how many places later read it - the same
+/// discipline `transport::Condition`/`transport::Capacity`/
+/// `DominationShare` already apply to their own bounded quantities.
+/// `air::tick_air_superiority` is the type's sole writer, every tick, from
+/// current air-unit positions and strength alone - never sampled once at
+/// order-issue time and cached (CLAUDE.md's own "発令時点の値を焼き込まな
+/// い"), which is what gives `Region::air_superiority` its required
+/// recovery path: a region every reaching faction's air units have since
+/// left or lost is simply recomputed to `NEUTRAL` the next tick, not
+/// nudged back down from some remembered peak.
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
+pub struct AirSuperiority(f32);
+
+impl AirSuperiority {
+    /// No faction's air power reaches a region at all - every region starts
+    /// here, and every region returns here once no reaching faction has any
+    /// air unit left.
+    pub const NEUTRAL: AirSuperiority = AirSuperiority(0.0);
+
+    pub fn new(value: f32) -> Option<AirSuperiority> {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            Some(AirSuperiority(value))
+        } else {
+            None
+        }
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Region {
     pub id: RegionId,
@@ -317,10 +354,37 @@ pub struct Region {
     /// (`scenario::RegionDef::position`'s doc) - required, so this is never
     /// absent once a `World` exists at all: `scenario::parse_position`
     /// rejects a scenario missing it before `build_world` ever runs.
-    /// Cosmetic only: nothing in `crate::sim`/`crate::world`/any tick system
-    /// ever reads this field, so it cannot affect - and Stage 7A's own
-    /// regression guard confirms it does not affect - simulation outcomes.
+    ///
+    /// No longer cosmetic-only as of Stage 10B (docs/phase10-spec.md "2.
+    /// 制空権": "半径は... 地理的な距離で測る... 地域は position を持って
+    /// いるのでこれを使う") - a deliberate, spec-mandated reversal of Phase
+    /// 7A's own original invariant ("座標はシミュレーションに一切影響しな
+    /// い"), whose old enforcement mechanism (the `scenarios/mvp.json`
+    /// seed-1/720-day hash) is exactly the one CLAUDE.md records retiring.
+    /// `air::tick_air_superiority` is now the one tick system that reads
+    /// this field for more than rendering, comparing it against every
+    /// `transport::TransportNodeKind::Airfield` node's own region's
+    /// `position` to decide whether that airfield's committed air power
+    /// reaches this region at all (`balance::AIR_OPERATING_RADIUS_KM`).
+    /// Only `scenarios/japan_hex.json`'s coordinates carry a real physical
+    /// scale (kilometres - `tools/hexmap/build_scenario.py`'s own
+    /// `x_m / 1000.0`); `mvp.json`/`japan47.json`'s are an unscaled
+    /// schematic layout with no physical unit at all - but no shipped
+    /// scenario places a `Domain::Air` unit yet
+    /// (`AIR_OPERATING_RADIUS_KM`'s own doc makes the same disclosure), so
+    /// nothing currently exercises that mismatch.
     pub position: [f32; 2],
+    /// Stage 10B (docs/phase10-spec.md "2. 制空権"): each faction's current
+    /// share of the contested airspace over this region, recomputed every
+    /// tick by `air::tick_air_superiority` from whichever airfields'
+    /// committed air power currently reaches it - the region-domain mirror
+    /// of `SeaZone::control`, one domain further (same `power[f] /
+    /// sum(power[*])` shape, all `AirSuperiority::NEUTRAL` when nobody
+    /// reaches). Sized to `World::factions.len()`. Never sampled once and
+    /// cached: a region a faction's air units have since left or lost
+    /// returns to `NEUTRAL` the very next tick, the "回復経路" docs/phase10
+    /// -spec.md's own Stage 10B acceptance criterion requires.
+    pub air_superiority: Vec<AirSuperiority>,
 }
 
 impl Region {
