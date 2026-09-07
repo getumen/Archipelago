@@ -76,8 +76,9 @@
 //! no second recovery path to keep in sync with the first.
 
 use crate::balance::{
-    AIR_OPERATING_RADIUS_KM, ARMS_SUPPLY_NEED_PER_GAP, COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER,
-    SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
+    AIR_OPERATING_RADIUS_KM, ARMS_SUPPLY_NEED_PER_GAP, BROKEN_LOSS_MULT, COMBAT_DAMAGE, COMBAT_SUPPLY_MULT,
+    EQUIPMENT_LOSS_PER_DAMAGE, MANPOWER_LOSS_PER_DAMAGE, MORALE_LOSS_PER_BROKEN_HIT, ORG_DAMAGE_MULT,
+    SUPPLY_NEED_PER_MANPOWER, SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
 };
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
@@ -336,6 +337,75 @@ fn geographic_distance(a: [f32; 2], b: [f32; 2]) -> f32 {
 /// reassociation): regions in ascending `RegionId` order, airfield nodes in
 /// ascending `TransportNodeId` order (`World::transport_nodes`'s own
 /// storage order), factions in ascending `FactionId` order - never a
+/// Recomputes `Region::air_superiority` for every region a change at any of
+/// `origins` can affect - each origin itself and everything within
+/// `AIR_OPERATING_RADIUS_KM` of it, which is exactly the set
+/// `tick_air_superiority` would reach from an airfield sitting there.
+///
+/// **A strike has more than one origin** (`codex review`, P1). The target's
+/// own neighbourhood changes because the struck airfield stops projecting,
+/// but the attacking squadrons also lose strength, and *their* power radiates
+/// from their own bases - which can be a full radius away from the target, so
+/// a target-centred refresh alone left regions near the attacker's fields
+/// reading power that no longer exists. `strike_origin_regions` collects both.
+///
+/// Called by `action::apply_strike_node` because that action changes who can
+/// fly (a grounded airfield stops projecting) in the middle of an action
+/// batch, between two `tick_air_superiority` runs. Scoped to the radius
+/// rather than re-running the whole tick sweep: a strike cannot alter the
+/// air anywhere its own airfield could not have reached in the first place,
+/// and the full sweep is O(regions * nodes) on a map with 289 regions and
+/// 532 nodes.
+///
+/// Deliberately the same power-and-ratio computation `tick_air_superiority`
+/// performs, over the same reach test, so the refreshed values and the
+/// tick's own agree whenever nothing else has changed - not a second,
+/// independently-invented notion of who holds the air. `Vec` indexing and
+/// `World::transport_nodes` order throughout, so the float addition order is
+/// fixed and the result is identical to what the next tick would compute.
+pub fn refresh_air_superiority_near(world: &mut World, origins: &[RegionId]) {
+    let n_factions = world.factions.len();
+    let node_power = node_air_power(world);
+    let origin_positions: Vec<[f32; 2]> = origins.iter().map(|&r| world.region(r).position).collect();
+
+    for region_idx in 0..world.regions.len() {
+        let region_id = RegionId(region_idx as u32);
+        let target_pos = world.region(region_id).position;
+        if !origin_positions.iter().any(|&o| geographic_distance(o, target_pos) <= AIR_OPERATING_RADIUS_KM) {
+            continue;
+        }
+
+        let mut power = vec![0.0f32; n_factions];
+        for node in &world.transport_nodes {
+            if node.kind != TransportNodeKind::Airfield {
+                continue;
+            }
+            let node_power_row = &node_power[node.id.index()];
+            if node_power_row.iter().all(|&p| p <= 0.0) {
+                continue;
+            }
+            let base_pos = world.region(node.region).position;
+            if geographic_distance(base_pos, target_pos) > AIR_OPERATING_RADIUS_KM {
+                continue;
+            }
+            for f in 0..n_factions {
+                power[f] += node_power_row[f];
+            }
+        }
+
+        let total: f32 = power.iter().fold(0.0, |acc, &p| acc + p);
+        let shares: Vec<AirSuperiority> = if total > 0.0 {
+            power
+                .iter()
+                .map(|&p| AirSuperiority::new(p / total).expect("a share of a positive total lies in 0.0..=1.0"))
+                .collect()
+        } else {
+            vec![AirSuperiority::NEUTRAL; n_factions]
+        };
+        world.region_mut(region_id).air_superiority = shares;
+    }
+}
+
 /// `HashMap`/`HashSet` anywhere in the accumulation.
 pub fn tick_air_superiority(world: &mut World) {
     let n_factions = world.factions.len();
@@ -394,6 +464,161 @@ pub fn tick_air_superiority(world: &mut World) {
 /// throttles - or reopens - the very same tick
 /// (CLAUDE.md「繰り返し踏んだ欠陥」: "発令時点の値を焼き込まない").
 pub fn air_line_factor(world: &World, region_a: RegionId, region_b: RegionId, faction: FactionId) -> f32 {
-    let factor_at = |r: RegionId| -> f32 { (1.0 - world.hostile_air_superiority_max(r, faction)).clamp(0.0, 1.0) };
-    factor_at(region_a).min(factor_at(region_b))
+    air_superiority_factor(world, region_a, faction).min(air_superiority_factor(world, region_b, faction))
+}
+
+/// The single-region building block `air_line_factor` above folds together
+/// over a line's two endpoints - `1 -` the highest `Region::air_superiority`
+/// share held by a faction at `Stance::War` with `faction`
+/// (`World::hostile_air_superiority_max`), clamped into `0.0..=1.0`. Pulled
+/// out under its own name (rather than kept as `air_line_factor`'s private
+/// closure) because `apply_strike_node`'s new strike-degradation effect
+/// below needs the exact same one-region question `InterdictLine`'s
+/// throughput throttle already answers, not a second formula that happens
+/// to compute the same thing under a different name (CLAUDE.md's own
+/// warning: ports, airfields, and `world.supply` all drifted apart this
+/// phase precisely because a second notion of the same fact crept in
+/// somewhere).
+///
+/// Deliberately answers "how much of the sky is *not* held by a hostile
+/// faction", not "how much does `faction` itself hold" - the two coincide
+/// whenever only one attacker and one defender contest a region (every
+/// scenario shipped today), and the former is what already lets a route -
+/// or a strike - through when *nobody* (attacker included) has any air unit
+/// near the target at all: an uncontested sky needs no escort. This is the
+/// same reading `air_line_factor` has used since Stage 10C; the strike
+/// effect below inherits it rather than introducing air superiority's
+/// second meaning.
+pub fn air_superiority_factor(world: &World, region: RegionId, faction: FactionId) -> f32 {
+    (1.0 - world.hostile_air_superiority_max(region, faction)).clamp(0.0, 1.0)
+}
+
+/// Every alive air unit `faction` owns whose own airfield can currently
+/// project power onto `region` - `node_air_power`'s own per-node reach test
+/// (`transport::TransportNode::operational`, `geographic_distance` within
+/// `AIR_OPERATING_RADIUS_KM`), resolved for one `(region, faction)` pair
+/// instead of accumulated into that function's whole node-indexed table.
+/// This is exactly the reach `tick_air_superiority` already grants when it
+/// lets these same units' `combat_power()` count toward `region`'s own
+/// `air_superiority` - not a second, independently-invented notion of
+/// "can this squadron reach the target".
+///
+/// Ascending `UnitId` order (`World::units`'s own storage order, never a
+/// `HashMap`) - `apply_strike_losses` below folds over this in a fixed
+/// order, so the loss distribution never depends on iteration order
+/// (CLAUDE.md's own record of a bitwise-inequivalent reassociation flipping
+/// an AI decision 300 days later).
+/// Every region whose air picture a strike by `faction` against `region` can
+/// change: the target itself, plus the home region of every airfield the
+/// attacker flies this sortie from (those squadrons take losses, so the power
+/// they project around their own bases changes too). Feeds
+/// `refresh_air_superiority_near` - see its own doc for why one origin is not
+/// enough. Ascending `UnitId` order with `Vec` throughout, never a `HashSet`,
+/// so the origin list is a pure function of world state.
+pub fn strike_origin_regions(world: &World, region: RegionId, faction: FactionId) -> Vec<RegionId> {
+    let mut out = vec![region];
+    for unit_id in units_reaching(world, region, faction) {
+        let Some(node_id) = world.unit(unit_id).station.airfield() else {
+            continue;
+        };
+        let base = world.transport_node(node_id).region;
+        if !out.contains(&base) {
+            out.push(base);
+        }
+    }
+    out
+}
+
+fn units_reaching(world: &World, region: RegionId, faction: FactionId) -> Vec<UnitId> {
+    let target_pos = world.region(region).position;
+    let mut out = Vec::new();
+    for unit in &world.units {
+        if !unit.alive || unit.owner != faction {
+            continue;
+        }
+        let Some(node_id) = unit.station.airfield() else {
+            continue;
+        };
+        let node = world.transport_node(node_id);
+        if !node.operational() {
+            continue;
+        }
+        let base_pos = world.region(node.region).position;
+        if geographic_distance(base_pos, target_pos) <= AIR_OPERATING_RADIUS_KM {
+            out.push(unit.id);
+        }
+    }
+    out
+}
+
+/// The counterplay `Action::StrikeNode`'s own doc says did not exist before
+/// this: a squadron sent to strike a node in airspace the defender
+/// contests takes real losses, proportional to exactly the same hostile
+/// share (`World::hostile_air_superiority_max`) that already degrades the
+/// strike's own effect above - not a second, independently-tuned notion of
+/// "how dangerous is this airspace".
+///
+/// **Shape.** `defense` (0..1) scales a single raw "damage" figure the same
+/// way `military::tick_combat` derives one per battle - `crate::balance::
+/// COMBAT_DAMAGE` itself, reused rather than a new constant invented to
+/// mean the same thing under a different name: a strike mission flown
+/// into airspace fully held by hostile air power (`defense == 1.0`) costs
+/// exactly as much raw damage as one day of ordinary ground combat against
+/// a defender of equal committed strength; uncontested airspace
+/// (`defense == 0.0`) costs nothing, and every value between scales
+/// linearly with how much of the sky the enemy holds - the ratio-by-share
+/// principle CLAUDE.md §6 requires for any scarce/contested quantity,
+/// applied here to risk instead of throughput. That raw damage is then
+/// converted to per-unit manpower/organization/equipment/morale loss by
+/// `tick_combat`'s own conversion constants (`ORG_DAMAGE_MULT`,
+/// `MANPOWER_LOSS_PER_DAMAGE`, `EQUIPMENT_LOSS_PER_DAMAGE`,
+/// `BROKEN_LOSS_MULT`, `MORALE_LOSS_PER_BROKEN_HIT`) - the same physical
+/// meaning ("this much raw damage does this much harm to a unit")
+/// shouldn't be re-derived a second time for a second kind of engagement.
+///
+/// **Distribution.** Split across every unit `units_reaching` returns, by
+/// each one's own `combat_power()` share of their combined total - never a
+/// fixed priority (CLAUDE.md §6's first listed defect) and never applied to
+/// a unit that has no way to actually be exposed (one based too far away,
+/// or grounded at a struck, non-operational airfield, is excluded by
+/// `units_reaching` exactly as it is excluded from projecting power in the
+/// first place). A striking faction with no unit within reach here loses
+/// nothing, because there is nothing of theirs in the sky to lose - the
+/// same "no presence, no risk" reading `air_superiority_factor`'s own doc
+/// gives the effect side.
+///
+/// **Recovery.** Every field this touches already has its own recovery
+/// path, so none is invented here: `military::tick_recovery` regenerates
+/// `organization`/`morale` for a unit not currently fighting or marching,
+/// `action::apply_reinforce` restores `equipment`, and `action::
+/// apply_disband` always remains available regardless of how depleted the
+/// unit is - a mauled squadron is never stuck (CLAUDE.md §6's last listed
+/// defect).
+pub fn apply_strike_losses(world: &mut World, region: RegionId, faction: FactionId, defense: f32) {
+    if defense <= 0.0 {
+        return;
+    }
+    let reaching = units_reaching(world, region, faction);
+    let total_power: f32 = reaching
+        .iter()
+        .fold(0.0, |acc, &id| acc + world.unit(id).combat_power());
+    if total_power <= 0.0 {
+        return;
+    }
+
+    let dmg_total = defense * COMBAT_DAMAGE;
+    for &id in &reaching {
+        let share = world.unit(id).combat_power() / total_power;
+        let dmg = dmg_total * share;
+
+        let unit = world.unit_mut(id);
+        unit.organization = (unit.organization - dmg * ORG_DAMAGE_MULT).max(0.0);
+        let broken = if unit.organization <= 0.0 { BROKEN_LOSS_MULT } else { 1.0 };
+        let manpower_loss = (dmg * MANPOWER_LOSS_PER_DAMAGE * broken).min(unit.manpower);
+        unit.manpower -= manpower_loss;
+        unit.equipment = (unit.equipment - dmg * EQUIPMENT_LOSS_PER_DAMAGE * broken).max(0.0);
+        unit.morale = (unit.morale - MORALE_LOSS_PER_BROKEN_HIT * broken).max(0.0);
+
+        world.faction_mut(faction).casualties += manpower_loss;
+    }
 }

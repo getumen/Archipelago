@@ -1968,6 +1968,12 @@ fn naval_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observ
 /// chronic-stock branch ever fires here - the over-floor branch is kept
 /// anyway so this reads the same way `disband_excess` does and stays
 /// correct if that ever changes.
+///
+/// `disband_excess_air`'s own chronic branch waits for *this* function's
+/// floor to be gone too, not just land's - see its doc for why stacking
+/// `AIR_MIN_SQUADRONS` in the same tier as `NAVY_MIN_FLEETS` (both released
+/// only once land is gone, independently of each other) starved `mvp`'s
+/// land army once air joined the navy in that tier.
 fn disband_excess_naval(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
     let sea_units: Vec<UnitId> = obs
         .own_units()
@@ -2095,9 +2101,12 @@ fn air_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observat
         return;
     }
     // Only blocks once `disband_excess_air` would actually be cutting - see
-    // `naval_recruit`'s own doc for why this specific gate (land force gone,
-    // chronically insolvent) exists at all.
+    // `naval_recruit`'s own doc for why this specific gate (a bigger,
+    // cheaper-to-rebuild force gone first, chronically insolvent) exists at
+    // all, and this function's own regression write-up for why air's turn
+    // in that queue comes after *both* land and the navy, not land alone.
     if own_unit_count(obs, Domain::Land) == 0
+        && own_unit_count(obs, Domain::Sea) == 0
         && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM
     {
         return;
@@ -2110,6 +2119,33 @@ fn air_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observat
 /// The air-domain mirror of `disband_excess_naval` - see that function's own
 /// doc for the full account of why a chronically-unaffordable floor needs a
 /// shrink path at all (CLAUDE.md's own "状態には必ず回復経路を持たせる").
+///
+/// **Cascade, not a second `land_is_gone`.** `disband_excess_naval`'s own
+/// chronic branch waits for the land force to be gone before touching
+/// `NAVY_MIN_FLEETS` - "land units are more numerous and cheaper to raise
+/// back" gets first claim on relieving the economy. Stage 10D copied that
+/// gate verbatim for air (`land_is_gone` alone), which put `AIR_MIN_
+/// SQUADRONS` in the *same* tier as `NAVY_MIN_FLEETS` instead of *below*
+/// it, even though this file's own doc for `AIR_MIN_SQUADRONS` already
+/// frames air as "one domain further" than the navy, a smaller and cheaper
+/// floor still. Two floors sharing one tier means neither ever gives ground
+/// until land is completely gone, so both draw on the same national
+/// Munitions pool at full, fixed cost for the entire time land is doing all
+/// the adjusting - measured on `scenarios/mvp.json` seeds 1-8: land
+/// collapsed to 0-2 units per surviving faction (down from 7-11
+/// pre-Phase-10) while `air`/`sea` sat pinned at their floors the whole
+/// game, and only 1/8 seeds still reached `Outcome::Victory` (down from
+/// 8/8). Requiring the navy to be gone too before air's own chronic branch
+/// fires - extending the exact same cascade one tier further, not
+/// inventing a new rule - restored 7/8 seeds to `Outcome::Victory` in the
+/// same measurement (the one holdout, seed 5, ends `Outcome::Stalemate`
+/// with both sides still fielding several land units and a functioning
+/// economy - a close, ongoing war, not the frozen board this fix targets).
+/// `air_recruit`'s own mirrored gate (see its doc) has to widen the same
+/// way, or it would simply rebuild every unit this sheds on the very next
+/// call while land/navy are still present - the same rebuild-what-was-just-
+/// cut oscillation `recruit`'s own doc already warns about for its sibling
+/// gates.
 fn disband_excess_air(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
     let air_units: Vec<UnitId> =
         obs.own_units().into_iter().filter(|&u| obs.world.unit(u).station.domain() == Domain::Air).collect();
@@ -2118,14 +2154,14 @@ fn disband_excess_air(faction: FactionId, chronic_insolvency_ticks: u32, obs: &O
         return;
     }
 
-    let land_is_gone = own_unit_count(obs, Domain::Land) == 0;
+    let land_and_navy_gone = own_unit_count(obs, Domain::Land) == 0 && own_unit_count(obs, Domain::Sea) == 0;
     let over_cap_excess = if total > AIR_MIN_SQUADRONS && munitions_insolvent(faction, obs) {
         (total - AIR_MIN_SQUADRONS).round().max(0.0) as usize
     } else {
         0
     };
     let chronic_excess =
-        if land_is_gone && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM { 1 } else { 0 };
+        if land_and_navy_gone && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM { 1 } else { 0 };
     let excess = over_cap_excess.max(chronic_excess);
     if excess == 0 {
         return;
@@ -2473,14 +2509,29 @@ fn transport_interdict_ai(faction: FactionId, obs: &Observation, actions: &mut V
 /// faction is at war with, and issuing `Action::StrikeNode` against it.
 ///
 /// Gated on actually owning at least one air unit
-/// (`own_unit_count(obs, Domain::Air) > 0`), even though `Action::StrikeNode`
-/// itself carries no such requirement (`action::apply_strike_node`'s own
-/// doc: "no locality requirement", closer to an abstract capability than a
-/// mission any specific squadron flies) - docs/phase10-spec.md's own framing
-/// is that air "becomes this action's... principal user from 10D's AI
-/// onward", so this heuristic ties the AI's *own* use of the action to
-/// having actually built the air power it represents, rather than issuing
-/// free strikes from a faction with no air force at all.
+/// (`own_unit_count(obs, Domain::Air) > 0`) as a cheap fast path, but the
+/// rule that actually decides which targets are legal candidates is the
+/// per-node `air_superiority` check below.
+///
+/// **Rule: only strike where this faction's own air can actually reach.**
+/// `Action::StrikeNode` no longer resolves as a free, distance-independent
+/// capability - `action::apply_strike_node` now runs the strike through
+/// `air::air_superiority_factor` and puts whatever of `faction`'s air units
+/// can reach the target region at risk via `air::apply_strike_losses`
+/// (both keyed off `Region::air_superiority`). Since `Action::StrikeNode`
+/// itself still carries no locality field to check directly, this heuristic
+/// asks the same question those functions do, the same way: `world.region
+/// (n.region).air_superiority[faction.index()]` is this faction's own
+/// current share of the contested airspace over the target - nonzero only
+/// when at least one of its air units, based at an operational airfield,
+/// sits within `air::AIR_OPERATING_RADIUS_KM` of that region
+/// (`air::tick_air_superiority`'s own reach test, reused verbatim rather
+/// than a second "can I reach it" question invented here). A node the
+/// faction cannot project any power onto is filtered out outright, so this
+/// AI stops throwing squadrons at strikes it has no way to press home -
+/// contrast the old rule, which struck the *lowest-condition* reachable-or-
+/// not target purely because the faction owned an air unit *somewhere* on
+/// the map.
 fn air_strike_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     if own_unit_count(obs, Domain::Air) == 0 {
         return;
@@ -2494,6 +2545,7 @@ fn air_strike_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action
                 && world.region(n.region).owner != faction
                 && world.diplomacy.is_at_war(faction, world.region(n.region).owner)
                 && n.condition.get() > TRANSPORT_INTERDICT_MIN_CONDITION
+                && world.region(n.region).air_superiority[faction.index()].get() > 0.0
         })
         .fold(None, |best: Option<&TransportNode>, n| match best {
             Some(b) if b.condition.get() >= n.condition.get() => best,

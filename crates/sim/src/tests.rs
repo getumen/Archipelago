@@ -4,11 +4,11 @@ use crate::action::{self, Action, ActionError, Layer, ALL_LAYERS};
 use crate::air;
 use crate::balance::{
     AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
-    CIVILIAN_RATION_MIN, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
+    CIVILIAN_RATION_MIN, COMBAT_DAMAGE, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
     CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE,
-    FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
-    INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_COOLDOWN_DAYS,
-    NODE_OPERATIONAL_THRESHOLD, OCCUPATION_RATE, SEPARATISM_THRESHOLD,
+    EQUIPMENT_LOSS_PER_DAMAGE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
+    INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE, MANPOWER_LOSS_PER_DAMAGE, NL_PROPOSAL_COOLDOWN_DAYS,
+    NODE_OPERATIONAL_THRESHOLD, NODE_STRIKE_DAMAGE, OCCUPATION_RATE, ORG_DAMAGE_MULT, SEPARATISM_THRESHOLD,
     STRIKE_DAYS, STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
     UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
 };
@@ -9525,21 +9525,31 @@ fn air_superiority_effect_on_supply_recovers_once_air_units_leave() {
 /// `if !world.transport_node(node).operational() { continue; }` gate (the
 /// exact P2 defect as filed - `StrikeNode` still worked, but nothing read
 /// `operational()` from this function at all). Re-ran: `after_strike` came
-/// back `1.0`, bit-identical to `before`'s own `1.0`, even though
-/// `Action::StrikeNode` had already driven the airfield's own `condition`
-/// to `0.4` - a wrecked airfield's squadron kept projecting full air
-/// superiority as if nothing had happened. Restored the gate before
-/// committing; with the fix in place the same run gives `before=1.0`,
-/// `after_strike=0.0`, and `after_recovery=1.0` again once the node
-/// repairs.
+/// back `1.0`, bit-identical to `before`'s own `1.0`, even though the
+/// airfield's own `condition` had already been driven to `0.4` - a wrecked
+/// airfield's squadron kept projecting full air superiority as if nothing
+/// had happened. Restored the gate before committing; with the fix in
+/// place the same run gives `before=1.0`, `after_strike=0.0`, and
+/// `after_recovery=1.0` again once the node repairs.
+///
+/// Drives `condition` down directly rather than through
+/// `Action::StrikeNode`, deliberately: that action's own effect is now
+/// gated by `air::air_superiority_factor` (this design change), and a
+/// defender whose squadron holds full local air superiority - exactly what
+/// this test's own setup grants `faction` at `base` - now makes an
+/// attacker with no air presence there land essentially nothing, which
+/// would leave this test unable to isolate the one thing it actually
+/// means to check: whether a *wrecked* node's own squadron still projects
+/// air power. Setting `condition` directly keeps that concern separate
+/// from `apply_strike_node`'s own air-gating, which
+/// `a_strike_achieves_little_or_nothing_against_a_defended_target` below
+/// covers instead.
 #[test]
 fn striking_an_airfield_stops_air_superiority_projection_and_resumes_once_repaired() {
     let mut world = scenario::build_world();
     world.units.clear();
 
     let faction = FactionId(0); // 東方連合 owns 北海道 (RegionId(0)).
-    let attacker = FactionId(2); // mvp's default empty `blocs` means unconditional war.
-    assert_ne!(world.region(RegionId(0)).owner, attacker, "sanity: distinct factions");
     let base = RegionId(0);
     let target = RegionId(1);
     world.region_mut(base).position = [0.0, 0.0];
@@ -9551,11 +9561,11 @@ fn striking_an_airfield_stops_air_superiority_projection_and_resumes_once_repair
     let before = world.region(target).air_superiority[faction.index()].get();
     assert!((before - 1.0).abs() < 1e-5, "sanity: the sole reaching faction holds full superiority before any strike: {before}");
 
-    action::apply_action(&mut world, attacker, Action::StrikeNode { node: airfield })
-        .expect("a hostile Airfield node is a valid StrikeNode target");
+    world.transport_nodes[airfield.index()].condition =
+        Condition::new(0.4).expect("0.4 is a valid Condition, and crosses NODE_OPERATIONAL_THRESHOLD (0.5)");
     assert!(
         world.transport_node(airfield).condition.get() <= NODE_OPERATIONAL_THRESHOLD,
-        "one strike against a full-health node must cross NODE_OPERATIONAL_THRESHOLD outright: got {}",
+        "test setup: the wrecked node must actually cross NODE_OPERATIONAL_THRESHOLD: got {}",
         world.transport_node(airfield).condition.get()
     );
 
@@ -9583,6 +9593,359 @@ fn striking_an_airfield_stops_air_superiority_projection_and_resumes_once_repair
         "once the airfield itself recovers, its squadron's air superiority projection must resume too: \
          before={before}, after_strike={after_strike}, after_recovery={after_recovery}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Design change: `Action::StrikeNode` used to ignore air superiority
+// entirely - a strike landed at full `NODE_STRIKE_DAMAGE` regardless of
+// who held the sky over the target, and the striking side risked nothing
+// sending it. The three tests below cover the two effects this closes
+// that gap with: `air::air_superiority_factor` degrades the strike's own
+// effect (this section's first two tests - defended vs. undefended), and
+// `air::apply_strike_losses` puts the striking faction's own reaching air
+// units at risk in proportion to the defender's hold on that airspace
+// (the third).
+// ---------------------------------------------------------------------
+
+/// A strike against a target the defender fully holds the sky over must
+/// achieve essentially nothing - `NODE_STRIKE_DAMAGE * air::
+/// air_superiority_factor` collapses to `0.0` exactly when the defending
+/// faction's hand-set `air_superiority` share is `1.0`, so `condition` must
+/// come back completely unchanged. This is the emergent behaviour the
+/// design change's own brief asks for by name: "defending your own
+/// airspace does not protect your own airfields" was the defect;
+/// `condition` staying at `Condition::FULL` here is that now being fixed.
+///
+/// **Confirmed this test can fail.** Temporarily reverted `apply_strike_
+/// node` to its pre-change form (`condition - NODE_STRIKE_DAMAGE`,
+/// unconditional). Re-ran: `after` came back `0.4`
+/// (`1.0 - NODE_STRIKE_DAMAGE`), not `1.0` - the strike landed at full
+/// effect straight through airspace the defender held completely.
+/// Reverted before committing.
+#[test]
+fn a_strike_achieves_little_or_nothing_against_a_defended_target() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2);
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    let n_factions = world.factions.len();
+    let mut shares = vec![AirSuperiority::NEUTRAL; n_factions];
+    shares[defender.index()] = AirSuperiority::new(1.0).expect("1.0 is a valid share");
+    world.region_mut(target_region).air_superiority = shares;
+
+    let node = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    let before = world.transport_node(node).condition.get();
+    assert_eq!(before, Condition::FULL.get(), "sanity: the node starts undamaged");
+
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node })
+        .expect("a hostile Airfield node is a valid StrikeNode target regardless of who holds the air");
+    let after = world.transport_node(node).condition.get();
+
+    assert_eq!(
+        after, before,
+        "a strike into airspace the defender fully holds must achieve nothing at all: before={before}, after={after}"
+    );
+}
+
+/// The counterpart to the test above: a strike against a target where
+/// nobody contests the sky (every region starts at `AirSuperiority::
+/// NEUTRAL` - `Region::air_superiority`'s own doc) must still land at the
+/// full, undegraded `NODE_STRIKE_DAMAGE` - the same figure `docs/phase10-
+/// spec.md`'s own Stage 10C acceptance criteria measured before this design
+/// change existed. Reusing `striking_a_port_node_stops_supply_routed_
+/// through_it`'s own scenario shape (isolate the corridor, strike the port)
+/// confirms the design change is additive: every pre-existing StrikeNode
+/// behaviour with no air units anywhere on the map is untouched, only a
+/// defended target now behaves differently.
+///
+/// **Confirmed this test can fail.** Temporarily forced `air::
+/// air_superiority_factor` to always return `0.0` (as if every target were
+/// maximally defended, the opposite defect from the test above). Re-ran:
+/// `condition` stayed at `1.0` instead of dropping to `0.4`, and the
+/// dependent `after < before * 0.05` supply assertion below failed outright
+/// (`after` matched `before`). Reverted before committing.
+#[test]
+fn a_strike_with_air_superiority_still_works() {
+    let mut world = scenario::build_world();
+    isolate_hokkaido_port_corridor(&mut world);
+    let defender = world.region(RegionId(0)).owner;
+    let attacker = FactionId(2);
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    push_garrison(&mut world, RegionId(0), defender);
+
+    logistics::recompute_supply(&mut world);
+    let before_supply = world.supply[RegionId(0).index()];
+    assert!(before_supply > 0.0, "sanity: the garrison is supplied before any strike: {before_supply}");
+
+    let port = world.port_node(RegionId(0)).expect("hokkaido has a Port node").id;
+    let before_condition = world.transport_node(port).condition.get();
+
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
+        .expect("a hostile Port node is a valid StrikeNode target");
+
+    let after_condition = world.transport_node(port).condition.get();
+    assert!(
+        (before_condition - after_condition - NODE_STRIKE_DAMAGE).abs() < 1e-5,
+        "an uncontested strike must still land at the full, undegraded NODE_STRIKE_DAMAGE: \
+         before={before_condition}, after={after_condition}"
+    );
+
+    logistics::recompute_supply(&mut world);
+    let after_supply = world.supply[RegionId(0).index()];
+    assert!(
+        after_supply < before_supply * 0.05,
+        "an uncontested strike must still starve the garrison, exactly as before this design change: \
+         before={before_supply}, after={after_supply}"
+    );
+}
+
+/// The missing counterplay this design change adds: a strike flown into
+/// airspace the defender partially holds costs the striking faction's own
+/// reaching squadron real losses, proportional to the defender's share -
+/// and the mauled squadron is never left stuck, exactly CLAUDE.md §6's
+/// "状態には必ず回復経路を持たせる": it can still be reinforced (`Action::
+/// ReinforceUnit` is not rejected) or disbanded (`Action::DisbandUnit`
+/// actually removes it and returns manpower/equipment to the faction's
+/// pools) afterward.
+///
+/// The expected loss is computed independently here from `air::
+/// apply_strike_losses`'s own documented shape (`defense * COMBAT_DAMAGE`,
+/// converted through `tick_combat`'s own per-unit constants) rather than
+/// copying its formula verbatim, so this test would actually catch a
+/// mismatch between the two.
+///
+/// **Confirmed this test can fail.** Temporarily removed the `air::
+/// apply_strike_losses` call from `apply_strike_node`. Re-ran: the
+/// squadron's `organization`/`manpower`/`equipment` all came back
+/// bit-identical to their pre-strike values instead of measurably lower -
+/// flying into contested airspace cost nothing. Reverted before committing.
+/// A strike that grounds the defender must stop the defender defending,
+/// **within the same action batch** (`codex review`, P2).
+///
+/// `Region::air_superiority` is a per-tick cache, but `Simulation::apply`
+/// resolves a whole batch of actions between two ticks. Without refreshing
+/// it at strike resolution, a second `StrikeNode` in the same batch is
+/// judged against the defence that existed before the first one wrecked the
+/// defender's airfield - so a grounded field keeps blunting strikes, and
+/// keeps shooting down attackers that nothing can physically intercept.
+/// CLAUDE.md's 「発令時点の値を焼き込まない」, one batch deep.
+///
+/// **Confirmed this test can fail.** Removing the
+/// `air::refresh_air_superiority_near` call from `action::apply_strike_node`
+/// leaves the second strike degraded exactly like the first - both drop the
+/// node by 0.15 (`first=0.15, second=0.15`) instead of the second landing at
+/// full force once nothing can intercept it. Restored, and it passes.
+/// The sortie that grounds a defended airfield still pays for the defence
+/// it flew into (`codex review`, P1).
+///
+/// The refresh that `grounding_the_defender_stops_it_defending_within_the_
+/// same_batch` pins must not happen *before* losses are resolved: doing so
+/// deleted the defenders from the picture before the attacker was charged
+/// for them, so a strike that beat a full defence took zero losses for it -
+/// bombers rewarded for the very thing that made the sortie dangerous.
+/// `action::apply_strike_node` therefore resolves losses against the
+/// pre-strike share (`1.0 - factor`, read before the node was touched) and
+/// refreshes only afterwards.
+///
+/// **Confirmed this test can fail.** Restoring the defective shape - having
+/// `air::apply_strike_losses` re-read `World::hostile_air_superiority_max`
+/// itself instead of taking the pre-strike share, with the refresh moved
+/// back above it - makes the attacking squadron come through a grounding
+/// strike completely untouched (`before=100, after=100`), tripping the
+/// assertion below. Passing the share explicitly is what makes the
+/// ordering un-break-able rather than merely currently-correct: the value
+/// is captured before any mutation, so no later reordering can silently
+/// change which defence the attacker is charged for. Restored, and it
+/// passes.
+#[test]
+fn a_sortie_that_grounds_its_target_still_pays_for_the_defence_it_faced() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2);
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    let own_region = RegionId(9);
+    world.region_mut(own_region).position = world.region(target_region).position;
+    let own_airfield = world.airfield_node(own_region).expect("mvp gives every region an airfield").id;
+    let attacker_unit = push_full_strength_air_unit(&mut world, attacker, own_airfield, 10.0);
+
+    let target_airfield = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(&mut world, defender, target_airfield, 30.0);
+    air::tick_air_superiority(&mut world);
+    assert!(
+        world.hostile_air_superiority_max(target_region, attacker) > 0.5,
+        "sanity: the defender must actually hold the air when the sortie sets out"
+    );
+
+    // Worn enough that this one contested strike grounds it - the exact
+    // case where refreshing too early used to hand the attacker a free pass.
+    world.transport_nodes[target_airfield.index()].condition = Condition::new(0.6).expect("0.6 is a valid condition");
+
+    let org_before = world.unit(attacker_unit).organization;
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: target_airfield })
+        .expect("a hostile Airfield node is a valid StrikeNode target");
+
+    assert!(
+        !world.transport_node(target_airfield).operational(),
+        "sanity: this test needs the strike to actually ground the field"
+    );
+    assert!(
+        world.unit(attacker_unit).organization < org_before,
+        "the squadron that flew into a held sky must take losses for it even though it wrecked the field: \
+         before={org_before}, after={}",
+        world.unit(attacker_unit).organization
+    );
+}
+
+#[test]
+fn grounding_the_defender_stops_it_defending_within_the_same_batch() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2);
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    // Attacker based within reach of the target.
+    let own_region = RegionId(9);
+    assert_eq!(world.region(own_region).owner, attacker, "sanity: mvp assigns kyushu to faction 2");
+    world.region_mut(own_region).position = world.region(target_region).position;
+    let own_airfield = world.airfield_node(own_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(&mut world, attacker, own_airfield, 10.0);
+
+    // The defender's fighters fly from the very airfield under attack, so
+    // wrecking it is exactly what grounds them.
+    let target_airfield = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(&mut world, defender, target_airfield, 30.0);
+    air::tick_air_superiority(&mut world);
+    assert!(
+        world.hostile_air_superiority_max(target_region, attacker) > 0.5,
+        "sanity: the defender must actually hold the air before the first strike"
+    );
+
+    // Start the field already worn, so that one strike degraded by a strong
+    // defence still crosses `NODE_OPERATIONAL_THRESHOLD` - this test is
+    // about what the *second* strike sees, not about how many sorties a
+    // pristine field absorbs.
+    world.transport_nodes[target_airfield.index()].condition = Condition::new(0.6).expect("0.6 is a valid condition");
+
+    let start = world.transport_node(target_airfield).condition.get();
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: target_airfield })
+        .expect("a hostile Airfield node is a valid StrikeNode target");
+    let after_first = world.transport_node(target_airfield).condition.get();
+    let first_drop = start - after_first;
+    assert!(first_drop > 0.0, "sanity: a contested strike still does something, got {first_drop}");
+    assert!(
+        !world.transport_node(target_airfield).operational(),
+        "sanity: this test needs the first strike to actually ground the field"
+    );
+
+    // Second strike, same batch - the defender's fighters can no longer fly.
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: target_airfield })
+        .expect("a wrecked node is still a legal target");
+    let second_drop = after_first - world.transport_node(target_airfield).condition.get();
+
+    assert!(
+        second_drop > first_drop,
+        "once the defending airfield is grounded, the next strike in the same batch must land harder than the \
+         first did against an intact defence: first={first_drop}, second={second_drop}"
+    );
+}
+
+#[test]
+fn a_striking_squadron_takes_losses_proportional_to_the_defence_and_can_recover() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let attacker = FactionId(2);
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    // The attacker's own squadron, based well within AIR_OPERATING_RADIUS_KM
+    // of the target so `air::apply_strike_losses`'s own reach test
+    // (`units_reaching`) actually finds it.
+    let own_region = RegionId(9); // attacker (faction 2, 西方同盟) owns 九州.
+    assert_eq!(world.region(own_region).owner, attacker, "sanity: mvp assigns kyushu to faction 2");
+    world.region_mut(own_region).position = world.region(target_region).position;
+    let own_airfield = world.airfield_node(own_region).expect("mvp gives every region an airfield").id;
+    let unit_id = push_full_strength_air_unit(&mut world, attacker, own_airfield, 10.0);
+
+    // The defender's own fighters, based at the target region's airfield.
+    // Deliberately *real units* rather than a hand-written
+    // `Region::air_superiority` value: `action::apply_strike_node` refreshes
+    // that cache from the world's actual air power before resolving losses
+    // (`air::refresh_air_superiority_near`, added because a strike earlier
+    // in the same batch can ground the defender), so a fabricated share that
+    // no unit backs is simply overwritten. Sizing the defence at 1.5x the
+    // attacker's manpower makes the defender's share 1.5/(1+1.5) = 0.6 by
+    // construction, and the assertion below reads the share back out of the
+    // world rather than restating the arithmetic.
+    let target_airfield = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(&mut world, defender, target_airfield, 15.0);
+    air::tick_air_superiority(&mut world);
+    let defense = world.hostile_air_superiority_max(target_region, attacker);
+    assert!(
+        (defense - 0.6).abs() < 1e-4,
+        "sanity: 15.0 against 10.0 of attacker manpower must give the defender a 0.6 share, got {defense}"
+    );
+
+    let node = target_airfield;
+
+    let before = world.unit(unit_id).clone();
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node })
+        .expect("a hostile Airfield node is a valid StrikeNode target");
+    let after = world.unit(unit_id).clone();
+
+    assert!(after.alive, "sanity: one strike must not outright destroy a full-strength squadron");
+
+    // `units_reaching` finds only this one unit, so its `combat_power()`
+    // share of the (single-unit) total is exactly 1.0 - the whole
+    // `dmg_total = defense * COMBAT_DAMAGE` lands on it.
+    let dmg = defense * COMBAT_DAMAGE;
+    let expected_org = (before.organization - dmg * ORG_DAMAGE_MULT).max(0.0);
+    let expected_manpower = before.manpower - (dmg * MANPOWER_LOSS_PER_DAMAGE).min(before.manpower);
+    let expected_equipment = (before.equipment - dmg * EQUIPMENT_LOSS_PER_DAMAGE).max(0.0);
+
+    assert!(
+        (after.organization - expected_org).abs() < 1e-4,
+        "organization loss must match defense * COMBAT_DAMAGE converted through ORG_DAMAGE_MULT: \
+         expected={expected_org}, got={}",
+        after.organization
+    );
+    assert!(
+        (after.manpower - expected_manpower).abs() < 1e-4,
+        "manpower loss must match defense * COMBAT_DAMAGE converted through MANPOWER_LOSS_PER_DAMAGE: \
+         expected={expected_manpower}, got={}",
+        after.manpower
+    );
+    assert!(
+        (after.equipment - expected_equipment).abs() < 1e-4,
+        "equipment loss must match defense * COMBAT_DAMAGE converted through EQUIPMENT_LOSS_PER_DAMAGE: \
+         expected={expected_equipment}, got={}",
+        after.equipment
+    );
+    assert!(after.organization < before.organization, "sanity: the squadron must actually have taken a loss");
+
+    // Recovery path 1: reinforcement is never refused just because the
+    // unit was mauled by a strike.
+    let reinforce = action::apply_action(&mut world, attacker, Action::ReinforceUnit { unit: unit_id });
+    assert!(reinforce.is_ok(), "a mauled squadron must still be reinforceable: {reinforce:?}");
+
+    // Recovery path 2: disbanding always remains available.
+    let disband = action::apply_action(&mut world, attacker, Action::DisbandUnit { unit: unit_id });
+    assert!(disband.is_ok(), "a mauled squadron must still be disbandable: {disband:?}");
+    assert!(!world.unit(unit_id).alive, "disbanding a mauled squadron must actually remove it, same as any other unit");
 }
 
 /// Stage 10C (codex review P2), the sibling of `recruit_air_unit_without_

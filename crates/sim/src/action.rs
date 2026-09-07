@@ -1292,6 +1292,31 @@ fn apply_interdict_line(
 /// region here since a node (unlike a line) has only one. No locality
 /// requirement, for the same reason `apply_interdict_line` has none: see
 /// `Action::StrikeNode`'s own doc.
+///
+/// **Air superiority now gates and prices this strike** (design.md §8's own
+/// framing - "敵は...物流拠点を攻撃することも可能" - was never meant to read
+/// as a free action regardless of who holds the sky over the target):
+///
+/// - `air::air_superiority_factor` scales `NODE_STRIKE_DAMAGE` itself down
+///   to whatever fraction of the target's airspace the defender does *not*
+///   hold - contested air degrades the strike, air the defender fully holds
+///   lets essentially nothing through, `1.0` (today's undegraded behavior)
+///   when nobody contests the sky there at all. Read fresh against `Region::
+///   air_superiority` right here, at resolution time, never sampled once
+///   when the order was queued (CLAUDE.md「繰り返し踏んだ欠陥」: "発令時点の
+///   値を焼き込まない") - the exact same function `air_line_factor` already
+///   uses for `InterdictLine`'s throughput throttle, not a second notion of
+///   who controls the air.
+/// - `air::apply_strike_losses` is the missing counterplay: whatever of
+///   `faction`'s own air units can currently reach the target region take
+///   losses proportional to that same defender's hostile share, whether or
+///   not the strike itself accomplished anything. Sending squadrons into
+///   contested skies costs squadrons even on the ticks the bombs miss.
+///
+/// Applied for *every* strikeable node kind, `Port` included: design.md §8
+/// never restricts "物流拠点を攻撃する" to airfield targets, and Phase 10's
+/// air force is this action's principal user (10D's own AI, `air_strike_ai`)
+/// regardless of whether the node struck happens to be a runway or a quay.
 fn apply_strike_node(
     world: &mut World,
     faction: FactionId,
@@ -1305,10 +1330,39 @@ fn apply_strike_node(
     if owner == faction || !world.diplomacy.is_at_war(faction, owner) {
         return Err(ActionError::NodeNotHostile);
     }
+    let region = existing.region;
 
-    let next = (existing.condition.get() - NODE_STRIKE_DAMAGE).max(0.0);
+    // Collected *before* anything is mutated: the sortie's own bases are
+    // part of what this strike changes (`air::strike_origin_regions`), and
+    // after the losses below some of those squadrons may no longer reach.
+    let refresh_origins = air::strike_origin_regions(world, region, faction);
+
+    let factor = air::air_superiority_factor(world, region, faction);
+    let next = (existing.condition.get() - NODE_STRIKE_DAMAGE * factor).max(0.0);
     world.transport_nodes[node.index()].condition =
         Condition::new(next).expect("clamped into 0.0..=1.0 above");
+
+    // This sortie is judged against the defence it actually flew into -
+    // `factor` above was read before the node took any damage, so
+    // `1.0 - factor` is that same pre-strike hostile share. Grounding the
+    // field does not retroactively spare the bombers that grounded it
+    // (`codex review`, P1: refreshing before this line let a strike that
+    // faced and beat a full defence take zero losses for it).
+    air::apply_strike_losses(world, region, faction, 1.0 - factor);
+
+    // Only now, with both the node's condition and the attacker's own
+    // squadrons already mutated, is the cached air picture refreshed.
+    //
+    // `Region::air_superiority` is a per-tick cache that
+    // `air::tick_air_superiority` rebuilds once a day, but a whole batch of
+    // actions resolves between two ticks. Grounding this airfield changed
+    // who can fly over everything within its reach
+    // (`air::units_reaching` refuses to fly from a non-operational node),
+    // and the losses just taken changed how much power the attacker still
+    // projects. Without this, every later action in the same batch would be
+    // judged against the picture from before both - CLAUDE.md's
+    // 「発令時点の値を焼き込まない」, one batch deep.
+    air::refresh_air_superiority_near(world, &refresh_origins);
     Ok(())
 }
 

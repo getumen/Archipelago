@@ -1041,9 +1041,20 @@ fn heuristic_agent_recruits_air_when_it_can_afford_it() {
 
 /// Stage 10D AI: `air_strike_ai` must issue `Action::StrikeNode` against a
 /// hostile `Airfield`/`Port` node once this faction actually has air power
-/// of its own - the "use them for what Phase 10 built them for" half of
-/// Stage 10D, distinct from `heuristic_agent_interdicts_an_enemy_transport_line`
-/// (lines, not nodes) above.
+/// of its own *and that air power can reach the target's airspace* - the
+/// "use them for what Phase 10 built them for" half of Stage 10D, distinct
+/// from `heuristic_agent_interdicts_an_enemy_transport_line` (lines, not
+/// nodes) above.
+///
+/// The reach half of this rule is new since `Action::StrikeNode` started
+/// gating and pricing itself on `Region::air_superiority`
+/// (`action::apply_strike_node`): `air_strike_ai` now only considers a
+/// target whose own region this faction's air already projects some share
+/// onto (`air::tick_air_superiority`'s reach test - operational airfield,
+/// within `air::AIR_OPERATING_RADIUS_KM`), so the two hostile regions are
+/// placed on top of the relocated air unit's own base (distance `0.0`,
+/// trivially inside the radius) rather than trusted to fall inside it by
+/// mvp's own incidental geometry.
 ///
 /// Confirmed this fails without the fix: temporarily removed the
 /// `air_strike_ai` call from `decide_for_llm` and re-ran with the same
@@ -1070,9 +1081,33 @@ fn heuristic_agent_strikes_an_enemy_node_once_it_has_air_power() {
         .find(|n| n.kind == archipelago_sim::transport::TransportNodeKind::Airfield && world.region(n.region).owner == faction)
         .map(|n| n.id)
         .expect("mvp gives every faction's own territory an airfield");
+    let own_region = world.transport_node(own_node).region;
     let unit_id = UnitId(0);
     assert_eq!(world.unit(unit_id).owner, faction, "scenario::build_world assigns unit 0 to faction 0");
     world.unit_mut(unit_id).station = Station::Airfield(own_node);
+
+    // Collapse every hostile region onto this faction's own base so reach
+    // is not what this test is measuring - `air_superiority_derives_from_
+    // both_sides_strength_by_ratio_and_is_order_independent`'s own
+    // convention of placing regions by hand rather than relying on mvp's
+    // incidental map layout.
+    let hostile_regions: Vec<RegionId> = (0..world.regions.len())
+        .map(|i| RegionId(i as u32))
+        .filter(|&r| {
+            let owner = world.region(r).owner;
+            owner != faction && world.diplomacy.is_at_war(faction, owner)
+        })
+        .collect();
+    assert!(!hostile_regions.is_empty(), "test setup: mvp must have at least one hostile region");
+    let own_position = world.region(own_region).position;
+    for &r in &hostile_regions {
+        world.region_mut(r).position = own_position;
+    }
+    archipelago_sim::air::tick_air_superiority(&mut world);
+    assert!(
+        world.region(hostile_regions[0]).air_superiority[faction.index()].get() > 0.0,
+        "test setup: the relocated air unit must actually project power onto a hostile region"
+    );
 
     let mut agent = HeuristicAgent::new(faction, 1.15);
     let obs = Observation { faction, world: &world };
@@ -1080,6 +1115,118 @@ fn heuristic_agent_strikes_an_enemy_node_once_it_has_air_power() {
 
     assert!(
         actions.iter().any(|a| matches!(a, Action::StrikeNode { .. })),
-        "expected a StrikeNode order against a hostile faction's own airfield/port once air power exists: {actions:?}"
+        "expected a StrikeNode order against a hostile faction's own airfield/port once air power exists and can reach it: {actions:?}"
     );
+}
+
+/// Regression guard for the mvp land-army collapse traced to `disband_
+/// excess_air`/`air_recruit`: Stage 10D copied `disband_excess_naval`'s
+/// `land_is_gone` chronic-insolvency gate verbatim for air, which put
+/// `AIR_MIN_SQUADRONS` in the *same* protected tier as `NAVY_MIN_FLEETS`
+/// (both released only once land alone was gone) instead of one tier
+/// further down, the way `AIR_MIN_SQUADRONS`'s own doc already frames air -
+/// "one domain further" than the navy, smaller and cheaper still. Two
+/// floors sharing one tier meant neither ever gave ground until land was
+/// completely gone, so both drew on the same national Munitions pool at
+/// full, fixed cost for the entire time land was doing all the adjusting.
+/// Measured on `scenarios/mvp.json` seeds 1-8 with this bug present: land
+/// collapsed to 0-2 units per surviving faction (down from 7-11
+/// pre-Phase-10) and only 1/8 seeds still reached `Outcome::Victory` (down
+/// from 8/8) - nobody left alive with enough of an army to take ground.
+///
+/// The fix (`disband_excess_air`'s own doc) makes air the tier *below* the
+/// navy, not its sibling: air's own chronic branch now waits for the navy
+/// to be gone too, not land alone.
+///
+/// Confirmed this fails without the fix: reverted `disband_excess_air`'s
+/// `land_and_navy_gone` back to checking only `own_unit_count(obs,
+/// Domain::Land) == 0` (the pre-fix shape) and re-ran - the first
+/// assertion below failed with a `DisbandUnit` for the air squadron
+/// present even though the navy's own floor was still fully intact.
+/// Reverted before committing.
+#[test]
+fn air_floor_is_not_shed_while_the_navy_still_stands() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    let own_node = world
+        .transport_nodes
+        .iter()
+        .find(|n| {
+            n.kind == archipelago_sim::transport::TransportNodeKind::Airfield && world.region(n.region).owner == faction
+        })
+        .map(|n| n.id)
+        .expect("mvp gives every faction's own territory an airfield");
+    let own_zone = world.zones_touching(capital).into_iter().next().expect("mvp's capital touches a sea zone");
+
+    // Land must be entirely gone - this test is specifically about whether
+    // the navy alone is enough to keep protecting the air floor once land
+    // no longer can.
+    for unit in world.units.iter_mut().filter(|u| u.owner == faction) {
+        unit.alive = false;
+    }
+
+    let push = |world: &mut archipelago_sim::world::World, station: Station, count: usize| -> Vec<UnitId> {
+        let mut ids = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = UnitId(world.units.len() as u32);
+            world.units.push(Unit {
+                id,
+                owner: faction,
+                name: "Test Unit".to_string(),
+                station,
+                movement: None,
+                manpower: UNIT_MANPOWER,
+                equipment: UNIT_EQUIPMENT,
+                organization: UNIT_ORG,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_station: station,
+                experience: 0.0,
+                alive: true,
+            });
+            ids.push(id);
+        }
+        ids
+    };
+    let sea = push(&mut world, Station::Sea(own_zone), 2);
+    let air = push(&mut world, Station::Airfield(own_node), 2);
+
+    // A chronic Munitions drought, well past `CHRONIC_INSOLVENCY_TICKS_FOR_
+    // FLOOR_TRIM` (15) - `disband_excess_air` takes the streak length as a
+    // plain argument, so this drives its chronic branch directly without
+    // needing to replay 60+ in-game days through a live `HeuristicAgent`.
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
+
+    let obs = Observation { faction, world: &world };
+    let mut actions = Vec::new();
+    crate::disband_excess_air(faction, 20, &obs, &mut actions);
+    assert!(
+        actions.is_empty(),
+        "air's floor must not be cut while the navy's own floor is still standing (only land is gone): {actions:?}"
+    );
+
+    // Sanity companion: once the navy is gone too, the same chronic streak
+    // does finally reach the air floor - the recovery path this whole
+    // mechanism exists for is not itself broken by the fix.
+    for &u in &sea {
+        world.unit_mut(u).alive = false;
+    }
+    let obs = Observation { faction, world: &world };
+    let mut actions = Vec::new();
+    crate::disband_excess_air(faction, 20, &obs, &mut actions);
+    assert_eq!(
+        actions.len(),
+        1,
+        "once land and navy are both gone, air's own chronic branch must shed a unit: {actions:?}"
+    );
+    match actions[0] {
+        Action::DisbandUnit { unit } => {
+            assert!(air.contains(&unit), "must disband one of the air units, not something else: {actions:?}")
+        }
+        ref other => panic!("expected a DisbandUnit, got {other:?}"),
+    }
 }

@@ -140,6 +140,16 @@ fn factions_value(world: &World) -> Value {
                 .iter()
                 .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Sea)
                 .count();
+            // `codex review` (P2): `units`/`fleets` counted two of the three
+            // domains and left `Domain::Air` invisible here, so an API client
+            // could see a faction's army and navy but never its air force -
+            // the same omission `apps/headless/src/json.rs` had, in the other
+            // serializer of the same faction state. Both now report all three.
+            let squadrons = world
+                .units
+                .iter()
+                .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Air)
+                .count();
             Value::obj(vec![
                 ("id", Value::num(f.id.0 as f64)),
                 ("name", Value::str(f.name.clone())),
@@ -147,6 +157,7 @@ fn factions_value(world: &World) -> Value {
                 ("regions", Value::num(world.region_count(f.id) as f64)),
                 ("units", Value::num(units as f64)),
                 ("fleets", Value::num(fleets as f64)),
+                ("squadrons", Value::num(squadrons as f64)),
                 ("manpower", Value::f32num(f.manpower)),
                 ("stock", good_object(&f.stock)),
                 ("conscription", Value::f32num(f.conscription)),

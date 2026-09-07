@@ -212,14 +212,26 @@ fn serialize_factions(world: &World) -> String {
                 .iter()
                 .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Sea)
                 .count();
+            // Stage 10D added `Domain::Air` to observation/API state but
+            // missed this serializer - `units`/`fleets` above report Land
+            // and Sea, so a run's air strength (`air_recruit`/
+            // `disband_excess_air`, `AIR_MIN_SQUADRONS`) had no visible
+            // counterpart here at all. Named `squadrons` to match `fleets`'
+            // own domain-flavored naming rather than a bare `air_units`.
+            let squadrons = world
+                .units
+                .iter()
+                .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Air)
+                .count();
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
                 world.region_count(f.id),
                 units,
                 fleets,
+                squadrons,
                 number(f.manpower),
                 good_object(&f.stock),
                 number(f.conscription),
