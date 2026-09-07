@@ -927,24 +927,32 @@ fn heuristic_agent_repairs_the_worst_line_it_can_actually_host() {
     let mut world = scenario::build_world();
     let faction = FactionId(0);
 
-    let own_lines: Vec<usize> = world
+    let own_lines: Vec<(usize, RegionId, RegionId)> = world
         .transport_lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| {
+        .filter_map(|(i, l)| {
             let ra = world.transport_node(l.from).region;
             let rb = world.transport_node(l.to).region;
-            world.region(ra).owner == faction && world.region(rb).owner == faction
+            (world.region(ra).owner == faction && world.region(rb).owner == faction).then_some((i, ra, rb))
         })
-        .map(|(i, _)| i)
         .collect();
     assert!(own_lines.len() >= 2, "this test needs at least two wholly-owned lines, got {}", own_lines.len());
 
     // The worse of the two is deliberately made impossible to host: both of
     // its endpoint regions are already mid-construction, which is exactly
-    // what `action::apply_build` refuses.
-    let blocked = own_lines[0];
-    let reachable = own_lines[1];
+    // what `action::apply_build` refuses. `reachable` must share no
+    // endpoint region with `blocked` (Stage 10A: a region can now own more
+    // than one wholly-owned line of its own, e.g. its Depot<->Port and
+    // Depot<->Airfield spurs both sit inside that one region - picking two
+    // lines that happen to share `blocked`'s own region would put
+    // `reachable` under construction too, the same way `blocked` itself
+    // deliberately is).
+    let (blocked, blocked_ra, blocked_rb) = own_lines[0];
+    let (reachable, _, _) = *own_lines[1..]
+        .iter()
+        .find(|&&(_, ra, rb)| ra != blocked_ra && ra != blocked_rb && rb != blocked_ra && rb != blocked_rb)
+        .expect("this test needs a second wholly-owned line with no endpoint region shared with the first");
     world.transport_lines[blocked].condition = Condition::new(0.1).unwrap();
     world.transport_lines[reachable].condition = Condition::new(0.3).unwrap();
     for endpoint in [world.transport_lines[blocked].from, world.transport_lines[blocked].to] {

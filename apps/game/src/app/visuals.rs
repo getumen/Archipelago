@@ -220,6 +220,7 @@ pub(super) fn sync_unit_visuals(
         let key = match unit.station {
             archipelago_sim::world::Station::Region(r) => (0u8, r.0),
             archipelago_sim::world::Station::Sea(z) => (1u8, z.0),
+            archipelago_sim::world::Station::Airfield(n) => (2u8, n.0),
         };
         by_station.entry(key).or_default().push(unit.id);
     }
@@ -238,7 +239,7 @@ pub(super) fn sync_unit_visuals(
             continue;
         }
         *visibility = Visibility::Visible;
-        let [cx, cy] = station_position(unit.station, &layout.0, &sea_centers.0);
+        let [cx, cy] = station_position(world, unit.station, &layout.0, &sea_centers.0);
         let (slot, count) = slot_of.get(&marker.0.0).copied().unwrap_or((0, 1));
         let offset = ring_offset(slot, count, 14.0);
         transform.translation.x = cx + offset.x;

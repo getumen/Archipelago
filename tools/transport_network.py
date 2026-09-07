@@ -10,6 +10,15 @@ re-expresses facts a scenario author already chose:
     - a region with `port > 0` also gets a Port node (`<region>_port`),
       joined to its own Depot by a short, deliberately generous Rail line
       so an imported good can always reach the region it landed in
+    - Stage 10A (docs/phase10-spec.md "1. 基地"): every region also gets an
+      Airfield node (`<region>_airfield`), joined to its own Depot by a
+      short Rail line at `AIRFIELD_LINK_CAPACITY`. `mvp.json`/`japan47.json`
+      are hand-authored abstractions with no real airport data to derive a
+      placement or a tiered capacity from (unlike `scenarios/japan_hex.json`
+      - see `tools/hexmap/transport_real.py`'s own doc) - "every region"
+      is the same non-arbitrary, no-cherry-picking rule this function
+      already applies to Depot nodes, not a guess at which specific region
+      would realistically have one.
     - every existing region-to-region `links[]` entry becomes one
       transport line:
         rail  -> Rail line,  Depot <-> Depot, capacity 25.0 (== the
@@ -56,6 +65,17 @@ ROAD_CAPACITY = 12.0
 TUNNEL_CAPACITY = 8.0
 STRAIT_CAPACITY = 6.0
 PORT_LINK_CAPACITY = 30.0
+# Stage 10A (docs/phase10-spec.md "4. 生産" / "1. 基地"): no air unit is
+# deployed in any shipped scenario yet (that's 10B onward), so there is
+# nothing to measure this against in actual play - a flat baseline, the
+# same "no real data to size it any other way" basis `ROAD_CAPACITY` above
+# already uses, not a tuned constant. Shared with `tools/hexmap/
+# transport_real.py`'s own real-data-derived network for japan_hex, since
+# MLIT's airport category code (`airfield_data.py`'s own doc) governs
+# administrative management, not physical throughput capacity, and offers
+# no comparably legitimate ordinal signal the way the port/rail tier
+# tables do.
+AIRFIELD_LINK_CAPACITY = 20.0
 FRESH_CONDITION = 1.0
 
 
@@ -107,6 +127,23 @@ def derive_transport(scenario: dict) -> dict:
                 )
             else:
                 raise ValueError(f"unknown link kind {kind!r}")
+
+    # Stage 10A: every region also gets an Airfield node - see this
+    # module's own doc for why "every region", not a selective placement.
+    # Appended as its own trailing pass, *after* every Depot/Port node and
+    # every region-link line above, so every existing `TransportNodeId`/
+    # `TransportLineId` (declaration-order indices, `ids::TransportNodeId`/
+    # `TransportLineId`'s own doc) an existing test or tool hardcodes keeps
+    # meaning exactly what it did before Stage 10A - interleaving the new
+    # nodes/lines in with the old ones would silently renumber them instead.
+    for region in regions:
+        rid = region["id"]
+        depot_id = f"{rid}_depot"
+        airfield_id = f"{rid}_airfield"
+        nodes.append({"id": airfield_id, "name": f"{region['name']} 飛行場", "kind": "airfield", "region": rid})
+        lines.append(
+            {"from": depot_id, "to": airfield_id, "kind": "rail", "capacity": AIRFIELD_LINK_CAPACITY, "condition": FRESH_CONDITION}
+        )
 
     return {"nodes": nodes, "lines": lines}
 

@@ -7,7 +7,7 @@ use crate::diplomacy::Diplomacy;
 use crate::focus::NationalFocus;
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
-use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, TransportNodeId, UnitId};
 use crate::logistics::SupplyLeftover;
 use crate::military::Unit;
 use crate::transport::{TransportLine, TransportNode};
@@ -22,15 +22,62 @@ use crate::transport::{TransportLine, TransportNode};
 pub enum Domain {
     Land,
     Sea,
+    /// Stage 10A (docs/phase10-spec.md "1. 基地"): a unit based at a
+    /// `transport::TransportNodeKind::Airfield` node - see `Station::
+    /// Airfield`'s own doc for why the third `Station` variant, not a
+    /// sidecar field, is what carries this.
+    Air,
 }
 
-/// Where a `Unit` currently is: a land region or a sea zone. Replaces the
-/// Phase 1/2A-2C `Unit::location: RegionId` (docs/phase2-spec.md Stage 2D:
-/// "Unit の location: RegionId を station: Station に置き換える").
+impl Domain {
+    /// Lowercase English key, the same `Good::key()`/`Terrain::key()`
+    /// convention - used everywhere a `Domain` crosses a text boundary
+    /// (`action::Action::RecruitUnit`'s wire encoding in both
+    /// `archipelago-api`/`apps/game`'s own `action_codec.rs`) so encode and
+    /// decode can never drift onto two different three-way spellings.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Domain::Land => "land",
+            Domain::Sea => "sea",
+            Domain::Air => "air",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Domain> {
+        match key {
+            "land" => Some(Domain::Land),
+            "sea" => Some(Domain::Sea),
+            "air" => Some(Domain::Air),
+            _ => None,
+        }
+    }
+}
+
+/// Where a `Unit` currently is: a land region, a sea zone, or (Stage 10A)
+/// an airfield. Replaces the Phase 1/2A-2C `Unit::location: RegionId`
+/// (docs/phase2-spec.md Stage 2D: "Unit の location: RegionId を station:
+/// Station に置き換える").
+///
+/// docs/phase10-spec.md "1. 基地" leaves it to the implementation whether
+/// an air unit's location extends this enum or is held another way, on the
+/// condition that whatever is chosen keeps the exhaustive, wildcard-free
+/// matching every existing `Station` consumer already relies on to catch a
+/// new domain at compile time rather than silently mishandle it. A
+/// sidecar field on `Unit` (`airfield: Option<TransportNodeId>`, populated
+/// exactly when some other field says "this is an air unit") would
+/// duplicate the same "existence lives in two places" shape `transport::
+/// TransportNodeKind::Port`'s own doc already flags as the thing to avoid -
+/// two facts that must be kept in lockstep by hand instead of one that
+/// simply cannot disagree with itself. A third `Station` variant has no
+/// such seam: `Unit::station` is already the single source of truth for
+/// "where is this unit and therefore what domain is it," for land and sea
+/// alike, so extending it is the same design applied a third time, not a
+/// new one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Station {
     Region(RegionId),
     Sea(SeaZoneId),
+    Airfield(TransportNodeId),
 }
 
 impl Station {
@@ -38,6 +85,7 @@ impl Station {
         match self {
             Station::Region(_) => Domain::Land,
             Station::Sea(_) => Domain::Sea,
+            Station::Airfield(_) => Domain::Air,
         }
     }
 
@@ -45,6 +93,7 @@ impl Station {
         match self {
             Station::Region(r) => Some(r),
             Station::Sea(_) => None,
+            Station::Airfield(_) => None,
         }
     }
 
@@ -52,6 +101,19 @@ impl Station {
         match self {
             Station::Region(_) => None,
             Station::Sea(z) => Some(z),
+            Station::Airfield(_) => None,
+        }
+    }
+
+    /// Stage 10A: the airfield node an air unit is based at, `None` for a
+    /// land/sea unit - the domain-generic accessor `crate::air`'s own
+    /// per-node demand/supply functions key off, mirroring `region()`/
+    /// `sea_zone()` exactly.
+    pub fn airfield(self) -> Option<TransportNodeId> {
+        match self {
+            Station::Region(_) => None,
+            Station::Sea(_) => None,
+            Station::Airfield(n) => Some(n),
         }
     }
 }
@@ -641,6 +703,25 @@ pub struct World {
     /// sea-zone demand sink), so this field is exactly as demand-bounded and
     /// as genuinely finite as `supply_by_faction` is for land.
     pub supply_sea: Vec<Vec<f32>>,
+    /// Stage 10A (docs/phase10-spec.md "1. 基地"): the Munitions+Arms
+    /// throughput that actually flowed to each `transport::TransportNode`'s
+    /// own air-unit demand this tick, indexed by `[TransportNodeId]
+    /// [FactionId]` - the air-domain counterpart of `supply_sea`, read by
+    /// `air::air_unit_supply_avail`/`air_demand_and_avail`. Nonzero only at
+    /// a node whose `kind` is `transport::TransportNodeKind::Airfield` (the
+    /// only kind `logistics::build_transport_graph` ever wires an
+    /// `air_demand` sink onto) and only a faction with an alive unit
+    /// actually stationed there (`crate::air::air_demand`) - every other
+    /// cell simply never has anything granted to it, the same "row exists,
+    /// most of it strictly zero" shape `supply_by_faction` already has for
+    /// every faction that isn't a region's owner or an occupier there. This
+    /// is folded into `compute_transport_flow`'s own contended,
+    /// capacity-constrained rounds from the start (docs/phase10-spec.md's
+    /// own "航空部隊の補給を、既存の流量計算に最初から入れる" - the Phase 9
+    /// fleet-demand defect `supply_sea`'s own doc explains is exactly the
+    /// mistake this stage does not get to repeat a third time), never a
+    /// second, separately-computed figure.
+    pub supply_air: Vec<Vec<f32>>,
     /// `codex review` P1 (second round, `logistics::SupplyLeftover`'s own
     /// doc): the transport network's own per-resource capacity this tick's
     /// `logistics::recompute_supply` did *not* hand to any (region, faction)
@@ -859,5 +940,36 @@ impl World {
 
     pub fn has_port_node(&self, region: RegionId) -> bool {
         self.port_node(region).is_some()
+    }
+
+    /// Stage 10A: `port_node`'s airfield-domain counterpart - the first
+    /// (lowest `TransportNodeId`) `Airfield` node belonging to `region`, if
+    /// any. The sole source of truth for "does this region have an
+    /// airfield at all" (`transport::TransportNodeKind::Airfield`'s own
+    /// doc), read by `action::apply_recruit`'s `Domain::Air` branch exactly
+    /// the way `port_node` already gates `Domain::Sea`.
+    pub fn airfield_node(&self, region: RegionId) -> Option<&TransportNode> {
+        self.transport_nodes
+            .iter()
+            .find(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Airfield)
+    }
+
+    pub fn has_airfield_node(&self, region: RegionId) -> bool {
+        self.airfield_node(region).is_some()
+    }
+
+    /// Alive air units currently based at airfield node `node` - the
+    /// air-domain counterpart of `units_in`/`fleets_in` (see `units_in`'s
+    /// own doc for why the three never overlap: `Station::Region`/
+    /// `Station::Sea`/`Station::Airfield` are mutually exclusive by
+    /// construction). Stage 10A's own acceptance criterion ("同じ飛行場の 2
+    /// 個航空部隊が容量を分け合う") is exactly two units both answering
+    /// `true` to `unit.station == Station::Airfield(node)` here, contending
+    /// for the same `air::air_demand` sink in `logistics::
+    /// compute_transport_flow` - never a second, per-unit capacity draw.
+    pub fn air_units_at(&self, node: TransportNodeId) -> impl Iterator<Item = &Unit> {
+        self.units
+            .iter()
+            .filter(move |unit| unit.alive && unit.station == Station::Airfield(node))
     }
 }

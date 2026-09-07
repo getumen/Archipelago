@@ -40,6 +40,23 @@ pub enum TransportNodeKind {
     /// that reports `port > 0.0`, and such a region must declare exactly
     /// that node.
     Port,
+    /// Stage 10A (docs/phase10-spec.md "1. 基地"): the sole authority for
+    /// *whether* a region has an airfield at all, and (from this stage on)
+    /// the injection point for that airfield's own air-unit demand inside
+    /// `compute_transport_flow` (`World::supply_air`, `crate::air`'s own
+    /// module doc). Deliberately no `Region::airfield` counterpart the way
+    /// `Region::port` shadows `Port` - `Port`'s own doc records that a
+    /// magnitude living on both `Region` and the node drifted apart in
+    /// practice (`scenario::ScenarioError::PortNodeWithoutRegionPort`/
+    /// `RegionPortWithoutPortNode` exist only to police that drift); an
+    /// `Airfield` node simply *is* the fact, with nothing on `Region` to
+    /// disagree with it. `scenario::Scenario::validate` therefore enforces
+    /// no scenario-wide "at least one Airfield" minimum - a scenario with
+    /// none is legal, exactly like one with no `Port` node: `Domain::Air`
+    /// recruitment just has nowhere to succeed there
+    /// (`action::ActionError::NoAirfield`), the same fail-fast shape
+    /// `Domain::Sea` recruitment already has against a portless region.
+    Airfield,
 }
 
 impl TransportNodeKind {
@@ -50,6 +67,7 @@ impl TransportNodeKind {
             TransportNodeKind::Junction => "junction",
             TransportNodeKind::Depot => "depot",
             TransportNodeKind::Port => "port",
+            TransportNodeKind::Airfield => "airfield",
         }
     }
 
@@ -58,6 +76,7 @@ impl TransportNodeKind {
             "junction" => Some(TransportNodeKind::Junction),
             "depot" => Some(TransportNodeKind::Depot),
             "port" => Some(TransportNodeKind::Port),
+            "airfield" => Some(TransportNodeKind::Airfield),
             _ => None,
         }
     }

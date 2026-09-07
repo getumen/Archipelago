@@ -15217,6 +15217,390 @@
         "name": "千葉4 港",
         "kind": "port",
         "region": "h23_2"
+      },
+      {
+        "id": "h1_-7_airfield",
+        "name": "長崎1 飛行場（福江空港）",
+        "kind": "airfield",
+        "region": "h1_-7"
+      },
+      {
+        "id": "h2_-5_airfield",
+        "name": "佐賀1 飛行場（壱岐空港）",
+        "kind": "airfield",
+        "region": "h2_-5"
+      },
+      {
+        "id": "h3_-7_airfield",
+        "name": "長崎2 飛行場（長崎空港）",
+        "kind": "airfield",
+        "region": "h3_-7"
+      },
+      {
+        "id": "h3_-5_airfield",
+        "name": "佐賀3 飛行場（福岡空港（奈多地区））",
+        "kind": "airfield",
+        "region": "h3_-5"
+      },
+      {
+        "id": "h4_-6_airfield",
+        "name": "佐賀4 飛行場（佐賀空港）",
+        "kind": "airfield",
+        "region": "h4_-6"
+      },
+      {
+        "id": "h4_-5_airfield",
+        "name": "福岡1 飛行場（福岡空港）",
+        "kind": "airfield",
+        "region": "h4_-5"
+      },
+      {
+        "id": "h4_-4_airfield",
+        "name": "福岡2 飛行場（北九州空港）",
+        "kind": "airfield",
+        "region": "h4_-4"
+      },
+      {
+        "id": "h4_-3_airfield",
+        "name": "山口1 飛行場（山口宇部空港）",
+        "kind": "airfield",
+        "region": "h4_-3"
+      },
+      {
+        "id": "h5_-8_airfield",
+        "name": "熊本1 飛行場（天草飛行場）",
+        "kind": "airfield",
+        "region": "h5_-8"
+      },
+      {
+        "id": "h5_-7_airfield",
+        "name": "熊本2 飛行場（熊本空港）",
+        "kind": "airfield",
+        "region": "h5_-7"
+      },
+      {
+        "id": "h5_-1_airfield",
+        "name": "広島1 飛行場（石見空港）",
+        "kind": "airfield",
+        "region": "h5_-1"
+      },
+      {
+        "id": "h6_-6_airfield",
+        "name": "大分2 飛行場（大分県央飛行場）",
+        "kind": "airfield",
+        "region": "h6_-6"
+      },
+      {
+        "id": "h6_-5_airfield",
+        "name": "大分3 飛行場（大分空港）",
+        "kind": "airfield",
+        "region": "h6_-5"
+      },
+      {
+        "id": "h6_-3_airfield",
+        "name": "山口5 飛行場（岩国飛行場）",
+        "kind": "airfield",
+        "region": "h6_-3"
+      },
+      {
+        "id": "h6_1_airfield",
+        "name": "島根2 飛行場（出雲空港）",
+        "kind": "airfield",
+        "region": "h6_1"
+      },
+      {
+        "id": "h7_-10_airfield",
+        "name": "鹿児島4 飛行場（鹿児島空港）",
+        "kind": "airfield",
+        "region": "h7_-10"
+      },
+      {
+        "id": "h7_1_airfield",
+        "name": "島根4 飛行場（美保飛行場）",
+        "kind": "airfield",
+        "region": "h7_1"
+      },
+      {
+        "id": "h8_-10_airfield",
+        "name": "宮崎3 飛行場（宮崎空港）",
+        "kind": "airfield",
+        "region": "h8_-10"
+      },
+      {
+        "id": "h8_-2_airfield",
+        "name": "広島7 飛行場（広島空港）",
+        "kind": "airfield",
+        "region": "h8_-2"
+      },
+      {
+        "id": "h9_-28_airfield",
+        "name": "沖縄1 飛行場（慶良間空港）",
+        "kind": "airfield",
+        "region": "h9_-28"
+      },
+      {
+        "id": "h9_-27_airfield",
+        "name": "沖縄2 飛行場（伊江島空港）",
+        "kind": "airfield",
+        "region": "h9_-27"
+      },
+      {
+        "id": "h9_-4_airfield",
+        "name": "愛媛4 飛行場（松山空港）",
+        "kind": "airfield",
+        "region": "h9_-4"
+      },
+      {
+        "id": "h9_-1_airfield",
+        "name": "岡山3 飛行場（岡山空港）",
+        "kind": "airfield",
+        "region": "h9_-1"
+      },
+      {
+        "id": "h9_2_airfield",
+        "name": "鳥取3 飛行場（鳥取空港）",
+        "kind": "airfield",
+        "region": "h9_2"
+      },
+      {
+        "id": "h10_-4_airfield",
+        "name": "高知4 飛行場（高知空港）",
+        "kind": "airfield",
+        "region": "h10_-4"
+      },
+      {
+        "id": "h10_-2_airfield",
+        "name": "香川3 飛行場（高松空港）",
+        "kind": "airfield",
+        "region": "h10_-2"
+      },
+      {
+        "id": "h10_2_airfield",
+        "name": "鳥取5 飛行場（但馬飛行場）",
+        "kind": "airfield",
+        "region": "h10_2"
+      },
+      {
+        "id": "h10_33_airfield",
+        "name": "北海道1 飛行場（利尻空港）",
+        "kind": "airfield",
+        "region": "h10_33"
+      },
+      {
+        "id": "h12_-3_airfield",
+        "name": "徳島2 飛行場（徳島飛行場）",
+        "kind": "airfield",
+        "region": "h12_-3"
+      },
+      {
+        "id": "h12_-1_airfield",
+        "name": "兵庫4 飛行場（神戸空港）",
+        "kind": "airfield",
+        "region": "h12_-1"
+      },
+      {
+        "id": "h12_4_airfield",
+        "name": "福井1 飛行場（福井空港）",
+        "kind": "airfield",
+        "region": "h12_4"
+      },
+      {
+        "id": "h12_7_airfield",
+        "name": "富山1 飛行場（能登空港）",
+        "kind": "airfield",
+        "region": "h12_7"
+      },
+      {
+        "id": "h13_-2_airfield",
+        "name": "和歌山2 飛行場（関西国際空港）",
+        "kind": "airfield",
+        "region": "h13_-2"
+      },
+      {
+        "id": "h13_-1_airfield",
+        "name": "大阪1 飛行場（大阪国際空港）",
+        "kind": "airfield",
+        "region": "h13_-1"
+      },
+      {
+        "id": "h13_4_airfield",
+        "name": "福井4 飛行場（小松飛行場）",
+        "kind": "airfield",
+        "region": "h13_4"
+      },
+      {
+        "id": "h13_26_airfield",
+        "name": "北海道16 飛行場（札幌飛行場）",
+        "kind": "airfield",
+        "region": "h13_26"
+      },
+      {
+        "id": "h14_5_airfield",
+        "name": "富山2 飛行場（富山空港）",
+        "kind": "airfield",
+        "region": "h14_5"
+      },
+      {
+        "id": "h14_10_airfield",
+        "name": "新潟1 飛行場（佐渡空港）",
+        "kind": "airfield",
+        "region": "h14_10"
+      },
+      {
+        "id": "h14_22_airfield",
+        "name": "青森6 飛行場（函館空港）",
+        "kind": "airfield",
+        "region": "h14_22"
+      },
+      {
+        "id": "h14_25_airfield",
+        "name": "北海道22 飛行場（新千歳空港）",
+        "kind": "airfield",
+        "region": "h14_25"
+      },
+      {
+        "id": "h14_28_airfield",
+        "name": "北海道25 飛行場（旭川空港）",
+        "kind": "airfield",
+        "region": "h14_28"
+      },
+      {
+        "id": "h15_-4_airfield",
+        "name": "和歌山4 飛行場（南紀白浜空港）",
+        "kind": "airfield",
+        "region": "h15_-4"
+      },
+      {
+        "id": "h15_1_airfield",
+        "name": "岐阜3 飛行場（名古屋飛行場）",
+        "kind": "airfield",
+        "region": "h15_1"
+      },
+      {
+        "id": "h15_17_airfield",
+        "name": "秋田2 飛行場（大館能代空港）",
+        "kind": "airfield",
+        "region": "h15_17"
+      },
+      {
+        "id": "h15_18_airfield",
+        "name": "青森7 飛行場（青森空港）",
+        "kind": "airfield",
+        "region": "h15_18"
+      },
+      {
+        "id": "h15_30_airfield",
+        "name": "北海道33 飛行場（紋別空港）",
+        "kind": "airfield",
+        "region": "h15_30"
+      },
+      {
+        "id": "h16_0_airfield",
+        "name": "愛知1 飛行場（中部国際空港）",
+        "kind": "airfield",
+        "region": "h16_0"
+      },
+      {
+        "id": "h16_4_airfield",
+        "name": "長野3 飛行場（松本空港）",
+        "kind": "airfield",
+        "region": "h16_4"
+      },
+      {
+        "id": "h16_9_airfield",
+        "name": "新潟3 飛行場（新潟空港）",
+        "kind": "airfield",
+        "region": "h16_9"
+      },
+      {
+        "id": "h16_13_airfield",
+        "name": "秋田3 飛行場（庄内空港）",
+        "kind": "airfield",
+        "region": "h16_13"
+      },
+      {
+        "id": "h16_15_airfield",
+        "name": "秋田5 飛行場（秋田空港）",
+        "kind": "airfield",
+        "region": "h16_15"
+      },
+      {
+        "id": "h17_18_airfield",
+        "name": "青森12 飛行場（三沢飛行場）",
+        "kind": "airfield",
+        "region": "h17_18"
+      },
+      {
+        "id": "h18_11_airfield",
+        "name": "山形4 飛行場（山形空港）",
+        "kind": "airfield",
+        "region": "h18_11"
+      },
+      {
+        "id": "h18_14_airfield",
+        "name": "岩手5 飛行場（花巻空港）",
+        "kind": "airfield",
+        "region": "h18_14"
+      },
+      {
+        "id": "h18_25_airfield",
+        "name": "北海道48 飛行場（帯広空港）",
+        "kind": "airfield",
+        "region": "h18_25"
+      },
+      {
+        "id": "h18_29_airfield",
+        "name": "北海道52 飛行場（女満別空港）",
+        "kind": "airfield",
+        "region": "h18_29"
+      },
+      {
+        "id": "h19_-1_airfield",
+        "name": "静岡4 飛行場（静岡空港）",
+        "kind": "airfield",
+        "region": "h19_-1"
+      },
+      {
+        "id": "h19_11_airfield",
+        "name": "宮城1 飛行場（仙台空港）",
+        "kind": "airfield",
+        "region": "h19_11"
+      },
+      {
+        "id": "h19_26_airfield",
+        "name": "北海道53 飛行場（釧路空港）",
+        "kind": "airfield",
+        "region": "h19_26"
+      },
+      {
+        "id": "h20_7_airfield",
+        "name": "福島4 飛行場（福島空港）",
+        "kind": "airfield",
+        "region": "h20_7"
+      },
+      {
+        "id": "h20_28_airfield",
+        "name": "北海道58 飛行場（中標津空港）",
+        "kind": "airfield",
+        "region": "h20_28"
+      },
+      {
+        "id": "h21_2_airfield",
+        "name": "東京1 飛行場（調布飛行場）",
+        "kind": "airfield",
+        "region": "h21_2"
+      },
+      {
+        "id": "h22_3_airfield",
+        "name": "千葉2 飛行場（成田国際空港）",
+        "kind": "airfield",
+        "region": "h22_3"
+      },
+      {
+        "id": "h22_4_airfield",
+        "name": "茨城4 飛行場（百里飛行場）",
+        "kind": "airfield",
+        "region": "h22_4"
       }
     ],
     "lines": [
@@ -21189,6 +21573,454 @@
         "to": "h23_2_depot",
         "kind": "rail",
         "capacity": 15.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h1_-7_depot",
+        "to": "h1_-7_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h2_-5_depot",
+        "to": "h2_-5_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h3_-7_depot",
+        "to": "h3_-7_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h3_-5_depot",
+        "to": "h3_-5_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h4_-6_depot",
+        "to": "h4_-6_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h4_-5_depot",
+        "to": "h4_-5_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h4_-4_depot",
+        "to": "h4_-4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h4_-3_depot",
+        "to": "h4_-3_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h5_-8_depot",
+        "to": "h5_-8_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h5_-7_depot",
+        "to": "h5_-7_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h5_-1_depot",
+        "to": "h5_-1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h6_-6_depot",
+        "to": "h6_-6_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h6_-5_depot",
+        "to": "h6_-5_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h6_-3_depot",
+        "to": "h6_-3_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h6_1_depot",
+        "to": "h6_1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h7_-10_depot",
+        "to": "h7_-10_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h7_1_depot",
+        "to": "h7_1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h8_-10_depot",
+        "to": "h8_-10_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h8_-2_depot",
+        "to": "h8_-2_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h9_-28_depot",
+        "to": "h9_-28_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h9_-27_depot",
+        "to": "h9_-27_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h9_-4_depot",
+        "to": "h9_-4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h9_-1_depot",
+        "to": "h9_-1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h9_2_depot",
+        "to": "h9_2_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h10_-4_depot",
+        "to": "h10_-4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h10_-2_depot",
+        "to": "h10_-2_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h10_2_depot",
+        "to": "h10_2_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h10_33_depot",
+        "to": "h10_33_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h12_-3_depot",
+        "to": "h12_-3_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h12_-1_depot",
+        "to": "h12_-1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h12_4_depot",
+        "to": "h12_4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h12_7_depot",
+        "to": "h12_7_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h13_-2_depot",
+        "to": "h13_-2_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h13_-1_depot",
+        "to": "h13_-1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h13_4_depot",
+        "to": "h13_4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h13_26_depot",
+        "to": "h13_26_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h14_5_depot",
+        "to": "h14_5_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h14_10_depot",
+        "to": "h14_10_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h14_22_depot",
+        "to": "h14_22_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h14_25_depot",
+        "to": "h14_25_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h14_28_depot",
+        "to": "h14_28_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h15_-4_depot",
+        "to": "h15_-4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h15_1_depot",
+        "to": "h15_1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h15_17_depot",
+        "to": "h15_17_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h15_18_depot",
+        "to": "h15_18_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h15_30_depot",
+        "to": "h15_30_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h16_0_depot",
+        "to": "h16_0_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h16_4_depot",
+        "to": "h16_4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h16_9_depot",
+        "to": "h16_9_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h16_13_depot",
+        "to": "h16_13_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h16_15_depot",
+        "to": "h16_15_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h17_18_depot",
+        "to": "h17_18_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h18_11_depot",
+        "to": "h18_11_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h18_14_depot",
+        "to": "h18_14_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h18_25_depot",
+        "to": "h18_25_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h18_29_depot",
+        "to": "h18_29_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h19_-1_depot",
+        "to": "h19_-1_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h19_11_depot",
+        "to": "h19_11_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h19_26_depot",
+        "to": "h19_26_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h20_7_depot",
+        "to": "h20_7_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h20_28_depot",
+        "to": "h20_28_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h21_2_depot",
+        "to": "h21_2_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h22_3_depot",
+        "to": "h22_3_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "h22_4_depot",
+        "to": "h22_4_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
         "condition": 1.0
       }
     ]

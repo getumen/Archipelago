@@ -202,6 +202,11 @@ impl fmt::Display for Event {
                     "unit {} (faction {}) sunk in sea zone {}",
                     unit.0, owner.0, zone.0
                 ),
+                Station::Airfield(node) => write!(
+                    f,
+                    "unit {} (faction {}) destroyed at airfield node {}",
+                    unit.0, owner.0, node.0
+                ),
             },
             Event::RegionCaptured { region, from, to } => write!(
                 f,

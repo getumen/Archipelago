@@ -267,6 +267,13 @@ impl<'a> Observation<'a> {
             match unit.station {
                 Station::Region(r) => region_power[r.index()][unit.owner.index()] += power,
                 Station::Sea(z) => zone_power[z.index()][unit.owner.index()] += power,
+                // Stage 10A ships no observation exposure for air units yet
+                // (docs/phase10-spec.md's own staging leaves "観測に航空部隊
+                // ... が出る" to Stage 10D) - deliberately not folded into
+                // either table, since air power isn't a raw regional/zone
+                // addend the way land/sea combat power is (10B's operational
+                // radius is a distance-based effect, not a presence sum).
+                Station::Airfield(_) => {}
             }
         }
         (region_power, zone_power)

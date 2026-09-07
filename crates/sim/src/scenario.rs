@@ -52,8 +52,8 @@ pub const FACTION_COUNT: usize = 3;
 /// `SEA_ZONE_COUNT`/`FACTION_COUNT` above for exactly the same reason
 /// (`observation::ENCODING_LEN` needs a compile-time constant) - guarded by
 /// the same `default_scenario_dimensions_match_embedded_json` test.
-pub const TRANSPORT_NODE_COUNT: usize = 20;
-pub const TRANSPORT_LINE_COUNT: usize = 22;
+pub const TRANSPORT_NODE_COUNT: usize = 30;
+pub const TRANSPORT_LINE_COUNT: usize = 32;
 
 const FACTION_MANPOWER: f32 = 12.0;
 /// Initial stock per commodity, in `Good::index()` order (Food, Energy,
@@ -1174,6 +1174,16 @@ impl Scenario {
             .collect();
         let diplomacy = Diplomacy::new_with_blocs(self.factions.len(), &blocs);
 
+        // Stage 10A: unlike `supply`/`supply_by_faction`/`supply_sea` above,
+        // no coarse local seed is needed here - a freshly-built `World`
+        // never has any `Domain::Air` unit at all (`units` above is
+        // synthesized land-only; a `Station::Airfield` unit can only come
+        // from a later `Action::RecruitUnit { domain: Domain::Air, .. }`),
+        // so there is nothing pre-step `action::apply_reinforce` could ever
+        // need to read this for before the first real `logistics::
+        // recompute_supply` call populates it for real.
+        let supply_air: Vec<Vec<f32>> = vec![vec![0.0f32; factions.len()]; transport_nodes.len()];
+
         World {
             regions,
             factions,
@@ -1181,6 +1191,7 @@ impl Scenario {
             supply,
             supply_by_faction,
             supply_sea,
+            supply_air,
             // Never read before the first real `logistics::recompute_supply`
             // call (`World::supply_leftover`'s own doc): a freshly-built
             // `World`'s units are always stationed exactly where their own

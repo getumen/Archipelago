@@ -30,7 +30,7 @@ use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm};
 use archipelago_sim::focus::NationalFocus;
 use archipelago_sim::good::{Good, ALL_GOODS};
-use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::json::{self, Value};
 use archipelago_sim::world::{Domain, Station};
 
@@ -86,14 +86,25 @@ fn station_to_value(s: Station) -> Value {
     match s {
         Station::Region(r) => Value::obj(vec![("kind", Value::str("region")), ("id", Value::num(r.0 as f64))]),
         Station::Sea(z) => Value::obj(vec![("kind", Value::str("sea")), ("id", Value::num(z.0 as f64))]),
+        // Stage 10A: round-trip support only - 10A ships no `Domain::Air`
+        // `MoveUnit`/recording support, so this arm is never actually
+        // produced by anything this crate's own UI issues yet, but keeping
+        // it means `every_action_variant_round_trips` can exercise the
+        // shape as soon as some future stage starts recording one, rather
+        // than the encoder silently lacking a case the decoder already has.
+        Station::Airfield(n) => Value::obj(vec![("kind", Value::str("airfield")), ("id", Value::num(n.0 as f64))]),
     }
 }
 
 fn station_from_value(v: &Value) -> Result<Station, String> {
-    let kind = v.get("kind").and_then(Value::as_str).ok_or("station needs a `kind` of \"region\" or \"sea\"")?;
+    let kind =
+        v.get("kind").and_then(Value::as_str).ok_or("station needs a `kind` of \"region\", \"sea\" or \"airfield\"")?;
     match kind {
         "region" => Ok(Station::Region(RegionId(v.get("id").and_then(Value::as_u32).ok_or("region station needs an integer `id`")?))),
         "sea" => Ok(Station::Sea(SeaZoneId(v.get("id").and_then(Value::as_u32).ok_or("sea station needs an integer `id`")?))),
+        "airfield" => Ok(Station::Airfield(TransportNodeId(
+            v.get("id").and_then(Value::as_u32).ok_or("airfield station needs an integer `id`")?,
+        ))),
         other => Err(format!("unknown station kind `{other}`")),
     }
 }
@@ -173,7 +184,7 @@ pub fn action_to_value(action: &Action) -> Value {
         Action::RecruitUnit { region, domain } => Value::obj(vec![
             ("type", Value::str("recruit_unit")),
             ("region", Value::num(region.0 as f64)),
-            ("domain", Value::str(if domain == Domain::Sea { "sea" } else { "land" })),
+            ("domain", Value::str(domain.key())),
         ]),
         Action::ReinforceUnit { unit } => Value::obj(vec![("type", Value::str("reinforce_unit")), ("unit", Value::num(unit.0 as f64))]),
         Action::SetConscription(v) => Value::obj(vec![("type", Value::str("set_conscription")), ("value", Value::f32num(v))]),
@@ -249,9 +260,8 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
         "recruit_unit" => {
             let region = RegionId(u32_field("region")?);
             let domain = match v.get("domain").and_then(Value::as_str) {
-                Some("sea") => Domain::Sea,
-                Some("land") | None => Domain::Land,
-                Some(other) => return Err(format!("unknown domain `{other}`")),
+                None => Domain::Land,
+                Some(key) => Domain::from_key(key).ok_or_else(|| format!("unknown domain `{key}`"))?,
             };
             Ok(Action::RecruitUnit { region, domain })
         }
@@ -335,6 +345,8 @@ pub fn action_error_ja(e: ActionError) -> &'static str {
         ActionError::AlreadyBuilding => "この地域はすでに建設中",
         ActionError::NoConstruction => "この地域に建設中の工事がない",
         ActionError::NoPort => "この地域に港湾がない",
+        ActionError::NoAirfield => "この地域に飛行場がない",
+        ActionError::InsufficientMachinery => "機械が不足している",
         ActionError::InvalidLine => "指定した輸送路線が存在しない",
         ActionError::LineNotOwned => "自国の輸送路線ではない",
         ActionError::LineNotHostile => "交戦中の敵の輸送路線ではない",

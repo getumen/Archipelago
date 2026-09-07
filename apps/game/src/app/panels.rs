@@ -751,6 +751,7 @@ fn reinforce_disabled_reason(world: &SimWorld, faction: FactionId, station: Stat
     let pinned = match station {
         Station::Region(r) => world.has_enemy_units(r, faction),
         Station::Sea(z) => world.has_enemy_fleets(z, faction),
+        Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, faction),
     };
     if pinned {
         Some(action_error_ja(ActionError::RegionContested))

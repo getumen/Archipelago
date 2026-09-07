@@ -82,6 +82,9 @@ pub(super) fn format_event(world: &World, event: &Event) -> String {
             Station::Sea(zone) => {
                 format!("艦隊撃沈: {} 軍 部隊#{} が {} で撃沈された", world.faction(*owner).name, unit.0, world.sea_zone(*zone).name)
             }
+            Station::Airfield(node) => {
+                format!("部隊壊滅: {} 軍 部隊#{} が {} で失われた", world.faction(*owner).name, unit.0, world.transport_node(*node).name)
+            }
         },
         Event::RegionCaptured { region, from, to } => {
             format!("占領: {} を {} が {} から奪取", world.region(*region).name, world.faction(*to).name, world.faction(*from).name)

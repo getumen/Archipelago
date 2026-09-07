@@ -44,6 +44,10 @@ fn unit_contested(world: &World, unit: &Unit, faction: FactionId) -> bool {
     match unit.station {
         Station::Region(r) => world.has_enemy_units(r, faction),
         Station::Sea(z) => world.has_enemy_fleets(z, faction),
+        // Stage 10A: no AI touches `Domain::Air` units yet (that's Stage
+        // 10D) - mirrors `military::is_pinned`'s `Station::Airfield` arm,
+        // the same "as contested as the region it sits inside" rule.
+        Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, faction),
     }
 }
 
@@ -1556,6 +1560,14 @@ fn reinforce(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
                 obs.world.region(r).owner == faction && !obs.world.has_enemy_units(r, faction)
             }
             Station::Sea(z) => !obs.world.has_enemy_fleets(z, faction),
+            // Stage 10A: no AI recruits or reinforces `Domain::Air` units
+            // yet (Stage 10D) - mirrors the land arm's "owned and
+            // uncontested" rule, an airfield's home region standing in for
+            // the airfield itself.
+            Station::Airfield(node) => {
+                let region = obs.world.transport_node(node).region;
+                obs.world.region(region).owner == faction && !obs.world.has_enemy_units(region, faction)
+            }
         };
         if !safe {
             continue;

@@ -231,13 +231,14 @@ fn units_value(world: &World) -> Value {
             let station = match u.station {
                 Station::Region(r) => Value::obj(vec![("kind", Value::str("region")), ("id", Value::num(r.0 as f64))]),
                 Station::Sea(z) => Value::obj(vec![("kind", Value::str("sea")), ("id", Value::num(z.0 as f64))]),
+                Station::Airfield(n) => Value::obj(vec![("kind", Value::str("airfield")), ("id", Value::num(n.0 as f64))]),
             };
             Value::obj(vec![
                 ("id", Value::num(u.id.0 as f64)),
                 ("owner", Value::num(u.owner.0 as f64)),
                 ("name", Value::str(u.name.clone())),
                 ("alive", Value::Bool(u.alive)),
-                ("domain", Value::str(if u.station.domain() == Domain::Land { "land" } else { "sea" })),
+                ("domain", Value::str(u.station.domain().key())),
                 ("station", station),
                 ("manpower", Value::f32num(u.manpower)),
                 ("equipment", Value::f32num(u.equipment)),

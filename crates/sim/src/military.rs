@@ -144,6 +144,12 @@ fn is_pinned(world: &World, unit: &Unit) -> bool {
     match unit.station {
         Station::Region(r) => world.has_enemy_units(r, unit.owner),
         Station::Sea(z) => world.has_enemy_fleets(z, unit.owner),
+        // Stage 10A: no air-vs-air combat exists yet (that's 10B/10C), so
+        // "pinned" for a grounded air unit means the same thing it would
+        // for a land garrison sharing that airfield's own region - an
+        // airfield sitting inside a region an enemy currently holds units
+        // in is exactly as contested as the region itself.
+        Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, unit.owner),
     }
 }
 
@@ -440,6 +446,11 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
             let infra = match unit.station {
                 Station::Region(r) => world.region(r).effective_infrastructure(),
                 Station::Sea(_) => 1.0,
+                // Stage 10A: an airfield sits inside a region (unlike open
+                // water), so it draws the same regional infrastructure
+                // bonus/penalty a land unit stationed there would, rather
+                // than the sea-only flat baseline.
+                Station::Airfield(node) => world.region(world.transport_node(node).region).effective_infrastructure(),
             };
             let mutiny_mult = if mutiny[unit.owner.index()] { MUTINY_ORG_REGEN_MULT } else { 1.0 };
             organization += ORG_REGEN * (0.3 + 0.7 * unit.supply) * (0.6 + 0.4 * infra) * mutiny_mult;
@@ -567,6 +578,14 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
 /// for a land unit, an owned neighboring region with no enemy present; for a
 /// fleet, an adjacent sea zone with no enemy fleet present (sea zones have
 /// no owner, so "safe" for a fleet means simply uncontested).
+///
+/// Stage 10A: an air unit has no such fallback yet - relocating a broken
+/// squadron to a different airfield is an operational-radius/movement
+/// question docs/phase10-spec.md leaves to a later stage (10A ships no
+/// `MoveUnit` support for `Domain::Air` at all - `action::apply_move`'s own
+/// doc). A broken, pinned, immobile air unit is therefore destroyed outright
+/// exactly like a land unit with no safe neighboring region to fall back
+/// into, never invented a retreat path it has no data-backed way to earn.
 fn retreat_candidate(world: &World, unit: &Unit) -> Option<Station> {
     match unit.station {
         Station::Region(from) => {
@@ -590,6 +609,7 @@ fn retreat_candidate(world: &World, unit: &Unit) -> Option<Station> {
             candidates.sort_by_key(|z| z.0);
             candidates.first().map(|&z| Station::Sea(z))
         }
+        Station::Airfield(_) => None,
     }
 }
 

@@ -80,6 +80,12 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
                 unit.0,
                 world.sea_zone(*zone).name
             ),
+            Station::Airfield(node) => format!(
+                "部隊壊滅: {} 軍 部隊#{} が {} で失われた",
+                world.faction(*owner).name,
+                unit.0,
+                world.transport_node(*node).name
+            ),
         },
         Event::RegionCaptured { region, from, to } => {
             format!(

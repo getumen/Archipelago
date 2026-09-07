@@ -200,7 +200,17 @@
       { "id": "shikoku_depot", "name": "四国 補給拠点", "kind": "depot", "region": "shikoku" },
       { "id": "shikoku_port", "name": "四国 港", "kind": "port", "region": "shikoku" },
       { "id": "kyushu_depot", "name": "九州 補給拠点", "kind": "depot", "region": "kyushu" },
-      { "id": "kyushu_port", "name": "九州 港", "kind": "port", "region": "kyushu" }
+      { "id": "kyushu_port", "name": "九州 港", "kind": "port", "region": "kyushu" },
+      { "id": "hokkaido_airfield", "name": "北海道 飛行場", "kind": "airfield", "region": "hokkaido" },
+      { "id": "kita_tohoku_airfield", "name": "北東北 飛行場", "kind": "airfield", "region": "kita_tohoku" },
+      { "id": "minami_tohoku_airfield", "name": "南東北 飛行場", "kind": "airfield", "region": "minami_tohoku" },
+      { "id": "kanto_airfield", "name": "関東 飛行場", "kind": "airfield", "region": "kanto" },
+      { "id": "shinetsu_hokuriku_airfield", "name": "信越・北陸 飛行場", "kind": "airfield", "region": "shinetsu_hokuriku" },
+      { "id": "tokai_airfield", "name": "東海 飛行場", "kind": "airfield", "region": "tokai" },
+      { "id": "kinki_airfield", "name": "近畿 飛行場", "kind": "airfield", "region": "kinki" },
+      { "id": "chugoku_airfield", "name": "中国 飛行場", "kind": "airfield", "region": "chugoku" },
+      { "id": "shikoku_airfield", "name": "四国 飛行場", "kind": "airfield", "region": "shikoku" },
+      { "id": "kyushu_airfield", "name": "九州 飛行場", "kind": "airfield", "region": "kyushu" }
     ],
     "lines": [
       { "from": "hokkaido_depot", "to": "hokkaido_port", "kind": "rail", "capacity": 30.0, "condition": 1.0 },
@@ -224,10 +234,19 @@
       { "from": "kinki_depot", "to": "chugoku_depot", "kind": "rail", "capacity": 25.0, "condition": 1.0 },
       { "from": "kinki_port", "to": "shikoku_port", "kind": "sea", "capacity": 6.0, "condition": 1.0 },
       { "from": "chugoku_port", "to": "shikoku_port", "kind": "sea", "capacity": 6.0, "condition": 1.0 },
-      { "from": "chugoku_depot", "to": "kyushu_depot", "kind": "rail", "capacity": 8.0, "condition": 1.0 }
+      { "from": "chugoku_depot", "to": "kyushu_depot", "kind": "rail", "capacity": 8.0, "condition": 1.0 },
+      { "from": "hokkaido_depot", "to": "hokkaido_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "kita_tohoku_depot", "to": "kita_tohoku_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "minami_tohoku_depot", "to": "minami_tohoku_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "kanto_depot", "to": "kanto_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "shinetsu_hokuriku_depot", "to": "shinetsu_hokuriku_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "tokai_depot", "to": "tokai_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "kinki_depot", "to": "kinki_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "chugoku_depot", "to": "chugoku_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "shikoku_depot", "to": "shikoku_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 },
+      { "from": "kyushu_depot", "to": "kyushu_airfield", "kind": "rail", "capacity": 20.0, "condition": 1.0 }
     ]
   },
-
   "factions": [
     {
       "id": "touhou_rengou",

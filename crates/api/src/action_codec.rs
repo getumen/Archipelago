@@ -17,7 +17,7 @@ use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
-use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::world::{Domain, Station};
 
 use crate::json::Value;
@@ -74,7 +74,10 @@ fn focus_from_key(key: &str) -> Result<NationalFocus, String> {
 }
 
 fn station_from_value(v: &Value) -> Result<Station, String> {
-    let kind = v.get("kind").and_then(Value::as_str).ok_or("station needs a `kind` of \"region\" or \"sea\"")?;
+    let kind = v
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("station needs a `kind` of \"region\", \"sea\" or \"airfield\"")?;
     match kind {
         "region" => {
             let id = v.get("id").and_then(Value::as_u32).ok_or("region station needs an integer `id`")?;
@@ -83,6 +86,17 @@ fn station_from_value(v: &Value) -> Result<Station, String> {
         "sea" => {
             let id = v.get("id").and_then(Value::as_u32).ok_or("sea station needs an integer `id`")?;
             Ok(Station::Sea(SeaZoneId(id)))
+        }
+        // Stage 10A: accepted for symmetry with `state::units_value`'s own
+        // `Station::Airfield` encoding (an air unit's `GET /state` entry
+        // reports `{"kind":"airfield","id":...}`) - no decoded `Action`
+        // this crate builds is ever validated to accept it as a `MoveUnit`
+        // `to` yet (10A ships no `Domain::Air` movement at all,
+        // `action::apply_move`'s doc); `Simulation::apply` rejects any such
+        // action with `ActionError::NotAdjacent` regardless.
+        "airfield" => {
+            let id = v.get("id").and_then(Value::as_u32).ok_or("airfield station needs an integer `id`")?;
+            Ok(Station::Airfield(TransportNodeId(id)))
         }
         other => Err(format!("unknown station kind `{other}`")),
     }
@@ -146,9 +160,8 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
         "recruit_unit" => {
             let region = region_id(v, "region")?;
             let domain = match v.get("domain").and_then(Value::as_str) {
-                Some("land") | None => Domain::Land,
-                Some("sea") => Domain::Sea,
-                Some(other) => return Err(format!("unknown domain `{other}`")),
+                None => Domain::Land,
+                Some(key) => Domain::from_key(key).ok_or_else(|| format!("unknown domain `{key}`"))?,
             };
             Ok(Action::RecruitUnit { region, domain })
         }
@@ -379,8 +392,8 @@ fn enums_schema() -> Value {
         ("treaty", Value::arr(ALL_TREATIES.iter().map(|t| Value::str(t.key())).collect())),
         ("focus", Value::arr(ALL_FOCI.iter().map(|f| Value::str(f.key())).collect())),
         ("layer", Value::arr(ALL_LAYERS.iter().map(|l| Value::str(l.key())).collect())),
-        ("domain", Value::arr(vec![Value::str("land"), Value::str("sea")])),
-        ("station_kind", Value::arr(vec![Value::str("region"), Value::str("sea")])),
+        ("domain", Value::arr(vec![Value::str("land"), Value::str("sea"), Value::str("air")])),
+        ("station_kind", Value::arr(vec![Value::str("region"), Value::str("sea"), Value::str("airfield")])),
         (
             "treaty_term_kind",
             Value::arr(vec![Value::str("sign"), Value::str("withdraw"), Value::str("cede"), Value::str("deliver")]),
@@ -469,6 +482,8 @@ pub fn action_error_key(e: ActionError) -> &'static str {
         ActionError::AlreadyBuilding => "already_building",
         ActionError::NoConstruction => "no_construction",
         ActionError::NoPort => "no_port",
+        ActionError::NoAirfield => "no_airfield",
+        ActionError::InsufficientMachinery => "insufficient_machinery",
         ActionError::InvalidLine => "invalid_line",
         ActionError::LineNotOwned => "line_not_owned",
         ActionError::LineNotHostile => "line_not_hostile",

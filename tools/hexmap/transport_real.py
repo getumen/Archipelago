@@ -53,6 +53,7 @@ not tune balance constants").
 
 from __future__ import annotations
 
+import airfield_data
 import hexgrid
 import port_data
 import rail_data
@@ -80,6 +81,18 @@ ROAD_CAPACITY = 12.0
 PORT_TIER_CAPACITY = {11: 60.0, 12: 45.0, 13: 30.0, 14: 20.0, 15: 20.0, 99: 20.0}
 PORT_TIER_UNMATCHED_CAPACITY = PORT_TIER_CAPACITY[14]  # see port_data.py's doc: no real port that close
 
+# Stage 10A (docs/phase10-spec.md "1. 基地" / "4. 生産"): every hex matched
+# to a real, in-service airport (`airfield_data.match_airfield_hexes`) gets
+# an Airfield node, its Depot<->Airfield line priced at this one flat
+# baseline - see `airfield_data.py`'s own doc for why C28's own
+# administrative-management code offers no comparably legitimate ordinal
+# signal the port/rail tier tables above are keyed on. Shared with the
+# mechanical placeholder `tools/transport_network.py` uses for
+# `mvp.json`/`japan47.json`, so a region's airfield connectivity doesn't
+# arbitrarily differ in magnitude between the three scenarios for a reason
+# that has nothing to do with real data.
+AIRFIELD_LINK_CAPACITY = 20.0
+
 FRESH_CONDITION = 1.0
 
 
@@ -102,6 +115,14 @@ def derive_transport_real(regions: list[dict], cache_dir: str, layout: hexgrid.H
     def port_capacity(hid: str) -> float:
         tier = port_tier.get(hid)
         return PORT_TIER_CAPACITY[tier] if tier is not None else PORT_TIER_UNMATCHED_CAPACITY
+
+    # Stage 10A: which hexes get an `Airfield` node at all - unlike a port's
+    # size, existence itself is what this real data decides here (Phase 8
+    # never pre-selected an "airfield-bearing" set the way it did for
+    # `port > 0.0`) - see `airfield_data.py`'s own doc for the match radius
+    # and its own reported hit rate.
+    airport_index = airfield_data.load_airport_index(cache_dir, log=log)
+    airfield_names = airfield_data.match_airfield_hexes(airport_index, hex_meters, log=log)
 
     nodes = []
     for r in regions:
@@ -168,9 +189,32 @@ def derive_transport_real(regions: list[dict], cache_dir: str, layout: hexgrid.H
             else:
                 raise ValueError(f"unknown link kind {kind!r}")
 
+    # Stage 10A: every matched hex's Airfield node/line, appended as its own
+    # trailing pass - *after* every Depot/Port node and every rail/road/
+    # strait line above, so every existing `TransportNodeId`/
+    # `TransportLineId` (declaration-order indices) keeps meaning exactly
+    # what it did before Stage 10A (`tools/transport_network.py`'s own doc
+    # states this precedent for `mvp.json`/`japan47.json`; the same
+    # reasoning applies here).
+    for r in regions:
+        rid = r["id"]
+        if rid not in airfield_names:
+            continue
+        airfield_id = f"{rid}_airfield"
+        nodes.append(
+            {"id": airfield_id, "name": f"{r['name']} 飛行場（{airfield_names[rid]}）", "kind": "airfield", "region": rid}
+        )
+        lines.append(
+            {"from": f"{rid}_depot", "to": airfield_id, "kind": "rail", "capacity": AIRFIELD_LINK_CAPACITY, "condition": FRESH_CONDITION}
+        )
+
     rail_lines = sum(1 for l in lines if l["kind"] == "rail")
     road_lines = sum(1 for l in lines if l["kind"] == "road")
     sea_lines = sum(1 for l in lines if l["kind"] == "sea")
-    log(f"  Stage 9C transport: {len(nodes)} nodes, {len(lines)} lines (rail={rail_lines} road={road_lines} sea={sea_lines})")
+    airfield_nodes = sum(1 for n in nodes if n["kind"] == "airfield")
+    log(
+        f"  Stage 9C transport: {len(nodes)} nodes, {len(lines)} lines (rail={rail_lines} road={road_lines} sea={sea_lines}); "
+        f"Stage 10A: {airfield_nodes} airfield node(s)"
+    )
 
     return {"nodes": nodes, "lines": lines}

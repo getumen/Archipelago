@@ -2511,6 +2511,288 @@
         "name": "沖縄県 港",
         "kind": "port",
         "region": "okinawa"
+      },
+      {
+        "id": "hokkaido_airfield",
+        "name": "北海道 飛行場",
+        "kind": "airfield",
+        "region": "hokkaido"
+      },
+      {
+        "id": "aomori_airfield",
+        "name": "青森県 飛行場",
+        "kind": "airfield",
+        "region": "aomori"
+      },
+      {
+        "id": "iwate_airfield",
+        "name": "岩手県 飛行場",
+        "kind": "airfield",
+        "region": "iwate"
+      },
+      {
+        "id": "akita_airfield",
+        "name": "秋田県 飛行場",
+        "kind": "airfield",
+        "region": "akita"
+      },
+      {
+        "id": "miyagi_airfield",
+        "name": "宮城県 飛行場",
+        "kind": "airfield",
+        "region": "miyagi"
+      },
+      {
+        "id": "yamagata_airfield",
+        "name": "山形県 飛行場",
+        "kind": "airfield",
+        "region": "yamagata"
+      },
+      {
+        "id": "fukushima_airfield",
+        "name": "福島県 飛行場",
+        "kind": "airfield",
+        "region": "fukushima"
+      },
+      {
+        "id": "ibaraki_airfield",
+        "name": "茨城県 飛行場",
+        "kind": "airfield",
+        "region": "ibaraki"
+      },
+      {
+        "id": "tochigi_airfield",
+        "name": "栃木県 飛行場",
+        "kind": "airfield",
+        "region": "tochigi"
+      },
+      {
+        "id": "gunma_airfield",
+        "name": "群馬県 飛行場",
+        "kind": "airfield",
+        "region": "gunma"
+      },
+      {
+        "id": "saitama_airfield",
+        "name": "埼玉県 飛行場",
+        "kind": "airfield",
+        "region": "saitama"
+      },
+      {
+        "id": "chiba_airfield",
+        "name": "千葉県 飛行場",
+        "kind": "airfield",
+        "region": "chiba"
+      },
+      {
+        "id": "tokyo_airfield",
+        "name": "東京都 飛行場",
+        "kind": "airfield",
+        "region": "tokyo"
+      },
+      {
+        "id": "kanagawa_airfield",
+        "name": "神奈川県 飛行場",
+        "kind": "airfield",
+        "region": "kanagawa"
+      },
+      {
+        "id": "niigata_airfield",
+        "name": "新潟県 飛行場",
+        "kind": "airfield",
+        "region": "niigata"
+      },
+      {
+        "id": "toyama_airfield",
+        "name": "富山県 飛行場",
+        "kind": "airfield",
+        "region": "toyama"
+      },
+      {
+        "id": "ishikawa_airfield",
+        "name": "石川県 飛行場",
+        "kind": "airfield",
+        "region": "ishikawa"
+      },
+      {
+        "id": "fukui_airfield",
+        "name": "福井県 飛行場",
+        "kind": "airfield",
+        "region": "fukui"
+      },
+      {
+        "id": "yamanashi_airfield",
+        "name": "山梨県 飛行場",
+        "kind": "airfield",
+        "region": "yamanashi"
+      },
+      {
+        "id": "nagano_airfield",
+        "name": "長野県 飛行場",
+        "kind": "airfield",
+        "region": "nagano"
+      },
+      {
+        "id": "gifu_airfield",
+        "name": "岐阜県 飛行場",
+        "kind": "airfield",
+        "region": "gifu"
+      },
+      {
+        "id": "shizuoka_airfield",
+        "name": "静岡県 飛行場",
+        "kind": "airfield",
+        "region": "shizuoka"
+      },
+      {
+        "id": "aichi_airfield",
+        "name": "愛知県 飛行場",
+        "kind": "airfield",
+        "region": "aichi"
+      },
+      {
+        "id": "mie_airfield",
+        "name": "三重県 飛行場",
+        "kind": "airfield",
+        "region": "mie"
+      },
+      {
+        "id": "shiga_airfield",
+        "name": "滋賀県 飛行場",
+        "kind": "airfield",
+        "region": "shiga"
+      },
+      {
+        "id": "kyoto_airfield",
+        "name": "京都府 飛行場",
+        "kind": "airfield",
+        "region": "kyoto"
+      },
+      {
+        "id": "osaka_airfield",
+        "name": "大阪府 飛行場",
+        "kind": "airfield",
+        "region": "osaka"
+      },
+      {
+        "id": "hyogo_airfield",
+        "name": "兵庫県 飛行場",
+        "kind": "airfield",
+        "region": "hyogo"
+      },
+      {
+        "id": "nara_airfield",
+        "name": "奈良県 飛行場",
+        "kind": "airfield",
+        "region": "nara"
+      },
+      {
+        "id": "wakayama_airfield",
+        "name": "和歌山県 飛行場",
+        "kind": "airfield",
+        "region": "wakayama"
+      },
+      {
+        "id": "tottori_airfield",
+        "name": "鳥取県 飛行場",
+        "kind": "airfield",
+        "region": "tottori"
+      },
+      {
+        "id": "shimane_airfield",
+        "name": "島根県 飛行場",
+        "kind": "airfield",
+        "region": "shimane"
+      },
+      {
+        "id": "okayama_airfield",
+        "name": "岡山県 飛行場",
+        "kind": "airfield",
+        "region": "okayama"
+      },
+      {
+        "id": "hiroshima_airfield",
+        "name": "広島県 飛行場",
+        "kind": "airfield",
+        "region": "hiroshima"
+      },
+      {
+        "id": "yamaguchi_airfield",
+        "name": "山口県 飛行場",
+        "kind": "airfield",
+        "region": "yamaguchi"
+      },
+      {
+        "id": "tokushima_airfield",
+        "name": "徳島県 飛行場",
+        "kind": "airfield",
+        "region": "tokushima"
+      },
+      {
+        "id": "kagawa_airfield",
+        "name": "香川県 飛行場",
+        "kind": "airfield",
+        "region": "kagawa"
+      },
+      {
+        "id": "ehime_airfield",
+        "name": "愛媛県 飛行場",
+        "kind": "airfield",
+        "region": "ehime"
+      },
+      {
+        "id": "kochi_airfield",
+        "name": "高知県 飛行場",
+        "kind": "airfield",
+        "region": "kochi"
+      },
+      {
+        "id": "fukuoka_airfield",
+        "name": "福岡県 飛行場",
+        "kind": "airfield",
+        "region": "fukuoka"
+      },
+      {
+        "id": "saga_airfield",
+        "name": "佐賀県 飛行場",
+        "kind": "airfield",
+        "region": "saga"
+      },
+      {
+        "id": "nagasaki_airfield",
+        "name": "長崎県 飛行場",
+        "kind": "airfield",
+        "region": "nagasaki"
+      },
+      {
+        "id": "kumamoto_airfield",
+        "name": "熊本県 飛行場",
+        "kind": "airfield",
+        "region": "kumamoto"
+      },
+      {
+        "id": "oita_airfield",
+        "name": "大分県 飛行場",
+        "kind": "airfield",
+        "region": "oita"
+      },
+      {
+        "id": "miyazaki_airfield",
+        "name": "宮崎県 飛行場",
+        "kind": "airfield",
+        "region": "miyazaki"
+      },
+      {
+        "id": "kagoshima_airfield",
+        "name": "鹿児島県 飛行場",
+        "kind": "airfield",
+        "region": "kagoshima"
+      },
+      {
+        "id": "okinawa_airfield",
+        "name": "沖縄県 飛行場",
+        "kind": "airfield",
+        "region": "okinawa"
       }
     ],
     "lines": [
@@ -3394,6 +3676,335 @@
         "to": "okinawa_port",
         "kind": "sea",
         "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hokkaido_depot",
+        "to": "hokkaido_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aomori_depot",
+        "to": "aomori_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "iwate_depot",
+        "to": "iwate_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "akita_depot",
+        "to": "akita_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyagi_depot",
+        "to": "miyagi_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamagata_depot",
+        "to": "yamagata_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukushima_depot",
+        "to": "fukushima_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ibaraki_depot",
+        "to": "ibaraki_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tochigi_depot",
+        "to": "tochigi_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gunma_depot",
+        "to": "gunma_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saitama_depot",
+        "to": "saitama_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chiba_depot",
+        "to": "chiba_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokyo_depot",
+        "to": "tokyo_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanagawa_depot",
+        "to": "kanagawa_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "niigata_depot",
+        "to": "niigata_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "toyama_depot",
+        "to": "toyama_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ishikawa_depot",
+        "to": "ishikawa_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukui_depot",
+        "to": "fukui_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamanashi_depot",
+        "to": "yamanashi_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nagano_depot",
+        "to": "nagano_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "gifu_depot",
+        "to": "gifu_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shizuoka_depot",
+        "to": "shizuoka_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "aichi_depot",
+        "to": "aichi_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "mie_depot",
+        "to": "mie_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shiga_depot",
+        "to": "shiga_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyoto_depot",
+        "to": "kyoto_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "osaka_depot",
+        "to": "osaka_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hyogo_depot",
+        "to": "hyogo_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nara_depot",
+        "to": "nara_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "wakayama_depot",
+        "to": "wakayama_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tottori_depot",
+        "to": "tottori_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shimane_depot",
+        "to": "shimane_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "okayama_depot",
+        "to": "okayama_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hiroshima_depot",
+        "to": "hiroshima_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "yamaguchi_depot",
+        "to": "yamaguchi_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokushima_depot",
+        "to": "tokushima_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kagawa_depot",
+        "to": "kagawa_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "ehime_depot",
+        "to": "ehime_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kochi_depot",
+        "to": "kochi_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "fukuoka_depot",
+        "to": "fukuoka_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "saga_depot",
+        "to": "saga_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "nagasaki_depot",
+        "to": "nagasaki_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kumamoto_depot",
+        "to": "kumamoto_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "oita_depot",
+        "to": "oita_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "miyazaki_depot",
+        "to": "miyazaki_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kagoshima_depot",
+        "to": "kagoshima_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "okinawa_depot",
+        "to": "okinawa_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
         "condition": 1.0
       }
     ]

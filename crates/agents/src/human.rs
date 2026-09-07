@@ -361,6 +361,7 @@ mod tests {
             .find(|&r| match current_station {
                 Station::Region(cur) => cur != r && sim.world.link_between(cur, r).is_none(),
                 Station::Sea(_) => true, // a fleet ordered onto land is always rejected, regardless of which region.
+                Station::Airfield(_) => true, // an air unit ordered onto land is always rejected too (Stage 10A: no `Domain::Air` `MoveUnit` support at all).
             })
             .expect("the embedded scenario has at least one non-adjacent region");
 

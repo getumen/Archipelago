@@ -1,10 +1,11 @@
 //! Player/agent-facing commands and the validation that turns them into
 //! world mutations. Invalid actions are rejected, never panicked on.
 
+use crate::air;
 use crate::balance::{
-    CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS,
-    IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_TEXT_MAX_CHARS, UNIT_EQUIPMENT,
-    UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
+    AIR_UNIT_MACHINERY_COST, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT,
+    FOCUS_SWITCH_DAYS, IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_TEXT_MAX_CHARS,
+    UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
@@ -301,6 +302,11 @@ pub enum ActionError {
     RegionContested,
     InsufficientManpower,
     InsufficientEquipment,
+    /// Stage 10A: `Action::RecruitUnit { domain: Domain::Air, .. }`'s own
+    /// `Good::Machinery` cost (`balance::AIR_UNIT_MACHINERY_COST`) exceeds
+    /// the faction's current stock - the airframe-specific sibling of
+    /// `InsufficientEquipment`'s Arms check.
+    InsufficientMachinery,
     InvalidValue,
     /// `Action::Build` on a region that already has a project in progress.
     AlreadyBuilding,
@@ -309,6 +315,10 @@ pub enum ActionError {
     /// Stage 2D: `Action::RecruitUnit { domain: Domain::Sea, .. }` against a
     /// region with no port (or, in principle, no facing sea zone at all).
     NoPort,
+    /// Stage 10A: `Action::RecruitUnit { domain: Domain::Air, .. }` against
+    /// a region with no `transport::TransportNodeKind::Airfield` node - the
+    /// air-domain sibling of `NoPort`.
+    NoAirfield,
     /// Stage 9D: `Action::InterdictLine`/`Action::Build`'s
     /// `Project::TransportLine` named a `TransportLineId` past the end of
     /// `World::transport_lines` - no such route exists.
@@ -387,6 +397,10 @@ fn apply_move(
     let pinned = match from {
         Station::Region(r) => world.has_enemy_units(r, faction),
         Station::Sea(z) => world.has_enemy_fleets(z, faction),
+        // Stage 10A: same rule `military::is_pinned`'s `Station::Airfield`
+        // arm already uses - an airfield is exactly as contested as the
+        // region it sits inside.
+        Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, faction),
     };
     if pinned {
         return Err(ActionError::Pinned);
@@ -484,6 +498,10 @@ fn apply_disband(world: &mut World, faction: FactionId, unit_id: UnitId) -> Resu
     let pinned = match station {
         Station::Region(r) => world.has_enemy_units(r, faction),
         Station::Sea(z) => world.has_enemy_fleets(z, faction),
+        // Stage 10A: same rule `military::is_pinned`'s `Station::Airfield`
+        // arm already uses - an airfield is exactly as contested as the
+        // region it sits inside.
+        Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, faction),
     };
     if pinned {
         return Err(ActionError::RegionContested);
@@ -491,6 +509,34 @@ fn apply_disband(world: &mut World, faction: FactionId, unit_id: UnitId) -> Resu
 
     world.faction_mut(faction).manpower += manpower;
     world.faction_mut(faction).stock[Good::Arms.index()] += equipment;
+    // Stage 10A (`codex review`, P2): `apply_recruit` charges
+    // `AIR_UNIT_MACHINERY_COST` on top of manpower and Arms for
+    // `Domain::Air`, so disband has to hand the airframe back too or a
+    // recruit/disband cycle silently destroys Machinery - a decrease with
+    // no way back, which is the mirror image of CLAUDE.md's 「一方通行の
+    // アキュムレータを作らない。増える量には戻る経路を持たせる」 and a
+    // break with the disband contract every other domain already keeps.
+    //
+    // Refunded in proportion to the squadron's remaining equipment, the
+    // same way `equipment` itself is returned rather than the full
+    // recruitment charge: a squadron ground down to nothing has no airframes
+    // left to recover, so a full refund would turn attrition into a way of
+    // manufacturing Machinery out of losses.
+    //
+    // This refund is honest by construction, not by a second ledger:
+    // `apply_reinforce` now charges `Good::Machinery` for an air unit's
+    // equipment at exactly this same `AIR_UNIT_MACHINERY_COST /
+    // UNIT_EQUIPMENT` rate whenever it delivers any (see its own doc) - so
+    // the equipment this refund is proportional to can never have been
+    // replaced with Arms alone. Before that fix, a damaged squadron could be
+    // refilled with nothing but Arms and disbanded here for a full refund it
+    // never paid back in - a repeatable Arms -> Machinery converter with no
+    // cost on the Arms side, exactly the kind of one-way accumulator
+    // CLAUDE.md's own record of this project's repeat defects warns against.
+    if matches!(station, Station::Airfield(_)) {
+        let intact = (equipment / UNIT_EQUIPMENT).clamp(0.0, 1.0);
+        world.faction_mut(faction).stock[Good::Machinery.index()] += AIR_UNIT_MACHINERY_COST * intact;
+    }
     world.unit_mut(unit_id).alive = false;
     Ok(())
 }
@@ -526,6 +572,15 @@ fn apply_recruit(
             let zone = naval::home_zone(world, region_id).ok_or(ActionError::NoPort)?;
             Station::Sea(zone)
         }
+        // Stage 10A (docs/phase10-spec.md "1. 基地"): an air unit needs an
+        // `Airfield` node to be based at, the air-domain sibling of
+        // `Domain::Sea`'s port requirement above - `World::airfield_node`
+        // is the sole authority for whether `region_id` has one at all
+        // (`transport::TransportNodeKind::Airfield`'s own doc).
+        Domain::Air => {
+            let node = world.airfield_node(region_id).ok_or(ActionError::NoAirfield)?;
+            Station::Airfield(node.id)
+        }
     };
 
     // Stage 3C `NationalFocus::MaritimeTrade` (docs/phase3-spec.md: "艦隊の
@@ -541,20 +596,31 @@ fn apply_recruit(
     } else {
         UNIT_EQUIPMENT
     };
+    // Stage 10A (docs/phase10-spec.md "4. 生産"): an air unit's own
+    // `Good::Machinery` cost, on top of the `UNIT_MANPOWER`/Arms cost every
+    // domain already pays - the spec explicitly rules out a new commodity
+    // ("新しい Good を追加しない"), so the airframe itself is priced in an
+    // existing industrial input instead of a fourth recruit-cost good.
+    let machinery_cost = if domain == Domain::Air { AIR_UNIT_MACHINERY_COST } else { 0.0 };
     if f.manpower < UNIT_MANPOWER {
         return Err(ActionError::InsufficientManpower);
     }
     if f.stock[Good::Arms.index()] < equipment_cost {
         return Err(ActionError::InsufficientEquipment);
     }
+    if f.stock[Good::Machinery.index()] < machinery_cost {
+        return Err(ActionError::InsufficientMachinery);
+    }
 
     world.faction_mut(faction).manpower -= UNIT_MANPOWER;
     world.faction_mut(faction).stock[Good::Arms.index()] -= equipment_cost;
+    world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
 
     let id = UnitId(world.units.len() as u32);
     let kind = match domain {
         Domain::Land => "Corps",
         Domain::Sea => "Fleet",
+        Domain::Air => "Squadron",
     };
     let name = format!("{} {} {}", world.faction(faction).name, kind, id.0);
     world.units.push(Unit {
@@ -586,6 +652,10 @@ fn apply_reinforce(
     let pinned = match unit.station {
         Station::Region(r) => world.has_enemy_units(r, faction),
         Station::Sea(z) => world.has_enemy_fleets(z, faction),
+        // Stage 10A: same rule `military::is_pinned`'s `Station::Airfield`
+        // arm already uses - an airfield is exactly as contested as the
+        // region it sits inside.
+        Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, faction),
     };
     if pinned {
         return Err(ActionError::RegionContested);
@@ -639,6 +709,7 @@ fn apply_reinforce(
     let network_reachable = match unit.station.domain() {
         Domain::Land => logistics::land_unit_supply_avail(world, unit_id) > 0.0,
         Domain::Sea => naval::fleet_unit_supply_avail(world, unit_id) > 0.0,
+        Domain::Air => air::air_unit_supply_avail(world, unit_id) > 0.0,
     };
 
     // External code review fix (Stage 2C; Stage 2D extends it to fleets):
@@ -662,6 +733,7 @@ fn apply_reinforce(
         let (ratio, budget) = match domain {
             Domain::Land => logistics::instantaneous_arms_delivery(world, unit_id),
             Domain::Sea => naval::instantaneous_fleet_arms_delivery(world, unit_id),
+            Domain::Air => air::instantaneous_air_arms_delivery(world, unit_id),
         };
         // `codex review` P1 fix (second round): claim the exact throughput
         // `instantaneous_arms_delivery`/`instantaneous_fleet_arms_delivery`'s
@@ -687,6 +759,9 @@ fn apply_reinforce(
             Domain::Sea => {
                 logistics::commit_instantaneous_sea_grant(world, unit_id);
             }
+            Domain::Air => {
+                logistics::commit_instantaneous_air_grant(world, unit_id);
+            }
         }
         let unit = world.unit_mut(unit_id);
         unit.arms_delivery = ratio;
@@ -704,13 +779,52 @@ fn apply_reinforce(
     // single tick's delivery allowance (each call recomputed the ratio
     // against the now-smaller remaining gap instead of a shrinking budget).
     let deliverable_equipment = need_equipment.min(unit.arms_budget.max(0.0));
+    let is_air = unit.station.domain() == Domain::Air;
 
     let f = world.faction(faction);
     let fill_manpower = if network_reachable { need_manpower.min(f.manpower) } else { 0.0 };
-    let fill_equipment = deliverable_equipment.min(f.stock[Good::Arms.index()]);
+    let mut fill_equipment = deliverable_equipment.min(f.stock[Good::Arms.index()]);
+    // Stage 10A exploit fix (`codex review`, P2): an air unit's equipment
+    // *is* its airframes, so replacing it must cost `Good::Machinery`, not
+    // only `Good::Arms` - the same industrial input `apply_recruit` prices a
+    // fresh airframe in (`AIR_UNIT_MACHINERY_COST` per `UNIT_EQUIPMENT`),
+    // charged here at that same rate for whatever fraction of the gap is
+    // actually delivered. Without this, `apply_disband`'s equipment-
+    // proportional Machinery refund (see its own doc) turned combat losses
+    // into a free Arms -> Machinery converter: damage a squadron, refill it
+    // with nothing but abundant Arms, then disband it for a full Machinery
+    // refund it never paid back in.
+    //
+    // Bounded by the faction's actual Machinery stock exactly the way
+    // `fill_equipment` is already bounded by its Arms stock two lines above
+    // - the same shape, not a second one: a hard cap on a real, currently-
+    // held stock, checked once per call against whatever `fill_equipment`
+    // already is (never a ratio re-applied to a shrinking remainder). This
+    // keeps N `ReinforceUnit` calls in one batch bounded exactly like the
+    // existing Arms/`arms_budget` caps: each call spends the stock down for
+    // real, so the total delivered - and the total Machinery charged for it
+    // - can never exceed what a single tick's `arms_budget` and starting
+    // stock allow between them, in either domain's currency. Running out of
+    // Machinery mid-reinforcement behaves exactly like running out of Arms
+    // already does above: `fill_equipment` (and therefore the equipment
+    // actually delivered) is simply capped down to what can be paid for,
+    // never rejected with an `ActionError` and never delivered without
+    // being paid for - the same partial-fill shape this function already
+    // uses for every other resource, not a new one invented for this good.
+    let machinery_cost = if is_air {
+        let machinery_per_equipment = AIR_UNIT_MACHINERY_COST / UNIT_EQUIPMENT;
+        let affordable_equipment = f.stock[Good::Machinery.index()] / machinery_per_equipment;
+        fill_equipment = fill_equipment.min(affordable_equipment.max(0.0));
+        fill_equipment * machinery_per_equipment
+    } else {
+        0.0
+    };
 
     world.faction_mut(faction).manpower -= fill_manpower;
     world.faction_mut(faction).stock[Good::Arms.index()] -= fill_equipment;
+    if is_air {
+        world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
+    }
     let unit = world.unit_mut(unit_id);
     unit.manpower += fill_manpower;
     unit.equipment += fill_equipment;

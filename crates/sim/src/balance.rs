@@ -196,6 +196,20 @@ pub const UNIT_EQUIPMENT: f32 = 20.0;
 pub const UNIT_ORG: f32 = 100.0;
 pub const UNIT_START_ORG_RATIO: f32 = 0.4;
 
+/// Stage 10A (docs/phase10-spec.md "4. 生産"): the `Good::Machinery` an
+/// `action::apply_recruit`'s `Domain::Air` branch consumes on top of the
+/// same `UNIT_MANPOWER`/`UNIT_EQUIPMENT`(-priced-in-Arms) cost every other
+/// domain already pays - an airframe's own airframe-and-avionics cost, on
+/// the same industrial input land/sea equipment is already priced in
+/// (`Good::Arms`), rather than a new commodity (the spec explicitly rules
+/// out adding `Fuel`: "新しい Good を追加しない"). Set to `UNIT_EQUIPMENT`'s
+/// own order of magnitude - no scenario deploys a `Domain::Air` unit yet
+/// (10A leaves that to 10B onward), so there is nothing to measure this
+/// against in actual play; a real balance pass is Stage 10E's job, not
+/// this one's, per docs/conventions.md's "測定してから直す" - this is a
+/// first, disclosed placeholder, not a tuned constant.
+pub const AIR_UNIT_MACHINERY_COST: f32 = 20.0;
+
 pub const SUPPLY_NEED_PER_MANPOWER: f32 = 1.0;
 pub const COMBAT_SUPPLY_MULT: f32 = 2.5;
 

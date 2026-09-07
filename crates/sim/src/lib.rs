@@ -5,6 +5,7 @@
 
 pub mod action;
 pub mod agent;
+pub mod air;
 pub mod balance;
 pub mod construction;
 pub mod diplomacy;

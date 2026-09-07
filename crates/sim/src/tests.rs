@@ -2,13 +2,14 @@
 
 use crate::action::{self, Action, ActionError, Layer, ALL_LAYERS};
 use crate::balance::{
-    CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
-    CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_REQUIRED_CAPACITY,
-    CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR,
-    GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT, INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE,
-    NL_PROPOSAL_COOLDOWN_DAYS, OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS,
-    STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
-    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
+    AIR_UNIT_MACHINERY_COST, CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
+    CIVILIAN_RATION_MIN, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
+    CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE,
+    FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
+    INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_COOLDOWN_DAYS,
+    OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT,
+    TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
+    UNIT_MANPOWER, UNIT_ORG,
 };
 use crate::construction::{self, Construction, Project};
 use crate::diplomacy::{self, Treaty, TreatyTerm};
@@ -8353,5 +8354,634 @@ fn repeated_fleet_reinforce_cannot_exceed_daily_delivery() {
         "30 ReinforceUnit actions against one fleet in a single batch must not together deliver more than the \
          first call's own one-tick allowance ({filled_first}) no matter how many times the action is resubmitted: \
          filled_total={filled_total}, gap={gap}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Stage 10A (docs/phase10-spec.md "Stage 10A"): airfields, air units, and
+// their supply through the existing transport flow. No air *effects* exist
+// yet (10B/10C) - these tests only check existence, basing, recruit/
+// disband cost, and that air demand is a first-class citizen of
+// `logistics::compute_transport_flow`, never a second supply path.
+// ---------------------------------------------------------------------
+
+/// docs/phase10-spec.md "4. 生産": recruiting a `Domain::Air` unit costs
+/// `Good::Machinery` (`balance::AIR_UNIT_MACHINERY_COST`) on top of the same
+/// `UNIT_MANPOWER`/`Good::Arms` cost every other domain already pays, and
+/// bases the new unit at the region's own `TransportNodeKind::Airfield`
+/// node - never a `Region`/`SeaZone`, and never a second, independently
+/// tracked "does this region have an airfield" fact (`transport::
+/// TransportNodeKind::Airfield`'s own doc).
+#[test]
+fn recruit_air_unit_costs_machinery_and_arms_and_bases_it_at_the_airfield() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+    let airfield = world
+        .airfield_node(region)
+        .expect("Stage 10A scenarios declare an airfield in every region")
+        .id;
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+
+    let manpower_before = world.faction(faction).manpower;
+    let arms_before = world.faction(faction).stock[Good::Arms.index()];
+    let machinery_before = world.faction(faction).stock[Good::Machinery.index()];
+    let units_before = world.units.len();
+
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    assert_eq!(result, Ok(()));
+
+    assert_eq!(world.units.len(), units_before + 1, "exactly one unit must be raised");
+    let unit = world.units.last().expect("just pushed");
+    assert_eq!(unit.station, Station::Airfield(airfield), "an air recruit must be based at the region's own airfield node, not a Region/Sea station");
+    assert_eq!(unit.station.domain(), Domain::Air);
+
+    assert_eq!(world.faction(faction).manpower, manpower_before - UNIT_MANPOWER, "an air unit still costs the same UNIT_MANPOWER every domain pays");
+    assert_eq!(world.faction(faction).stock[Good::Arms.index()], arms_before - UNIT_EQUIPMENT, "an air unit's Arms cost matches the land baseline (no focus discount)");
+    assert_eq!(
+        world.faction(faction).stock[Good::Machinery.index()],
+        machinery_before - AIR_UNIT_MACHINERY_COST,
+        "an air unit must additionally cost Good::Machinery - docs/phase10-spec.md \"4. 生産\""
+    );
+}
+
+/// `ActionError::NoAirfield` (Stage 10A's sibling of `ActionError::NoPort`):
+/// `Action::RecruitUnit { domain: Domain::Air, .. }` against a region with
+/// no `Airfield` node must be rejected, not silently redirected or
+/// defaulted anywhere else.
+///
+/// Confirmed this can fail: temporarily changed `apply_recruit`'s
+/// `Domain::Air` arm to fall back to `Station::Region(region_id)` when
+/// `world.airfield_node` returns `None` instead of returning
+/// `Err(ActionError::NoAirfield)`, and re-ran - the recruit silently
+/// succeeded with the unit based on the region itself. Reverted before
+/// committing.
+#[test]
+fn recruit_air_unit_without_airfield_is_rejected() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+    world.transport_nodes.retain(|n| !(n.region == region && n.kind == TransportNodeKind::Airfield));
+    assert!(!world.has_airfield_node(region), "sanity: the region must genuinely have no airfield left");
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    assert_eq!(result, Err(ActionError::NoAirfield));
+}
+
+/// `ActionError::InsufficientMachinery`: a faction with plenty of manpower
+/// and Arms but no Machinery cannot raise an air unit - the airframe-
+/// specific cost `recruit_air_unit_costs_machinery_and_arms_and_bases_it_
+/// at_the_airfield` pins the value of is independently enforced, not just
+/// deducted after the fact.
+///
+/// Confirmed this can fail: temporarily removed the `f.stock[Good::
+/// Machinery.index()] < machinery_cost` check from `apply_recruit` and
+/// re-ran - the recruit succeeded and drove the faction's Machinery stock
+/// negative. Reverted before committing.
+#[test]
+fn recruit_air_unit_without_machinery_is_rejected() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+    assert!(world.has_airfield_node(region), "sanity: Stage 10A scenarios declare an airfield in every region");
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 0.0;
+
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    assert_eq!(result, Err(ActionError::InsufficientMachinery));
+}
+
+/// docs/phase9-spec.md's own precedent for validating a brand new
+/// `TransportNodeKind` reaches the *generic* checks `Scenario::validate`
+/// already runs for every node, not just the kinds that existed when those
+/// checks were written: an `Airfield` node naming an unknown region must be
+/// rejected exactly like a `Depot`/`Port` node would be.
+#[test]
+fn airfield_node_with_unknown_region_is_rejected() {
+    let dangling_airfield = MINI_VALID_SCENARIO.replacen(
+        r#"{ "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" }"#,
+        r#"{ "id": "c_depot", "name": "C Depot", "kind": "depot", "region": "c" },
+      { "id": "c_airfield", "name": "C Airfield", "kind": "airfield", "region": "nowhere" }"#,
+        1,
+    );
+    match scenario::load_str(&dangling_airfield) {
+        Err(scenario::ScenarioError::UnknownId { id, .. }) => assert_eq!(id, "nowhere"),
+        other => panic!("expected a distinct UnknownId error, got {other:?}"),
+    }
+}
+
+/// docs/phase10-spec.md "Stage 10A": "飛行場ノードのないシナリオ...が明確な
+/// エラーになる" is about the *action* surface (`recruit_air_unit_without_
+/// airfield_is_rejected`), not scenario loading - unlike `Port`, nothing
+/// requires a scenario to declare at least one `Airfield` node at all
+/// (`transport::TransportNodeKind::Airfield`'s own doc: "a scenario with
+/// none is legal, exactly like one with no `Port` node"). `MINI_VALID_
+/// SCENARIO` itself declares zero `Airfield` nodes and must still load.
+#[test]
+fn scenario_without_any_airfield_node_is_valid() {
+    let world = scenario::load_str(MINI_VALID_SCENARIO).expect("a scenario with no Airfield node at all must still be legal");
+    assert!(world.transport_nodes.iter().all(|n| n.kind != TransportNodeKind::Airfield));
+}
+
+/// docs/phase10-spec.md "0. 方針"/"Stage 10A": air-unit demand must go
+/// through the exact same `logistics::compute_transport_flow` every other
+/// candidate does - not a second, separately-computed supply figure. A
+/// unit recruited at a real airfield with a healthy connecting line must
+/// see `World::supply_air` populated, `air::air_unit_supply_avail` read it
+/// back, and `Action::ReinforceUnit` (which asks exactly that question)
+/// succeed in delivering something.
+#[test]
+fn air_unit_is_supplied_through_the_shared_transport_flow() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+    let airfield = world.airfield_node(region).expect("Stage 10A scenarios declare an airfield in every region").id;
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+        .expect("recruiting the air unit for this test must itself succeed");
+    let unit_id = world.units.last().expect("just recruited").id;
+    // A fresh recruit starts at full equipment (`apply_recruit`), so give it
+    // a real gap - and real Munitions upkeep - for the network to actually
+    // have something to deliver.
+    world.unit_mut(unit_id).equipment = 5.0;
+    world.unit_mut(unit_id).manpower = 500.0;
+
+    logistics::recompute_supply(&mut world);
+
+    assert!(
+        world.supply_air[airfield.index()][faction.index()] > 0.0,
+        "a reachable airfield with real production behind it must deliver something into World::supply_air"
+    );
+    assert!(
+        crate::air::air_unit_supply_avail(&world, unit_id) > 0.0,
+        "air::air_unit_supply_avail must read the same figure recompute_supply just populated"
+    );
+
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 1_000_000.0;
+    logistics::distribute_supply(&mut world);
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()), "ReinforceUnit against a reachable, contactless air unit must succeed");
+    assert!(world.unit(unit_id).equipment > 5.0, "a reachable air unit's ReinforceUnit must actually deliver equipment through the network, exactly like land/sea");
+}
+
+/// The other half of "the same flow as everyone else": an air unit based at
+/// an airfield with **no** connecting line at all (structurally
+/// unreachable, not merely under-resourced) must be supplied nothing -
+/// never a fallback estimate.
+///
+/// Confirmed this can fail: temporarily added an extra edge straight from
+/// the airfield's own region `Prod` vertex to its `AirDemand` sink inside
+/// `logistics::build_transport_graph`'s `TransportNodeKind::Airfield` arm
+/// (bypassing the line network entirely, the exact "second supply path"
+/// shape CLAUDE.md's own record of the Phase 9 fleet defect warns against)
+/// and re-ran - this test failed because the isolated airfield started
+/// receiving supply anyway. Reverted before committing.
+#[test]
+fn unreachable_airfield_supplies_no_air_unit() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+
+    // Strip every real `TransportLine` touching any of `region`'s existing
+    // nodes - not just omitting a line to the new `Airfield` node below,
+    // but removing the region's *entire* connection to the rest of the
+    // network. This matters because `logistics::compute_transport_flow`'s
+    // `Inbound(region)` collector fans out, unconditionally, to *every*
+    // node a region owns once cross-region flow reaches it at all (that
+    // function's own doc: "r's own absorptive capacity binds regardless of
+    // which node the flow nominally arrives at") - a deliberate design
+    // choice, not a bug, but it means a fresh node with no line of its own
+    // would still ride along on whatever real connectivity the rest of the
+    // region already has. Removing every line here is what makes the new
+    // node's own isolation genuine rather than incidental.
+    let region_node_ids: std::collections::HashSet<TransportNodeId> =
+        world.transport_nodes.iter().filter(|n| n.region == region).map(|n| n.id).collect();
+    world.transport_lines.retain(|l| !region_node_ids.contains(&l.from) && !region_node_ids.contains(&l.to));
+
+    // A brand new `Airfield` node with no `TransportLine` touching it at
+    // all - not even the region's own depot can reach it.
+    let airfield_id = TransportNodeId(world.transport_nodes.len() as u32);
+    world.transport_nodes.push(transport::TransportNode {
+        id: airfield_id,
+        name: "Isolated Airfield".to_string(),
+        kind: TransportNodeKind::Airfield,
+        region,
+    });
+
+    let unit_id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: unit_id,
+        owner: faction,
+        name: "Isolated Squadron".to_string(),
+        station: Station::Airfield(airfield_id),
+        movement: None,
+        manpower: 1000.0,
+        equipment: 5.0,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 0.0,
+        arms_delivery: 0.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Airfield(airfield_id),
+        experience: 0.0,
+        alive: true,
+    });
+
+    logistics::recompute_supply(&mut world);
+
+    assert_eq!(
+        world.supply_air[airfield_id.index()][faction.index()],
+        0.0,
+        "an airfield with no connecting line at all must deliver nothing - never a fallback estimate"
+    );
+    assert_eq!(crate::air::air_unit_supply_avail(&world, unit_id), 0.0);
+}
+
+/// docs/phase10-spec.md "Stage 10A" 受け入れ基準: "同じ飛行場の 2 個航空部隊
+/// が容量を分け合う" - the airfield-domain sibling of
+/// `two_fleets_facing_one_port_share_its_capacity`. Two air units based at
+/// the *same* airfield, reachable only through one deliberately thin line,
+/// must together draw no more than that line's own capacity - never each
+/// independently drawing it in full (CLAUDE.md's own record of the exact
+/// Phase 9 fleet defect this stage's spec calls out by name, "0. 方針").
+///
+/// Confirmed this can fail: temporarily added a second, uncapped edge
+/// straight from the region's own `Prod` vertex to the airfield's
+/// `AirDemand` sink (alongside the real, capacity-limited line) inside
+/// `logistics::build_transport_graph`'s `TransportNodeKind::Airfield` arm -
+/// a second supply path bypassing the shared line exactly like the retired
+/// `world.port_capacity` used to bypass real contention for fleets. Re-ran:
+/// `two` came back close to double `alone` (each unit drawing the thin
+/// line's 10.0 capacity independently) instead of staying capped near it.
+/// Reverted before committing.
+/// Disbanding an air unit must hand its airframe back (`codex review`, P2).
+/// `apply_recruit` charges `AIR_UNIT_MACHINERY_COST` on top of manpower and
+/// Arms for `Domain::Air`; without a matching refund a recruit/disband cycle
+/// destroys Machinery outright, which breaks the disband contract every
+/// other domain keeps and is the mirror image of CLAUDE.md's
+/// 「一方通行のアキュムレータを作らない。増える量には戻る経路を持たせる」.
+///
+/// The refund scales with remaining equipment, so a ground-down squadron
+/// recovers little - otherwise attrition would become a Machinery printer.
+///
+/// **Confirmed this test can fail.** Deleting the refund branch in
+/// `apply_disband` leaves Machinery at 100.0 after the cycle instead of
+/// returning to its starting 120.0, tripping the first assertion; and
+/// hard-coding a full (unscaled) refund makes the half-strength case return
+/// 120.0 instead of 110.0, tripping the second. Restored, and both pass.
+#[test]
+fn disbanding_an_air_unit_returns_its_airframe() {
+    let faction = FactionId(0);
+    let region = RegionId(1);
+
+    let cycle = |equipment_ratio: f32| -> f32 {
+        let mut world = scenario::build_world();
+        world.faction_mut(faction).stock[Good::Machinery.index()] = 120.0;
+        world.faction_mut(faction).stock[Good::Arms.index()] = 1e6;
+        world.faction_mut(faction).manpower = 1e6;
+
+        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+            .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
+        let unit = world.units.iter().find(|u| u.alive && matches!(u.station, Station::Airfield(_))).expect("just recruited").id;
+        world.unit_mut(unit).equipment = UNIT_EQUIPMENT * equipment_ratio;
+
+        action::apply_action(&mut world, faction, Action::DisbandUnit { unit }).expect("uncontested disband must succeed");
+        world.faction(faction).stock[Good::Machinery.index()]
+    };
+
+    assert!(
+        (cycle(1.0) - 120.0).abs() < 1e-3,
+        "a full-strength squadron's recruit/disband cycle must be Machinery-neutral, got {}",
+        cycle(1.0)
+    );
+    let half = cycle(0.5);
+    assert!(
+        (half - (120.0 - AIR_UNIT_MACHINERY_COST * 0.5)).abs() < 1e-3,
+        "a half-equipped squadron must return only half its airframe, expected {}, got {half}",
+        120.0 - AIR_UNIT_MACHINERY_COST * 0.5
+    );
+}
+
+#[test]
+fn two_air_units_at_one_airfield_share_its_capacity() {
+    let faction = FactionId(0);
+    let region = RegionId(1); // kita_tohoku in mvp.json - see two_fleets_facing_one_port_share_its_capacity's own use of the same region.
+    let thin_line_capacity = 10.0;
+
+    let build = |two_units: bool| {
+        let mut world = scenario::build_world();
+        world.units.clear();
+
+        // Abundant, uncontested production so the airfield's own connecting
+        // line - not upstream production - is the binding constraint this
+        // test measures.
+        for good in crate::good::ALL_GOODS {
+            world.region_mut(region).capacity[good.index()] = 1000.0;
+        }
+        world.region_mut(region).infrastructure = 1.0;
+
+        let depot = world
+            .transport_nodes
+            .iter()
+            .find(|n| n.region == region && n.kind == TransportNodeKind::Depot)
+            .expect("every region has its own depot")
+            .id;
+        let airfield_id = TransportNodeId(world.transport_nodes.len() as u32);
+        world.transport_nodes.push(transport::TransportNode {
+            id: airfield_id,
+            name: "Test Airfield".to_string(),
+            kind: TransportNodeKind::Airfield,
+            region,
+        });
+        world.transport_lines.push(transport::TransportLine {
+            id: TransportLineId(world.transport_lines.len() as u32),
+            from: depot,
+            to: airfield_id,
+            kind: TransportLineKind::Rail,
+            capacity: Capacity::new(thin_line_capacity).expect("finite, non-negative"),
+            condition: Condition::FULL,
+        });
+
+        let push_air_unit = |world: &mut World| {
+            let id = UnitId(world.units.len() as u32);
+            world.units.push(military::Unit {
+                id,
+                owner: faction,
+                name: "Squadron".to_string(),
+                station: Station::Airfield(airfield_id),
+                movement: None,
+                // Large enough that this unit's own Munitions demand alone
+                // (== manpower, `SUPPLY_NEED_PER_MANPOWER == 1.0`) dwarfs
+                // `thin_line_capacity` many times over.
+                manpower: 1000.0,
+                equipment: UNIT_EQUIPMENT,
+                organization: 100.0,
+                morale: 1.0,
+                supply: 0.0,
+                arms_delivery: 0.0,
+                arms_budget: 0.0,
+                arms_delivery_station: Station::Airfield(airfield_id),
+                experience: 0.0,
+                alive: true,
+            });
+        };
+        push_air_unit(&mut world);
+        if two_units {
+            push_air_unit(&mut world);
+        }
+
+        logistics::recompute_supply(&mut world);
+        world.supply_air[airfield_id.index()][faction.index()]
+    };
+
+    let alone = build(false);
+    let two = build(true);
+
+    assert!(alone > thin_line_capacity * 0.5, "sanity: a lone air unit should draw close to the thin line's own capacity: alone={alone}");
+    assert!(
+        two < alone * 1.5,
+        "two air units at the same airfield must share its line capacity, not each draw it in full \
+         (a fixed line capacity of {thin_line_capacity} would let two independent draws reach roughly \
+         double `alone` if unshared): alone={alone}, two={two}"
+    );
+    assert!(two > alone * 0.9, "sanity: pooling demand across two units at the same sink must not itself shrink total delivery: alone={alone}, two={two}");
+}
+
+/// `codex review` P2 exploit fix: `disbanding_an_air_unit_returns_its_
+/// airframe`'s Machinery refund is proportional to the squadron's *current*
+/// equipment, which `apply_reinforce` used to restore using nothing but
+/// `Good::Arms` - a repeatable Arms -> Machinery converter with no
+/// Machinery cost on the way in (damage a squadron for free via combat,
+/// refill it with abundant Arms, disband it for a full airframe refund).
+/// `apply_reinforce` now charges Machinery on an air unit's equipment at the
+/// same `AIR_UNIT_MACHINERY_COST / UNIT_EQUIPMENT` rate `apply_recruit`
+/// already prices a fresh airframe at, so this decisive test drives a real
+/// damage -> reinforce -> disband cycle end to end and checks the one
+/// property that actually closes the loop: the cycle can never yield more
+/// Machinery than it consumed.
+///
+/// **Confirmed this test can fail.** Reverting `apply_reinforce`'s Machinery
+/// charge (so it spends only Arms again) re-opens the exploit exactly as
+/// measured: with the squadron ground down to zero equipment, reinforcement
+/// spent 0.0 Machinery to restore the full 20.0-unit gap (still fully
+/// funded by the abundant Arms stock), then disbanding it refunded the full
+/// `AIR_UNIT_MACHINERY_COST` (20.0) anyway - an undefined/infinite
+/// Machinery-per-Machinery-spent multiplier (20.0 manufactured from 0.0
+/// spent), repeatable indefinitely on any squadron combat happens to
+/// damage. That pushed this test's stock after the cycle to 120.0 against a
+/// starting-before-reinforce stock of 100.0, tripping the "no net creation"
+/// assertion below by the full 20.0. Restored, and it passes.
+#[test]
+fn damage_reinforce_disband_cycle_cannot_create_machinery() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = RegionId(1); // mvp's regions all carry an airfield node.
+
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 120.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1e6;
+    world.faction_mut(faction).manpower = 1e6;
+
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+        .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
+    let unit_id = world
+        .units
+        .iter()
+        .find(|u| u.alive && matches!(u.station, Station::Airfield(_)))
+        .expect("just recruited")
+        .id;
+    let machinery_before_reinforce = world.faction(faction).stock[Good::Machinery.index()];
+    assert!(
+        (machinery_before_reinforce - 100.0).abs() < 1e-3,
+        "sanity: recruiting the squadron should have already spent AIR_UNIT_MACHINERY_COST"
+    );
+
+    // Simulate combat grinding the squadron's equipment away to nothing -
+    // the free, no-Machinery-cost half of the exploit - then give it a full
+    // tick's worth of Arms-side reinforcement allowance so the fix, not a
+    // starved `arms_budget`, is what's actually under test.
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.equipment = 0.0;
+        unit.arms_budget = UNIT_EQUIPMENT;
+    }
+
+    action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id })
+        .expect("abundant Arms and a full arms_budget must let this succeed");
+    assert!(
+        (world.unit(unit_id).equipment - UNIT_EQUIPMENT).abs() < 1e-3,
+        "sanity: the squadron should have been fully reinforced"
+    );
+    let machinery_after_reinforce = world.faction(faction).stock[Good::Machinery.index()];
+    assert!(
+        (machinery_before_reinforce - machinery_after_reinforce - AIR_UNIT_MACHINERY_COST).abs() < 1e-3,
+        "reinforcing a fully-damaged squadron back to full must charge exactly \
+         AIR_UNIT_MACHINERY_COST ({AIR_UNIT_MACHINERY_COST}), the same rate recruiting one does: \
+         spent={}",
+        machinery_before_reinforce - machinery_after_reinforce
+    );
+
+    action::apply_action(&mut world, faction, Action::DisbandUnit { unit: unit_id })
+        .expect("uncontested disband must succeed");
+    let machinery_after_disband = world.faction(faction).stock[Good::Machinery.index()];
+
+    assert!(
+        machinery_after_disband <= machinery_before_reinforce + 1e-3,
+        "a damage -> reinforce -> disband cycle must never yield more Machinery than it \
+         consumed: before_reinforce={machinery_before_reinforce}, after_disband={machinery_after_disband}"
+    );
+    assert!(
+        (machinery_after_disband - machinery_before_reinforce).abs() < 1e-3,
+        "Machinery spent reinforcing and Machinery refunded disbanding the same equipment \
+         must match exactly, by construction: before_reinforce={machinery_before_reinforce}, \
+         after_disband={machinery_after_disband}"
+    );
+}
+
+/// `codex review` P2 exploit fix, second axis: the Machinery charge added to
+/// `apply_reinforce` must obey the same decreasing-per-tick-budget rule
+/// `arms_budget` already enforces for equipment/Arms - repeated
+/// `ReinforceUnit` calls against one air unit in a single batch must not
+/// together deliver (or charge) more than the faction's actual Machinery
+/// stock affords, and must never drive that stock negative.
+///
+/// **Confirmed this test can fail.** Changing the fix to derive
+/// `machinery_cost` from `need_equipment` (the unit's full remaining gap)
+/// instead of the already-`arms_budget`/Arms/Machinery-capped
+/// `fill_equipment` makes each of the 30 calls below re-charge Machinery
+/// against the same 15.0-unit gap instead of the shrinking amount actually
+/// deliverable, driving `Faction::stock[Machinery]` to -285.0 (30 calls *
+/// 15.0 - the one real 15.0 the stock could afford) instead of stopping at
+/// 0.0. Restored, and it passes.
+#[test]
+fn repeated_air_reinforce_cannot_exceed_one_ticks_machinery_stock() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = RegionId(1);
+
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1e6;
+    world.faction_mut(faction).manpower = 1e6;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = AIR_UNIT_MACHINERY_COST; // exactly enough to recruit, nothing left over.
+
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+        .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
+    let unit_id = world
+        .units
+        .iter()
+        .find(|u| u.alive && matches!(u.station, Station::Airfield(_)))
+        .expect("just recruited")
+        .id;
+    assert!(
+        world.faction(faction).stock[Good::Machinery.index()].abs() < 1e-3,
+        "sanity: recruiting should have spent every last unit of Machinery"
+    );
+
+    // A generous one-tick allowance on the Arms side (`arms_budget`) and a
+    // small but real Machinery top-up - just enough to afford part of the
+    // gap - so Machinery, not `arms_budget`, is the binding constraint this
+    // test exercises.
+    let affordable_equipment = 3.0;
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.equipment = 5.0; // gap of 15.0 against UNIT_EQUIPMENT (20.0)
+        unit.arms_budget = UNIT_EQUIPMENT - unit.equipment; // never the binding constraint here
+    }
+    world.faction_mut(faction).stock[Good::Machinery.index()] =
+        affordable_equipment * (AIR_UNIT_MACHINERY_COST / UNIT_EQUIPMENT);
+
+    // N large enough that any re-application of a ratio (or of the full,
+    // un-shrinking gap) to Machinery would obviously blow past what the
+    // stock can afford.
+    for _ in 0..30 {
+        let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+        assert_eq!(result, Ok(()));
+    }
+
+    let filled = world.unit(unit_id).equipment - 5.0;
+    let machinery_left = world.faction(faction).stock[Good::Machinery.index()];
+
+    assert!(
+        (filled - affordable_equipment).abs() < 1e-3,
+        "30 ReinforceUnit actions in one batch must not deliver more equipment than the \
+         faction's Machinery stock affords ({affordable_equipment}), no matter how many times \
+         the action is resubmitted: filled={filled}"
+    );
+    assert!(
+        machinery_left >= -1e-3,
+        "Machinery stock must never go negative: machinery_left={machinery_left}"
+    );
+    assert!(
+        machinery_left.abs() < 1e-3,
+        "the affordable Machinery should be fully (and only) spent, not left over or over-spent: \
+         machinery_left={machinery_left}"
+    );
+}
+
+/// The insufficient-Machinery path must behave exactly like `apply_reinforce`'s
+/// existing insufficient-Arms path (`arms_delivery_limits_reinforcement` and
+/// its neighbors): a clean cap on what the actual stock affords, not an
+/// `ActionError` and never a silent degradation where equipment is handed
+/// over without the Machinery that's supposed to pay for it. With zero
+/// Machinery in stock, an otherwise fully-fundable `ReinforceUnit` against a
+/// damaged air unit must still return `Ok(())` and deliver nothing at all -
+/// the same "zero stock, zero fill, still succeeds" shape running out of
+/// Arms already has, not a second shape invented for this good.
+///
+/// **Confirmed this test can fail.** Removing the Machinery cap in
+/// `apply_reinforce` (so only `arms_budget`/Arms gate `fill_equipment`) lets
+/// this call restore the full 20.0-unit gap against zero Machinery stock,
+/// tripping the "delivers nothing" assertion below. Restored, and it passes.
+#[test]
+fn air_reinforcement_without_machinery_delivers_nothing() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = RegionId(1);
+
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1e6;
+    world.faction_mut(faction).manpower = 1e6;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = AIR_UNIT_MACHINERY_COST;
+
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+        .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
+    let unit_id = world
+        .units
+        .iter()
+        .find(|u| u.alive && matches!(u.station, Station::Airfield(_)))
+        .expect("just recruited")
+        .id;
+
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.equipment = 0.0;
+        unit.arms_budget = UNIT_EQUIPMENT;
+    }
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 0.0;
+
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()), "running out of Machinery must not reject the action, same as running out of Arms");
+    assert!(
+        world.unit(unit_id).equipment.abs() < 1e-3,
+        "with zero Machinery in stock, an air unit must receive zero equipment, not a partial \
+         delivery it never paid for: equipment={}",
+        world.unit(unit_id).equipment
+    );
+    assert!(
+        world.faction(faction).stock[Good::Arms.index()] > 0.99e6,
+        "no Arms should be spent either, since nothing was actually delivered"
+    );
+    assert!(
+        world.faction(faction).stock[Good::Machinery.index()].abs() < 1e-3,
+        "Machinery stock must stay at zero, never go negative"
     );
 }

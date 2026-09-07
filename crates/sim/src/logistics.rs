@@ -37,6 +37,7 @@ use crate::balance::{
     SUPPLY_FLOW_EPSILON, SUPPLY_FLOW_ROUNDS, SUPPLY_NEED_PER_MANPOWER, SUPPLY_SMOOTHING,
     UNIT_EQUIPMENT,
 };
+use crate::air;
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, UnitId};
 use crate::military::Unit;
@@ -134,6 +135,7 @@ pub fn recompute_supply(world: &mut World) {
         .collect();
     world.supply_by_faction = flow.served;
     world.supply_sea = flow.served_sea;
+    world.supply_air = flow.served_air;
     world.supply_leftover = flow.leftover;
 }
 
@@ -353,6 +355,26 @@ fn instantaneous_sea_grant(world: &World, unit_id: UnitId, leftover: &mut Supply
     instantaneous_grant(world, &graph, leftover, f, target, desired)
 }
 
+/// Air-domain twin of `instantaneous_land_grant`/`instantaneous_sea_grant`
+/// immediately above (Stage 10A).
+fn instantaneous_air_grant(world: &World, unit_id: UnitId, leftover: &mut SupplyLeftover) -> f32 {
+    let unit = world.unit(unit_id);
+    let node = unit
+        .station
+        .airfield()
+        .expect("instantaneous_air_grant is air-only; callers must route other domains to their own instantaneous_*_grant");
+    let f = unit.owner.index();
+    let in_combat = world.has_enemy_units(world.transport_node(node).region, unit.owner);
+    let (m, a) = unit_supply_demand(unit, in_combat);
+    let desired = m + a;
+    if desired <= SUPPLY_FLOW_EPSILON {
+        return 0.0;
+    }
+    let graph = build_transport_graph(world);
+    let target = graph.air_demand(node.index());
+    instantaneous_grant(world, &graph, leftover, f, target, desired)
+}
+
 /// Land-domain twin of `instantaneous_sea_avail` immediately below, for
 /// `land_unit_supply_avail` to fall back on when its cached `World::supply`/
 /// `World::supply_by_faction` entry cannot be trusted - see that function's
@@ -373,6 +395,14 @@ fn instantaneous_land_avail(world: &World, unit_id: UnitId) -> f32 {
 pub(crate) fn instantaneous_sea_avail(world: &World, unit_id: UnitId) -> f32 {
     let mut leftover = world.supply_leftover.clone();
     instantaneous_sea_grant(world, unit_id, &mut leftover)
+}
+
+/// Air-domain twin of `instantaneous_land_avail`/`instantaneous_sea_avail`
+/// immediately above, for `air::air_unit_supply_avail` to fall back on
+/// (Stage 10A) - same peek-only contract.
+pub(crate) fn instantaneous_air_avail(world: &World, unit_id: UnitId) -> f32 {
+    let mut leftover = world.supply_leftover.clone();
+    instantaneous_air_grant(world, unit_id, &mut leftover)
 }
 
 /// The actual claim: re-derives the identical grant `instantaneous_land_
@@ -445,6 +475,15 @@ pub(crate) fn commit_instantaneous_sea_grant(world: &mut World, unit_id: UnitId)
     granted
 }
 
+/// Air-domain twin of `commit_instantaneous_land_grant`/`commit_
+/// instantaneous_sea_grant` immediately above (Stage 10A).
+pub(crate) fn commit_instantaneous_air_grant(world: &mut World, unit_id: UnitId) -> f32 {
+    let mut leftover = std::mem::take(&mut world.supply_leftover);
+    let granted = instantaneous_air_grant(world, unit_id, &mut leftover);
+    world.supply_leftover = leftover;
+    granted
+}
+
 /// One edge of `compute_transport_flow`'s internal graph: either a real
 /// `TransportLine` traversal (`line`/`dir`, `dir == true` meaning `line.from
 /// -> line.to`) - contending for that line's own `residual_line` budget,
@@ -486,6 +525,9 @@ struct TransportFlow {
     /// `[sea zone][faction]` - see `World::supply_sea`'s own doc (Defect 3
     /// fix).
     served_sea: Vec<Vec<f32>>,
+    /// `[transport node][faction]` - see `World::supply_air`'s own doc
+    /// (Stage 10A).
+    served_air: Vec<Vec<f32>>,
     /// `[forward, backward]` committed flow per `world.transport_lines`
     /// index - `forward` is `line.from -> line.to`.
     line_flow: Vec<[f32; 2]>,
@@ -702,11 +744,22 @@ impl TransportGraph {
     fn sea_demand(&self, z: usize) -> usize {
         self.n_nodes + 4 * self.n_regions + z
     }
+    /// Stage 10A: an `Airfield` node's own air-unit demand sink, keyed by
+    /// the node's own index (not by region - two `Airfield` nodes in the
+    /// same region, however unlikely, would still be two independent
+    /// candidates) - see `build_transport_graph`'s `TransportNodeKind::
+    /// Airfield` arm for the one edge that ever feeds this vertex, and
+    /// `air::air_demand` for what sizes it. Only ever nonzero for a node
+    /// whose `kind` actually is `Airfield`; every other node index's own
+    /// slot here simply has no incoming edge and is never reached.
+    fn air_demand(&self, n: usize) -> usize {
+        self.n_nodes + 4 * self.n_regions + self.n_zones + n
+    }
     fn is_inbound(&self, v: usize) -> bool {
         (self.n_nodes + 2 * self.n_regions..self.n_nodes + 3 * self.n_regions).contains(&v)
     }
     fn n_vertices(&self) -> usize {
-        self.n_nodes + 4 * self.n_regions + self.n_zones
+        self.n_nodes + 4 * self.n_regions + self.n_zones + self.n_nodes
     }
     /// `f` may traverse `line`'s edge, in the direction `dir` (`true` =
     /// `line.from -> line.to`, matching `EdgeKind::Line`), exactly when both
@@ -761,13 +814,17 @@ fn build_transport_graph(world: &World) -> TransportGraph {
     let n_regions = world.regions.len();
     let n_factions = world.factions.len();
     let n_zones = world.sea_zones.len();
-    let n_vertices = n_nodes + 4 * n_regions + n_zones;
+    // Stage 10A: the trailing `+ n_nodes` is `air_demand`'s own range - see
+    // `TransportGraph::n_vertices`'s doc for why it is sized per-node
+    // rather than per-region/per-zone like every virtual vertex above it.
+    let n_vertices = n_nodes + 4 * n_regions + n_zones + n_nodes;
 
     let inbound = |r: usize| n_nodes + 2 * n_regions + r;
     let prod = |r: usize| n_nodes + r;
     let import = |r: usize| n_nodes + n_regions + r;
     let demand = |r: usize| n_nodes + 3 * n_regions + r;
     let sea_demand = |z: usize| n_nodes + 4 * n_regions + z;
+    let air_demand = |n: usize| n_nodes + 4 * n_regions + n_zones + n;
 
     // `contested_for[r][f]` - see `TransportGraph::line_eligible_for`'s own
     // doc. Fixed order (`0..n_regions` x `0..n_factions`, both plain
@@ -854,6 +911,16 @@ fn build_transport_graph(world: &World) -> TransportGraph {
                 }
             }
             TransportNodeKind::Junction => {}
+            // Stage 10A: an `Airfield` node feeds its own air-unit demand
+            // sink directly - unlike `Port`'s `PortToSea` fan-out (a region
+            // can face several sea zones through one port), an airfield's
+            // own node index already *is* the one thing an air unit's
+            // `Station::Airfield` names, so no per-region collector or
+            // fan-out is needed here at all: this is exactly `Depot`'s own
+            // `-> demand(r)` edge, one level down from region to node.
+            TransportNodeKind::Airfield => {
+                adj[n_idx].push(Edge { to: air_demand(n_idx), kind: EdgeKind::Virtual });
+            }
         }
     }
 
@@ -891,6 +958,7 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
     let n_lines = world.transport_lines.len();
     let n_factions = world.factions.len();
     let n_zones = world.sea_zones.len();
+    let n_nodes = world.transport_nodes.len();
 
     let graph = build_transport_graph(world);
     let n_vertices = graph.n_vertices();
@@ -899,6 +967,7 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
     let inbound = |r: usize| graph.inbound(r);
     let demand = |r: usize| graph.demand(r);
     let sea_demand = |z: usize| graph.sea_demand(z);
+    let air_demand = |n: usize| graph.air_demand(n);
     let is_inbound = |v: usize| graph.is_inbound(v);
     let adj = &graph.adj;
     let line_capacity = graph.line_capacity.clone();
@@ -962,16 +1031,32 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
         .collect();
     let mut served_sea = vec![vec![0.0f32; n_factions]; n_zones];
 
+    // Stage 10A: air-unit demand, keyed by `TransportNodeId` rather than
+    // region or zone - `air::air_demand` is the air-domain twin of
+    // `region_demand`/`naval::sea_demand` above. Sized `n_nodes` (not just
+    // "however many `Airfield` nodes exist") so it indexes directly by
+    // `TransportNodeId`, the same convention `TransportGraph::air_demand`'s
+    // vertex numbering already uses; every non-`Airfield` node's row simply
+    // stays all-zero (no unit can ever be `Station::Airfield` of a node
+    // that isn't one) and is never reached by a candidate below.
+    let (demand_munitions_air, demand_arms_air) = air::air_demand(world);
+    let mut remaining_demand_air: Vec<Vec<f32>> = (0..n_nodes)
+        .map(|n| (0..n_factions).map(|f| demand_munitions_air[n][f] + demand_arms_air[n][f]).collect())
+        .collect();
+    let mut served_air = vec![vec![0.0f32; n_factions]; n_nodes];
+
     let mut line_flow_accum = vec![[0.0f32; 2]; n_lines];
 
-    // A candidate's demand sink - either a region's land `Demand(r)` or a
-    // sea zone's `SeaDemand(z)` (Defect 3 fix). `Ord` orders every `Region`
-    // before every `Sea` (declaration order) then by index - a fixed,
+    // A candidate's demand sink - a region's land `Demand(r)`, a sea zone's
+    // `SeaDemand(z)` (Defect 3 fix), or (Stage 10A) an airfield node's own
+    // `AirDemand(n)`. `Ord` orders every `Region` before every `Sea` before
+    // every `Air` (declaration order) then by index - a fixed,
     // deterministic key, not required to match any prior ordering.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Target {
         Region(usize),
         Sea(usize),
+        Air(usize),
     }
 
     struct Candidate {
@@ -1112,6 +1197,25 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                 let desired = remaining_demand_sea[z][f];
                 candidates.push(Candidate { target: Target::Sea(z), faction: f, source_vertex, lines, inbounds, desired });
             }
+            // Stage 10A: the same candidate treatment, for air-unit demand
+            // sinks reached via an `Airfield` node's own `-> AirDemand(n)`
+            // edge (`build_transport_graph`'s `TransportNodeKind::Airfield`
+            // arm) - this is what makes air-unit demand "a first-class
+            // citizen of `compute_transport_flow` itself," exactly like
+            // occupier and fleet demand already are (docs/phase10-spec.md
+            // "0. 方針"), never a second, separately-computed grant.
+            for n in 0..n_nodes {
+                if remaining_demand_air[n][f] <= SUPPLY_FLOW_EPSILON {
+                    continue;
+                }
+                let sink = air_demand(n);
+                if !visited[sink] {
+                    continue;
+                }
+                let (source_vertex, lines, inbounds) = reconstruct_path(&parent, &graph, sink);
+                let desired = remaining_demand_air[n][f];
+                candidates.push(Candidate { target: Target::Air(n), faction: f, source_vertex, lines, inbounds, desired });
+            }
         }
         if candidates.is_empty() {
             continue;
@@ -1226,6 +1330,10 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                     served_sea[z][c.faction] += granted;
                     remaining_demand_sea[z][c.faction] -= granted;
                 }
+                Target::Air(n) => {
+                    served_air[n][c.faction] += granted;
+                    remaining_demand_air[n][c.faction] -= granted;
+                }
             }
             vertex_budget[c.source_vertex] -= granted;
             for &ib in &c.inbounds {
@@ -1254,7 +1362,7 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
     // instantaneous grant must be sized against.
     let leftover = SupplyLeftover { vertex_budget, residual_line, residual_line_faction };
 
-    TransportFlow { served, served_sea, line_flow: line_flow_accum, line_capacity, leftover }
+    TransportFlow { served, served_sea, served_air, line_flow: line_flow_accum, line_capacity, leftover }
 }
 
 /// Rations each faction's stockpiled Munitions across its units, region by
@@ -1376,6 +1484,34 @@ pub fn distribute_supply(world: &mut World) {
         }
     }
 
+    // Stage 10A: the air-domain counterpart of the sea-zone block above,
+    // split by the same priority weights via the same shared helper -
+    // `air::air_demand_and_avail` is `naval::fleet_demand_and_avail`'s
+    // twin, keyed by `TransportNodeId` rather than `SeaZoneId`.
+    let (demand_munitions_air, demand_arms_air, avail_air) = air::air_demand_and_avail(world);
+    let n_nodes = world.transport_nodes.len();
+    let mut served_munitions_air = vec![vec![0.0f32; n_factions]; n_nodes];
+    let mut served_arms_air = vec![vec![0.0f32; n_factions]; n_nodes];
+    for n in 0..n_nodes {
+        for f in 0..n_factions {
+            if avail_air[n][f] <= 0.0 {
+                continue;
+            }
+            let faction = &world.factions[f];
+            let w_munitions = faction.logistics_priority[Good::Munitions.index()];
+            let w_arms = faction.logistics_priority[Good::Arms.index()];
+            let (m, a) = split_munitions_arms(
+                avail_air[n][f],
+                w_munitions,
+                w_arms,
+                demand_munitions_air[n][f],
+                demand_arms_air[n][f],
+            );
+            served_munitions_air[n][f] = m;
+            served_arms_air[n][f] = a;
+        }
+    }
+
     let mut total_served = vec![0.0f32; n_factions];
     let mut total_demand = vec![0.0f32; n_factions];
     for r in 0..n_regions {
@@ -1388,6 +1524,20 @@ pub fn distribute_supply(world: &mut World) {
         for f in 0..n_factions {
             total_served[f] += served_munitions_zone[z][f];
             total_demand[f] += demand_munitions_zone[z][f];
+        }
+    }
+    // Stage 10A: air units draw on the exact same national `Faction::
+    // stock[Munitions]` pool land and sea already share - folded into the
+    // same `total_served`/`total_demand` sums *before* `scale` is computed
+    // below, never given an unconditional first (or last) claim on the
+    // shared pool (`distribute_supply`'s own doc, "Stage 2D", already
+    // explains why sea joins this same pass instead of drawing on whatever
+    // land left in stock; a third domain changes nothing about that
+    // reasoning).
+    for n in 0..n_nodes {
+        for f in 0..n_factions {
+            total_served[f] += served_munitions_air[n][f];
+            total_demand[f] += demand_munitions_air[n][f];
         }
     }
 
@@ -1413,7 +1563,7 @@ pub fn distribute_supply(world: &mut World) {
             continue;
         }
         let Some(region) = unit.station.region() else {
-            continue; // fleets are finished off by naval::apply_fleet_supply below
+            continue; // fleets/air units are finished off by naval::apply_fleet_supply/air::apply_air_supply below
         };
         let r = region.index();
         let f = unit.owner.index();
@@ -1454,6 +1604,15 @@ pub fn distribute_supply(world: &mut World) {
         &demand_munitions_zone,
         &served_arms_zone,
         &demand_arms_zone,
+        &scale,
+    );
+
+    air::apply_air_supply(
+        world,
+        &served_munitions_air,
+        &demand_munitions_air,
+        &served_arms_air,
+        &demand_arms_air,
         &scale,
     );
 }

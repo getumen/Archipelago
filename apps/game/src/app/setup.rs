@@ -473,7 +473,7 @@ pub(super) fn setup(
     // `Station`. `visuals::sync_unit_visuals` keeps these (and any later-
     // recruited unit's own marker) up to date every frame after this.
     for unit in &world.units {
-        let [x, y] = station_position(unit.station, &layout.0, &sea_centers.0);
+        let [x, y] = station_position(world, unit.station, &layout.0, &sea_centers.0);
         commands.spawn((
             Mesh2d(meshes.add(RegularPolygon::new(6.0, 3))),
             MeshMaterial2d(materials.add(ColorMaterial::from_color(faction_color(unit.owner.index())))),
@@ -707,10 +707,16 @@ fn spawn_right_column(commands: &mut Commands, font: &Handle<Font>, world: &SimW
         });
 }
 
-pub(super) fn station_position(station: Station, region_pos: &[[f32; 2]], sea_pos: &[[f32; 2]]) -> [f32; 2] {
+/// Stage 10A: `world` is only ever consulted for a `Station::Airfield` unit
+/// (to find its node's own region and reuse that region's marker position)
+/// - land/sea stations still resolve straight from `region_pos`/`sea_pos`
+/// exactly as before, so this stays a cheap lookup for the two domains
+/// every existing scenario actually deploys.
+pub(super) fn station_position(world: &SimWorld, station: Station, region_pos: &[[f32; 2]], sea_pos: &[[f32; 2]]) -> [f32; 2] {
     match station {
         Station::Region(r) => region_pos[r.index()],
         Station::Sea(z) => sea_pos[z.index()],
+        Station::Airfield(n) => region_pos[world.transport_node(n).region.index()],
     }
 }
 
