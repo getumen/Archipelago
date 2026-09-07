@@ -720,6 +720,34 @@ struct TransportGraph {
     n_nodes: usize,
     n_regions: usize,
     n_zones: usize,
+    /// Stage 10E perf fix: `air_demand`'s own vertex range is sized to the
+    /// number of *actual* `Airfield` nodes, not `n_nodes` - see
+    /// `node_air_slot` immediately below for how a node index maps into it.
+    /// Measured cause of the `--bench` japan_hex logistics regression
+    /// (2.8 -> 3.56 ms/tick, Stage 10D): `n_vertices` used to carry a full
+    /// `n_nodes`-sized block of air-demand vertices even though only the
+    /// (typically much smaller) subset that are actually `Airfield`-kind
+    /// ever has an inbound edge - the rest sat dead, reachable by nothing,
+    /// yet still paid for on every `visited`/`parent` reset
+    /// (`compute_transport_flow`'s round loop resets both, once per
+    /// (round, faction) pair - `SUPPLY_FLOW_ROUNDS * n_factions` times a
+    /// tick). On `scenarios/japan_hex.json` this was 468 dead vertices out
+    /// of 532 total nodes (only 64 are airfields), inflating `n_vertices`
+    /// by roughly a third for zero reachability benefit. Compacting the
+    /// range is purely an internal vertex-numbering change - every existing
+    /// vertex keeps its old meaning and every existing edge keeps its old
+    /// endpoint, so this changes no candidate, no flow amount, and no
+    /// `Ord`/iteration order anywhere else in this file; verified
+    /// behaviour-identical against the full mvp/japan_hex/japan47
+    /// scenario-acceptance suites (see the Stage 10E report for the
+    /// battle/capture/day counts, unchanged before and after).
+    n_air_slots: usize,
+    /// `node_air_slot[n]` is `Some(compact index into the air_demand
+    /// range)` when node `n` is an `Airfield`, `None` otherwise - the
+    /// lookup `air_demand` (below) and `build_transport_graph`'s own
+    /// `Airfield` arm both go through, so the two can never number a node
+    /// differently.
+    node_air_slot: Vec<Option<usize>>,
     adj: Vec<Vec<Edge>>,
     /// Physical `capacity * condition * health` alone (`TransportLine::
     /// effective_capacity`) - Defect 2 fix: no sea-control throttle baked in
@@ -764,17 +792,22 @@ impl TransportGraph {
     /// same region, however unlikely, would still be two independent
     /// candidates) - see `build_transport_graph`'s `TransportNodeKind::
     /// Airfield` arm for the one edge that ever feeds this vertex, and
-    /// `air::air_demand` for what sizes it. Only ever nonzero for a node
-    /// whose `kind` actually is `Airfield`; every other node index's own
-    /// slot here simply has no incoming edge and is never reached.
+    /// `air::air_demand` for what sizes it. Only ever called for a node
+    /// whose `kind` actually is `Airfield` (`node_air_slot`'s own doc) -
+    /// every caller already only reaches this after `air::air_demand`'s own
+    /// per-node demand row confirmed nonzero, which itself can only ever be
+    /// true for an `Airfield` node.
     fn air_demand(&self, n: usize) -> usize {
-        self.n_nodes + 4 * self.n_regions + self.n_zones + n
+        self.n_nodes
+            + 4 * self.n_regions
+            + self.n_zones
+            + self.node_air_slot[n].expect("air_demand is only ever called for an Airfield node")
     }
     fn is_inbound(&self, v: usize) -> bool {
         (self.n_nodes + 2 * self.n_regions..self.n_nodes + 3 * self.n_regions).contains(&v)
     }
     fn n_vertices(&self) -> usize {
-        self.n_nodes + 4 * self.n_regions + self.n_zones + self.n_nodes
+        self.n_nodes + 4 * self.n_regions + self.n_zones + self.n_air_slots
     }
     /// `f` may traverse `line`'s edge, in the direction `dir` (`true` =
     /// `line.from -> line.to`, matching `EdgeKind::Line`), exactly when both
@@ -862,17 +895,29 @@ fn build_transport_graph(world: &World) -> TransportGraph {
     let n_regions = world.regions.len();
     let n_factions = world.factions.len();
     let n_zones = world.sea_zones.len();
-    // Stage 10A: the trailing `+ n_nodes` is `air_demand`'s own range - see
-    // `TransportGraph::n_vertices`'s doc for why it is sized per-node
-    // rather than per-region/per-zone like every virtual vertex above it.
-    let n_vertices = n_nodes + 4 * n_regions + n_zones + n_nodes;
+
+    // Stage 10E perf fix (`TransportGraph::n_air_slots`'s own doc): the
+    // trailing block is `air_demand`'s own range, sized to the number of
+    // actual `Airfield` nodes rather than `n_nodes` - `node_air_slot[n]` is
+    // that node's compact index into it when `n` is one, `None` otherwise.
+    let mut node_air_slot: Vec<Option<usize>> = vec![None; n_nodes];
+    let mut n_air_slots = 0usize;
+    for (n_idx, node) in world.transport_nodes.iter().enumerate() {
+        if node.kind == TransportNodeKind::Airfield {
+            node_air_slot[n_idx] = Some(n_air_slots);
+            n_air_slots += 1;
+        }
+    }
+    let n_vertices = n_nodes + 4 * n_regions + n_zones + n_air_slots;
 
     let inbound = |r: usize| n_nodes + 2 * n_regions + r;
     let prod = |r: usize| n_nodes + r;
     let import = |r: usize| n_nodes + n_regions + r;
     let demand = |r: usize| n_nodes + 3 * n_regions + r;
     let sea_demand = |z: usize| n_nodes + 4 * n_regions + z;
-    let air_demand = |n: usize| n_nodes + 4 * n_regions + n_zones + n;
+    let air_demand = |n: usize| {
+        n_nodes + 4 * n_regions + n_zones + node_air_slot[n].expect("air_demand is only ever called for an Airfield node")
+    };
 
     // `contested_for[r][f]` - see `TransportGraph::line_eligible_for`'s own
     // doc. Fixed order (`0..n_regions` x `0..n_factions`, both plain
@@ -984,6 +1029,8 @@ fn build_transport_graph(world: &World) -> TransportGraph {
         n_nodes,
         n_regions,
         n_zones,
+        n_air_slots,
+        node_air_slot,
         adj,
         line_capacity,
         line_regions,
