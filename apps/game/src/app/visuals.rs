@@ -76,6 +76,29 @@ pub(super) fn political_fill_color(region: &Region) -> Color {
     occupation_color.mix(&DEVASTATION_TINT, devastation_mix.get())
 }
 
+/// `MapMode::Air`'s own fill (docs/phase10-spec.md "Stage 10D": "地図で
+/// 制空権と飛行場が見える") - `sync_sea_zone_visuals`' exact "whichever
+/// faction holds the highest share, tinted toward `NEUTRAL` by how
+/// contested it is" pattern, one domain further: `Region::air_superiority`
+/// is already a `power[f] / sum(power[*])` share the same shape
+/// `SeaZone::control` is (`air::tick_air_superiority`'s own doc), so this
+/// reuses the reading a player has already learned from the sea-zone tint
+/// rather than inventing a second color language for "whose". Plain
+/// `NEUTRAL` when nobody's air power reaches this region at all.
+pub(super) fn air_superiority_fill(region: &Region) -> Color {
+    let mut best: Option<(usize, f32)> = None;
+    for (f, share) in region.air_superiority.iter().enumerate() {
+        let c = share.get();
+        if best.is_none_or(|(_, best_c)| c > best_c) {
+            best = Some((f, c));
+        }
+    }
+    match best {
+        Some((f, c)) if c > 0.0 => faction_color(f).mix(&NEUTRAL, 1.0 - c),
+        _ => NEUTRAL,
+    }
+}
+
 /// Paints every region's fill according to the active `MapMode`
 /// (`map_mode`'s own module doc has the full list and rationale) - the one
 /// system that actually shows the player whichever dimension of the
@@ -104,6 +127,7 @@ pub(super) fn sync_region_visuals(
             MapMode::Population => map_mode::population_fill(region.population, population_cuts),
             MapMode::Industry => map_mode::industry_fill(region, active_good.0, industry_cuts),
             MapMode::Unrest => map_mode::unrest_fill(region),
+            MapMode::Air => air_superiority_fill(region),
         };
         if let Some(mut mat) = materials.get_mut(&material_handle.0)
             && mat.color != color
@@ -357,6 +381,7 @@ mod tests {
                 MapMode::Population => map_mode::population_fill(region.population, population_cuts),
                 MapMode::Industry => map_mode::industry_fill(&region, active_good, industry_cuts),
                 MapMode::Unrest => map_mode::unrest_fill(&region),
+                MapMode::Air => air_superiority_fill(&region),
             };
             assert_eq!(got, expected, "mode {mode:?} did not paint the color its own function computes");
         }
@@ -371,6 +396,39 @@ mod tests {
         run(&mut world, sync_region_visuals);
         let terrain = material_color(&world, &handle);
         assert_ne!(political, terrain, "Political and Terrain must render visibly different colors for the same region");
+    }
+
+    /// `air_superiority_fill` must read `Region::air_superiority` the same
+    /// dominant-share-tinted-toward-`NEUTRAL` shape `sync_sea_zone_visuals`
+    /// already uses for sea control - a region no faction's air power
+    /// reaches must render as plain `NEUTRAL`, and one faction fully
+    /// dominating must render as that faction's own full-strength
+    /// `faction_color`. Checked this fails when broken: temporarily
+    /// hardcoded `air_superiority_fill` to always return `NEUTRAL` - the
+    /// full-dominance assertion below then fails.
+    #[test]
+    fn air_superiority_fill_tints_toward_the_dominant_factions_own_color() {
+        let sim_world = scenario::build_world();
+        let mut region = sim_world.regions[0].clone();
+
+        region.air_superiority = vec![archipelago_sim::world::AirSuperiority::NEUTRAL; sim_world.factions.len()];
+        assert_eq!(
+            air_superiority_fill(&region),
+            NEUTRAL,
+            "no faction's air power reaching this region must render as plain NEUTRAL"
+        );
+
+        region.air_superiority[1] = archipelago_sim::world::AirSuperiority::new(1.0).unwrap();
+        assert_eq!(
+            air_superiority_fill(&region),
+            faction_color(1),
+            "full one-faction air dominance must render as that faction's own full-strength color"
+        );
+
+        region.air_superiority[1] = archipelago_sim::world::AirSuperiority::new(0.5).unwrap();
+        let partial = air_superiority_fill(&region);
+        assert_ne!(partial, NEUTRAL, "a contested share must not read as fully neutral");
+        assert_ne!(partial, faction_color(1), "a contested share must read differently from full dominance");
     }
 
     /// `OwnerBorderMarker` must track the region's current owner regardless

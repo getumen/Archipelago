@@ -15,9 +15,9 @@ use super::map_mode::{ModeLegendHeader, ModeLegendRow, MODE_LEGEND_ROWS};
 use super::overlay;
 use super::palette::faction_color;
 use super::{
-    EventLogText, FactionPanelText, InspectText, MainCamera, OwnerBorderMarker, PlayerPanelText,
-    RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii, RightColumnRoot, SeaZoneCenters,
-    SeaZoneMarker, SimRes, TopBarText, UnitMarker,
+    AirfieldMarker, EventLogText, FactionPanelText, InspectText, MainCamera, OwnerBorderMarker,
+    PlayerPanelText, RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii, RightColumnRoot,
+    SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -235,6 +235,19 @@ const SUPPLY_RING_GAP: f32 = 2.0;
 /// owner-color fill or its supply ring.
 const CONSTRUCTION_MARKER_RADIUS: f32 = 5.0;
 
+/// Stage 10D's airfield-status marker (`overlay::sync_airfield_markers`) -
+/// same size as `CONSTRUCTION_MARKER_RADIUS` (the same "small always-on
+/// status dot" family, `overlay`'s own module doc), spawned at the opposite
+/// corner from both `CONSTRUCTION_MARKER_RADIUS`'s own offset (`+radius*0.7,
+/// +radius*0.7`) and `overlay::BLOCKADE_MARKER_OFFSET`'s (`-radius*0.7,
+/// -radius*0.7`) so a region that happens to be under construction, has a
+/// blockaded port, *and* has an airfield can still show all three markers
+/// without any two of them overlapping.
+const AIRFIELD_MARKER_RADIUS: f32 = 5.0;
+/// Airfield marker's own layer - alongside `Z_CONSTRUCTION`, since the two
+/// never compete for the same screen position (opposite corners).
+const Z_AIRFIELD: f32 = 0.3;
+
 pub(super) fn region_radius(population: f32) -> f32 {
     (population.max(0.0).sqrt() * POP_SCALE).clamp(MIN_REGION_RADIUS, MAX_REGION_RADIUS)
 }
@@ -446,6 +459,18 @@ pub(super) fn setup(
             Transform::from_xyz(x + radius * 0.7, y + radius * 0.7, Z_CONSTRUCTION),
             Visibility::Hidden,
             super::ConstructionMarker(region.id),
+        ));
+
+        // Stage 10D's airfield-status marker (`AIRFIELD_MARKER_RADIUS`'s own
+        // doc): pre-spawned hidden for every region, shown and recolored
+        // only while `MapMode::Air` is active and this region actually has
+        // an airfield node - `overlay::sync_airfield_markers`.
+        commands.spawn((
+            Mesh2d(meshes.add(Circle::new(AIRFIELD_MARKER_RADIUS))),
+            MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::NONE))),
+            Transform::from_xyz(x - radius * 0.7, y + radius * 0.7, Z_AIRFIELD),
+            Visibility::Hidden,
+            AirfieldMarker(region.id),
         ));
 
         let [dx, dy] = region_label_dirs[region.id.index()];

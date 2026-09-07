@@ -45,6 +45,21 @@
 //!   mechanism rather than leaving two unrelated systems"). Its own fill is
 //!   the same as `Political`'s (the ring/link/chokepoint layer carries the
 //!   supply signal; the fill still needs to say *whose* network this is).
+//! - `Air` (Stage 10D, docs/phase10-spec.md "Stage 10D": "地図で制空権と
+//!   飛行場が見える"): `Region::air_superiority` - extends this same
+//!   mechanism rather than building a parallel one, per that stage's own
+//!   instruction. The fill reuses `Political`'s own dominant-faction-tint
+//!   shape (`visuals::air_superiority_fill`, `visuals::sync_sea_zone_visuals`'s
+//!   exact pattern one domain further: whichever faction's share is highest
+//!   tints the region by that share, neutral gray where nobody's air power
+//!   reaches at all) rather than inventing a second color language for
+//!   "whose" - air superiority is signed toward a faction the same way
+//!   ownership already is, so it reads with the palette a player has already
+//!   learned from every other mode instead of a new one only this mode uses.
+//!   `overlay::sync_airfield_markers` additionally shows a small marker at
+//!   every region with an airfield node while this mode is active, colored by
+//!   whether it's currently operational or struck (`transport::TransportNode::
+//!   operational`) - the airfield-visibility half of this stage's own ask.
 //!
 //! Sea control (`visuals::sync_sea_zone_visuals`) and unit markers stay
 //! exactly as they always have in every mode - a map mode recolors *region*
@@ -112,13 +127,22 @@ pub enum MapMode {
     Industry,
     Unrest,
     Supply,
+    Air,
 }
 
 /// Every `MapMode`, in cycling order (`MapMode::next`) - `Political` first
-/// since it's the long-standing default, `Supply` last since it folds in
-/// what used to be a separate, independently-toggled layer.
-pub(super) const ALL_MODES: [MapMode; 6] =
-    [MapMode::Political, MapMode::Terrain, MapMode::Population, MapMode::Industry, MapMode::Unrest, MapMode::Supply];
+/// since it's the long-standing default, `Air` last (Stage 10D) since it's
+/// the newest addition, right after `Supply` (which itself folds in what
+/// used to be a separate, independently-toggled layer).
+pub(super) const ALL_MODES: [MapMode; 7] = [
+    MapMode::Political,
+    MapMode::Terrain,
+    MapMode::Population,
+    MapMode::Industry,
+    MapMode::Unrest,
+    MapMode::Supply,
+    MapMode::Air,
+];
 
 impl MapMode {
     /// Every `MapMode::key()`, in the same order as `ALL_MODES` - kept in
@@ -128,7 +152,8 @@ impl MapMode {
     /// which pulls in more than this one small list is worth. `main.rs`'s
     /// `--debug-map-mode` uses this to list every valid key in its own
     /// error message on an unrecognized one.
-    pub const ALL_KEYS: [&'static str; 6] = ["political", "terrain", "population", "industry", "unrest", "supply"];
+    pub const ALL_KEYS: [&'static str; 7] =
+        ["political", "terrain", "population", "industry", "unrest", "supply", "air"];
 
     /// Advances to the next mode, wrapping past `Supply` back to `Political`
     /// - `input::keyboard_input`'s `M` binding and `panels::MapModeButton`'s
@@ -151,6 +176,7 @@ impl MapMode {
             MapMode::Industry => "産業",
             MapMode::Unrest => "不穏・荒廃",
             MapMode::Supply => "補給網",
+            MapMode::Air => "航空",
         }
     }
 
@@ -165,6 +191,7 @@ impl MapMode {
             MapMode::Industry => "industry",
             MapMode::Unrest => "unrest",
             MapMode::Supply => "supply",
+            MapMode::Air => "air",
         }
     }
 
@@ -433,6 +460,7 @@ pub(super) fn legend_header(mode: MapMode, active_good: Good) -> String {
         MapMode::Industry => format!("{}：明るさ=実効生産力", active_good.label()),
         MapMode::Unrest => "不穏度と戦災、悪い方を表示".to_string(),
         MapMode::Supply => "輸送網：太さ/色=流量、赤=飽和、暗赤=遮断".to_string(),
+        MapMode::Air => "制空権：政治と同じ配色".to_string(),
     }
 }
 
@@ -498,6 +526,16 @@ pub(super) fn legend_entries(mode: MapMode, world: &SimWorld, active_good: Good)
             (super::overlay::RING_STARVED, "ring: starved".to_string(), false),
             (super::overlay::RING_FULL, "ring: full".to_string(), false),
             (super::overlay::RING_CONTESTED, "ring: contested".to_string(), false),
+        ],
+        // Stage 10D: the fill itself reuses `Political`'s own faction
+        // palette (this mode's own `legend_header` says so directly), so
+        // this legend covers only what's genuinely new here - the neutral
+        // "nobody's sky" baseline, and the two airfield-marker states
+        // `overlay::sync_airfield_markers` draws.
+        MapMode::Air => vec![
+            (super::palette::NEUTRAL, "制空権なし（中立・優勢勢力なし）".to_string(), false),
+            (super::overlay::AIRFIELD_MARKER_OPERATIONAL, "飛行場：稼働中".to_string(), false),
+            (super::overlay::AIRFIELD_MARKER_STRUCK, "飛行場：損傷（非稼働）".to_string(), false),
         ],
     }
 }

@@ -10,14 +10,21 @@ use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::logistics;
 use crate::naval;
 use crate::transport::TransportNodeKind;
-use crate::world::{Station, World};
+use crate::world::{Domain, Station, World};
 
 /// Per-region field count in `Observation::encode()`: `[owned, population,
 /// infrastructure, supply, unrest, own_power, enemy_power]` (7 fixed
 /// fields) followed by `capacity[GOOD_COUNT]`, then `[devastation,
 /// construction_progress]` (Stage 2B, 2 fixed fields), then `[import_flow,
-/// node_throughput]` (Stage 2C, 2 fixed fields).
-pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2 + 2;
+/// node_throughput]` (Stage 2C, 2 fixed fields), then `[own_air_superiority,
+/// enemy_air_superiority_max]` (Stage 10D, docs/phase10-spec.md "Stage 10D":
+/// "観測に...制空権が出る", 2 fixed fields) - `Region::air_superiority`'s own
+/// share for this observing faction, then the highest share any *other*
+/// faction holds (`Region::enemy_air_superiority_max`, the region-domain
+/// mirror of `SeaZone::enemy_control_max` just below - same "any other
+/// faction, war or peace" semantics, not `World::hostile_air_superiority_max`'s
+/// war-gated one, which is a different, throttle-specific question).
+pub const REGION_FIELD_COUNT: usize = 7 + GOOD_COUNT + 2 + 2 + 2;
 
 /// Per-sea-zone field count in `Observation::encode()` (Stage 2D):
 /// `[own_control, enemy_control_max, own_power, enemy_power]`.
@@ -26,8 +33,16 @@ pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 /// Faction-scalar field count in `Observation::encode()`: `manpower`,
 /// `stock[GOOD_COUNT]`, `war_support`, `stability`,
 /// `group_support[GROUP_COUNT]` (Stage 3A), `unit_count`,
-/// `[national_focus_code, focus_transition_days]` (Stage 3C).
-pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2;
+/// `[national_focus_code, focus_transition_days]` (Stage 3C), then
+/// `air_unit_count` (Stage 10D, 1 trailing field) - the `Domain::Air` slice
+/// of `unit_count` (which already silently included air units once they
+/// existed at all - `Observation::own_units()` filters only on
+/// owner/`alive`, never on domain), broken out on its own since air power
+/// isn't a raw regional/zone power addend the way land/sea combat power is
+/// (`Observation::power_tables`'s own doc) - this is the one faction-level
+/// place an agent can read "how many squadrons do I have" without deriving
+/// it from the per-node transport-network segment below.
+pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2 + 1;
 
 /// Stage 3B per-relation field count in `Observation::encode()`, one block
 /// per *other* faction (own row zeroed - see `encode`'s doc): `[stance_code,
@@ -57,15 +72,37 @@ pub const TRANSPORT_LINE_FIELD_COUNT: usize = 4;
 
 /// Stage 9D (docs/phase9-spec.md "4. 観測ベクトル": "ノードについても封鎖・
 /// 所属を出す"): per-node field count, in `world.transport_nodes` order
-/// (`ids::TransportNodeId`) - `[owned_by_self, blockaded]`. `owned_by_self`
-/// mirrors the per-region "owned" flag's own convention (`encode`'s per-
-/// region loop); `blockaded` is `naval::is_port_blockaded` for the node's
-/// own region - `false` for every non-`Port` node and for an unblockaded
-/// port, never a distinct "not applicable" encoding, since a consumer that
-/// doesn't already know this node's `TransportNodeKind` (not itself part of
-/// this numeric vector - see this field's own doc for why kind isn't
-/// encoded per-line either) gains nothing from a third state here.
-pub const TRANSPORT_NODE_FIELD_COUNT: usize = 2;
+/// (`ids::TransportNodeId`) - `[owned_by_self, blockaded, condition, kind]`.
+/// `owned_by_self` mirrors the per-region "owned" flag's own convention
+/// (`encode`'s per-region loop); `blockaded` is `naval::is_port_blockaded`
+/// for the node's own region - `false` for every non-`Port` node and for an
+/// unblockaded port.
+///
+/// `condition` (Stage 10D, docs/phase10-spec.md "Stage 10D") is
+/// `TransportNode::condition`'s own raw `0.0..=1.0` health - carried over
+/// from a P1 the same Stage 10D pass found while adding air observability:
+/// before this, an external agent could issue `Action::StrikeNode` but had
+/// no way to see whether its target was already wrecked (or had since
+/// repaired), and `GET /state` had the identical gap (`state::regions_value`'s
+/// own fix). Raw, not the thresholded `operational` bool
+/// (`balance::NODE_OPERATIONAL_THRESHOLD`) - the exact same choice
+/// `TransportLine::condition`'s own `condition` field already made for lines,
+/// so a consumer that wants "is it currently usable" derives it the same way
+/// either place, and one that wants the continuous "how close to
+/// repaired/wrecked" signal isn't reduced to a single bit.
+///
+/// `kind` (Stage 10D, `codex review` P1) is `TransportNodeKind::index()` as
+/// an `f32` - added after an external review of this same stage found
+/// `blockaded`'s original doc reasoning ("a consumer that doesn't already
+/// know this node's kind gains nothing from a third state") had quietly
+/// generalized into "kind is never encoded here at all", which broke this
+/// stage's own "airfields must be observable" requirement: without it, a
+/// flat-vector consumer had `owned_by_self`/`blockaded`/`condition` for
+/// every node but no way to tell *which* node is an airfield (or a port) at
+/// all, short of parsing the scenario JSON out of band - exactly what this
+/// vector exists to avoid. See `TransportNodeKind::index()`'s own doc for why
+/// this is a stable numeric code and not a fifth boolean.
+pub const TRANSPORT_NODE_FIELD_COUNT: usize = 2 + 1 + 1;
 
 /// `Observation::encode()`'s output length for a scenario with the given
 /// region/sea-zone/faction/transport-line/transport-node counts - the
@@ -103,7 +140,9 @@ pub const fn encoding_len(
 /// "観測長は伸びる...保存済みの方策は無効になる。これは受け入れる") - a
 /// policy trained against the pre-Stage-9D length is no longer valid; `GET
 /// /schema`'s `observation.length` is what a live client should read
-/// instead of assuming this constant never moves.
+/// instead of assuming this constant never moves. Stage 10D grows it again
+/// the same way (`REGION_FIELD_COUNT`/`FACTION_FIELD_COUNT`/
+/// `TRANSPORT_NODE_FIELD_COUNT`'s own docs) - accepted for the same reason.
 pub const ENCODING_LEN: usize = encoding_len(
     crate::scenario::REGION_COUNT,
     crate::scenario::SEA_ZONE_COUNT,
@@ -341,6 +380,17 @@ impl<'a> Observation<'a> {
             out.push(progress);
             out.push(region.import_flow);
             out.push(region.node_throughput());
+            // Stage 10D (docs/phase10-spec.md "Stage 10D"): this observing
+            // faction's own share of `region.air_superiority`, then the
+            // highest share any other faction holds - `own_control`/
+            // `enemy_control_max`'s exact pattern just below, one domain
+            // earlier. `.get(...).unwrap_or(0.0)` mirrors `own_control`'s own
+            // defensive read rather than indexing directly, for the same
+            // reason: nothing here should panic if a scenario's faction count
+            // and a region's `air_superiority` length were ever to disagree.
+            let own_air = region.air_superiority.get(self.faction.index()).map(|s| s.get()).unwrap_or(0.0);
+            out.push(own_air);
+            out.push(region.enemy_air_superiority_max(self.faction));
         }
         for zone in &self.world.sea_zones {
             let own_control = zone.control.get(self.faction.index()).copied().unwrap_or(0.0);
@@ -360,9 +410,18 @@ impl<'a> Observation<'a> {
         for g in 0..GROUP_COUNT {
             out.push(faction.group_support[g]);
         }
-        out.push(self.own_units().len() as f32);
+        let own_units = self.own_units();
+        out.push(own_units.len() as f32);
         out.push(faction.national_focus.index() as f32);
         out.push(faction.focus_transition_days as f32);
+        // Stage 10D: `unit_count` above already silently counts air units
+        // (`own_units()` filters only on owner/`alive`), but an agent has no
+        // way to read the `Domain::Air` slice of it on its own - see
+        // `FACTION_FIELD_COUNT`'s own doc for why this is a new trailing
+        // field rather than a change to `unit_count`'s existing meaning.
+        let air_unit_count =
+            own_units.iter().filter(|&&u| self.world.unit(u).station.domain() == Domain::Air).count();
+        out.push(air_unit_count as f32);
 
         // Stage 3B (docs/phase3-spec.md "Stage 3B"): one `DIPLOMACY_FIELD_
         // COUNT`-sized block per faction in ascending `FactionId` order
@@ -432,6 +491,18 @@ impl<'a> Observation<'a> {
             let blockaded =
                 node.kind == TransportNodeKind::Port && naval::is_port_blockaded(self.world, node.region);
             out.push(if blockaded { 1.0 } else { 0.0 });
+            // Stage 10D (`TRANSPORT_NODE_FIELD_COUNT`'s own doc): the node's
+            // raw structural health, so an agent deciding whether to spend an
+            // `Action::StrikeNode` (or expect a `Domain::Air`/`Domain::Sea`
+            // recruit to succeed there) can see whether the target is
+            // already wrecked or has since repaired, instead of only its
+            // static owned/blockaded facts.
+            out.push(node.condition.get());
+            // Stage 10D (`codex review` P1, `TRANSPORT_NODE_FIELD_COUNT`'s
+            // own doc): which kind of node this is - the field whose absence
+            // left "airfields must be observable" unmet even after the three
+            // fields above landed.
+            out.push(node.kind.index() as f32);
         }
 
         debug_assert_eq!(out.len(), expected_len);
@@ -589,5 +660,167 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Stage 10D (docs/phase10-spec.md "Stage 10D": "観測に...制空権が出
+    /// る"): `encode()`'s per-region block must carry this observing
+    /// faction's own `air_superiority` share and the highest share any other
+    /// faction holds, at the exact offset `REGION_FIELD_COUNT`'s own doc
+    /// says they live. Checked this fails when broken: temporarily deleted
+    /// the two new `out.push` calls in `encode()`'s region loop (leaving
+    /// `REGION_FIELD_COUNT` at its old, un-bumped value) - this test then
+    /// panics on `debug_assert_eq!(out.len(), expected_len)` inside `encode`
+    /// itself before its own assertions even run; leaving `REGION_FIELD_COUNT`
+    /// bumped but dropping only the `out.push` calls instead makes every
+    /// later field silently read from the wrong offset, which this test's own
+    /// direct-offset assertions catch immediately. Reverted before committing.
+    #[test]
+    fn region_air_superiority_is_observable() {
+        let mut world = crate::scenario::build_world();
+        assert!(world.factions.len() >= 2, "this test wants a second faction to hold the 'enemy' share");
+        let region = RegionId(0);
+        world.region_mut(region).air_superiority[0] = crate::world::AirSuperiority::new(0.75).unwrap();
+        world.region_mut(region).air_superiority[1] = crate::world::AirSuperiority::new(0.25).unwrap();
+
+        let obs = Observation { faction: FactionId(0), world: &world };
+        let encoded = obs.encode();
+        assert_eq!(
+            encoded.len(),
+            encoding_len(
+                world.regions.len(),
+                world.sea_zones.len(),
+                world.factions.len(),
+                world.transport_lines.len(),
+                world.transport_nodes.len(),
+            ),
+            "encode()'s real length must still follow encoding_len() after the new fields"
+        );
+
+        let own_air_offset = region.index() * REGION_FIELD_COUNT + 7 + GOOD_COUNT + 4;
+        let enemy_air_offset = own_air_offset + 1;
+        assert_eq!(encoded[own_air_offset], 0.75, "this faction's own air-superiority share must be observable");
+        assert_eq!(
+            encoded[enemy_air_offset], 0.25,
+            "the highest other-faction air-superiority share must be observable"
+        );
+    }
+
+    /// Stage 10D carry-over P1: `TransportNode::condition` used to be
+    /// observable nowhere at all - an external agent could issue
+    /// `Action::StrikeNode` but never see whether its target was already
+    /// wrecked or had since repaired. Checked this fails when broken:
+    /// temporarily removed the trailing `out.push(node.condition.get())` from
+    /// `encode()`'s node loop (leaving `TRANSPORT_NODE_FIELD_COUNT`
+    /// un-bumped) - `debug_assert_eq!` inside `encode` panics immediately the
+    /// same way `region_air_superiority_is_observable` documents above.
+    /// Reverted before committing.
+    #[test]
+    fn transport_node_condition_is_observable() {
+        let mut world = crate::scenario::build_world();
+        assert!(!world.transport_nodes.is_empty());
+        world.transport_nodes[0].condition = crate::transport::Condition::new(0.42).unwrap();
+
+        let obs = Observation { faction: FactionId(0), world: &world };
+        let encoded = obs.encode();
+
+        let base = world.regions.len() * REGION_FIELD_COUNT
+            + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+            + FACTION_FIELD_COUNT
+            + world.factions.len() * DIPLOMACY_FIELD_COUNT
+            + world.transport_lines.len() * TRANSPORT_LINE_FIELD_COUNT;
+        let condition_offset = base + 2; // node 0's own [owned_by_self, blockaded, condition]
+        assert_eq!(
+            encoded[condition_offset], 0.42,
+            "a struck/repaired node's own condition must be observable, not just its owned/blockaded flags"
+        );
+    }
+
+    /// Stage 10D (`codex review` P1): a flat-vector consumer must be able to
+    /// tell an `Airfield` node apart from a `Depot`/`Port`/`Junction` -
+    /// without this, "airfields must be observable" (docs/phase10-spec.md
+    /// "Stage 10D") was unmet even after `owned_by_self`/`blockaded`/
+    /// `condition` landed, since none of those three say *what kind* of node
+    /// this is. Checked this fails when broken: temporarily removed the
+    /// trailing `out.push(node.kind.index() as f32)` from `encode()`'s node
+    /// loop (leaving `TRANSPORT_NODE_FIELD_COUNT` un-bumped) -
+    /// `debug_assert_eq!` inside `encode` panics immediately, the same way
+    /// `transport_node_condition_is_observable` above documents. Reverted
+    /// before committing.
+    #[test]
+    fn transport_node_kind_is_observable() {
+        let world = crate::scenario::build_world();
+        let (airfield_idx, airfield_node) = world
+            .transport_nodes
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.kind == crate::transport::TransportNodeKind::Airfield)
+            .expect("scenarios/mvp.json declares at least one airfield");
+        let (depot_idx, depot_node) = world
+            .transport_nodes
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.kind == crate::transport::TransportNodeKind::Depot)
+            .expect("scenarios/mvp.json declares at least one depot");
+        assert_ne!(
+            airfield_node.kind.index(),
+            depot_node.kind.index(),
+            "an Airfield and a Depot must not share a numeric kind code"
+        );
+
+        let obs = Observation { faction: FactionId(0), world: &world };
+        let encoded = obs.encode();
+        let base = world.regions.len() * REGION_FIELD_COUNT
+            + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+            + FACTION_FIELD_COUNT
+            + world.factions.len() * DIPLOMACY_FIELD_COUNT
+            + world.transport_lines.len() * TRANSPORT_LINE_FIELD_COUNT;
+        let kind_offset = |node_idx: usize| base + node_idx * TRANSPORT_NODE_FIELD_COUNT + 3;
+        assert_eq!(
+            encoded[kind_offset(airfield_idx)],
+            airfield_node.kind.index() as f32,
+            "an Airfield node's own kind code must be observable"
+        );
+        assert_eq!(
+            encoded[kind_offset(depot_idx)],
+            depot_node.kind.index() as f32,
+            "a Depot node's own kind code must be observable, and distinct from an Airfield's"
+        );
+    }
+
+    /// Stage 10D: the `Domain::Air` slice of a faction's unit count
+    /// (`FACTION_FIELD_COUNT`'s own doc explains why this is a new trailing
+    /// field rather than a redefinition of the existing `unit_count`).
+    /// Checked this fails when broken: temporarily hardcoded `air_unit_count`
+    /// in `encode()` to always push `0.0` regardless of `own_units` - the
+    /// assertion below then fails once a unit actually sits at an airfield.
+    /// Reverted before committing.
+    #[test]
+    fn air_unit_count_is_observable() {
+        let mut world = crate::scenario::build_world();
+        let node_id = world
+            .transport_nodes
+            .iter()
+            .find(|n| n.kind == crate::transport::TransportNodeKind::Airfield)
+            .map(|n| n.id)
+            .expect("every shipped scenario declares at least one airfield");
+
+        // Move an existing faction-0 unit to that airfield - `Station::
+        // domain()` derives purely from the station variant, so this alone
+        // makes it an air unit for `own_unit_count`'s purposes; no need to
+        // hand-build a fresh `Unit`.
+        let unit_id = UnitId(0);
+        assert_eq!(world.unit(unit_id).owner, FactionId(0), "scenario::build_world assigns unit 0 to faction 0");
+        world.unit_mut(unit_id).station = Station::Airfield(node_id);
+
+        let obs = Observation { faction: FactionId(0), world: &world };
+        let encoded = obs.encode();
+        let air_unit_count_offset = world.regions.len() * REGION_FIELD_COUNT
+            + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+            + FACTION_FIELD_COUNT
+            - 1;
+        assert_eq!(
+            encoded[air_unit_count_offset], 1.0,
+            "moving one unit to an airfield must show up as air_unit_count == 1"
+        );
     }
 }

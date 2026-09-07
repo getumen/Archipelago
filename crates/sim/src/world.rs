@@ -453,6 +453,27 @@ impl Region {
     pub fn value(&self) -> f32 {
         self.industry_total() * 1.5 + self.population * 0.05 + self.port * 3.0
     }
+
+    /// Stage 10D (docs/phase10-spec.md "Stage 10D"): the highest
+    /// `air_superiority` share held by any faction other than `faction` -
+    /// `SeaZone::enemy_control_max`'s exact shape, one domain further, for
+    /// `Observation::encode`'s own per-region block to read the same way that
+    /// function's own `enemy_control_max` feeds the per-sea-zone one.
+    /// Deliberately *not* `World::hostile_air_superiority_max` - that
+    /// additionally requires the other faction to be at war with `faction`,
+    /// which is the right question for the interdiction throttle
+    /// (`air::air_line_factor`) but the wrong one here: `enemy_control_max`'s
+    /// own observation field asks "any other faction, war or peace", and this
+    /// mirrors it rather than quietly answering a different question under
+    /// the same naming convention.
+    pub fn enemy_air_superiority_max(&self, faction: FactionId) -> f32 {
+        self.air_superiority
+            .iter()
+            .enumerate()
+            .filter(|&(f, _)| f != faction.index())
+            .map(|(_, &s)| s.get())
+            .fold(0.0f32, f32::max)
+    }
 }
 
 /// Stage 2D (docs/phase2-spec.md "海域"): a body of water, separate from the

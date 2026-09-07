@@ -198,6 +198,13 @@ fn regions_value(world: &World) -> Value {
                 ("construction", construction_value(&r.construction)),
                 ("import_flow", Value::f32num(r.import_flow)),
                 ("node_throughput", Value::f32num(r.node_throughput())),
+                // Stage 10D (docs/phase10-spec.md "Stage 10D"): per-faction
+                // air superiority, `sea_zones_value`'s own `control` array
+                // one domain further - `air::tick_air_superiority`'s own
+                // recovery-path doc means this is never a stale, once-sampled
+                // value, so a client can watch it return to all-zero the
+                // moment no faction's air power reaches this region anymore.
+                ("air_superiority", Value::arr(r.air_superiority.iter().map(|s| Value::f32num(s.get())).collect())),
             ])
         })
         .collect();
@@ -251,6 +258,69 @@ fn units_value(world: &World) -> Value {
     Value::arr(items)
 }
 
+/// Stage 10D carry-over P1 (docs/phase10-spec.md's own Stage 10D acceptance
+/// criteria, plus this pass's own audit of `GET /state`'s "盤面の完全な
+/// JSON" contract - docs/phase5-spec.md): `TransportNode::condition` used to
+/// be observable *nowhere* an external client could reach - not in
+/// `Observation::encode()` (see `observation::TRANSPORT_NODE_FIELD_COUNT`'s
+/// own fix), and not here either, even though `state_value` below claims to
+/// be the *complete* board. A client could issue `Action::StrikeNode` but
+/// never see whether its own target was already wrecked or had since
+/// repaired - this closes that gap for `GET /state` the same way the
+/// observation vector's own fix does for `Observation::encode()`.
+/// `operational` is included alongside the raw `condition` (unlike the flat
+/// observation vector, which - per that field's own doc - deliberately
+/// leaves the `NODE_OPERATIONAL_THRESHOLD` comparison to the reader) since
+/// `GET /state` already reports plenty of derived convenience fields
+/// (`node_throughput`, `focus_active`, ...) rather than only raw simulation
+/// state.
+fn transport_nodes_value(world: &World) -> Value {
+    let items: Vec<Value> = world
+        .transport_nodes
+        .iter()
+        .map(|n| {
+            Value::obj(vec![
+                ("id", Value::num(n.id.0 as f64)),
+                ("name", Value::str(n.name.clone())),
+                ("kind", Value::str(n.kind.key())),
+                ("region", Value::num(n.region.0 as f64)),
+                ("condition", Value::f32num(n.condition.get())),
+                ("operational", Value::Bool(n.operational())),
+            ])
+        })
+        .collect();
+    Value::arr(items)
+}
+
+/// The transport-network *lines* half of the same fix - `state_value` had
+/// never exposed these at all (not just their `condition`), the same
+/// "complete board" gap `transport_nodes_value`'s own doc describes for
+/// nodes. `effective_capacity` is included (a derived value, same rationale
+/// as `transport_nodes_value`'s own `operational`) since it is exactly the
+/// figure `agents::transport_interdict_ai`/`transport_repair_ai` themselves
+/// weigh a target/repair candidate by - a client reasoning about the network
+/// from outside would otherwise have to re-derive
+/// `TransportLine::effective_capacity`'s own devastation-aware formula by
+/// hand from the raw fields.
+fn transport_lines_value(world: &World) -> Value {
+    let items: Vec<Value> = world
+        .transport_lines
+        .iter()
+        .map(|l| {
+            Value::obj(vec![
+                ("id", Value::num(l.id.0 as f64)),
+                ("from", Value::num(l.from.0 as f64)),
+                ("to", Value::num(l.to.0 as f64)),
+                ("kind", Value::str(l.kind.key())),
+                ("capacity", Value::f32num(l.capacity.get())),
+                ("condition", Value::f32num(l.condition.get())),
+                ("effective_capacity", Value::f32num(l.effective_capacity(world))),
+            ])
+        })
+        .collect();
+    Value::arr(items)
+}
+
 /// The full board (docs/phase5-spec.md's `GET /state`), independent of any
 /// one faction's point of view - every field the simulation tracks is
 /// already visible to every player in this game (no fog of war), so unlike
@@ -265,6 +335,8 @@ pub fn state_value(world: &World, seed: u64, outcome: &Outcome) -> Value {
         ("sea_zones", sea_zones_value(world)),
         ("units", units_value(world)),
         ("diplomacy", diplomacy_value(world)),
+        ("transport_nodes", transport_nodes_value(world)),
+        ("transport_lines", transport_lines_value(world)),
     ])
 }
 

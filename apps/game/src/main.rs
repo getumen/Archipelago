@@ -53,7 +53,7 @@ fn print_usage_and_exit(msg: &str) -> ! {
          \n\
          debug/screenshot flags (automated capture only - not needed to play):\n\
          [--screenshot <path>] [--screenshot-after <frames> | --screenshot-at-day <day>] \
-         [--debug-map-mode <political|terrain|population|industry[:<good>]|unrest|supply>] \
+         [--debug-map-mode <political|terrain|population|industry[:<good>]|unrest|supply|air>] \
          [--debug-open-diplomacy] [--debug-open-newspaper] \
          [--debug-open-policy] [--debug-select-region <region index or name>] [--debug-select-units] \
          [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]\n\

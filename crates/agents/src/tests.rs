@@ -1012,3 +1012,74 @@ fn heuristic_agent_interdicts_an_enemy_transport_line() {
         "expected an InterdictLine order against a hostile faction's own transport network: {actions:?}"
     );
 }
+
+/// Stage 10D AI (docs/phase10-spec.md "Stage 10D": "recruit squadrons when
+/// it makes sense"): a fresh faction with no air units yet, and comfortably
+/// affordable manpower/Arms/Machinery (mvp's own starting stock -
+/// `scenario::FACTION_STOCK`), must recruit toward `AIR_MIN_SQUADRONS`.
+///
+/// Confirmed this fails without the fix: temporarily removed the
+/// `air_recruit` call from `decide_for_llm` and re-ran - `actions` contained
+/// no `RecruitUnit { domain: Domain::Air, .. }` at all even though mvp's
+/// faction 0 starts able to afford one. Reverted before committing.
+#[test]
+fn heuristic_agent_recruits_air_when_it_can_afford_it() {
+    let world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::RecruitUnit { domain: archipelago_sim::world::Domain::Air, .. })),
+        "expected a Domain::Air RecruitUnit order from a faction with no air units yet and money to spend: {actions:?}"
+    );
+}
+
+/// Stage 10D AI: `air_strike_ai` must issue `Action::StrikeNode` against a
+/// hostile `Airfield`/`Port` node once this faction actually has air power
+/// of its own - the "use them for what Phase 10 built them for" half of
+/// Stage 10D, distinct from `heuristic_agent_interdicts_an_enemy_transport_line`
+/// (lines, not nodes) above.
+///
+/// Confirmed this fails without the fix: temporarily removed the
+/// `air_strike_ai` call from `decide_for_llm` and re-ran with the same
+/// fixture - `actions` contained no `StrikeNode` at all even with an air
+/// unit in play and a hostile airfield to strike. Reverted before
+/// committing.
+#[test]
+fn heuristic_agent_strikes_an_enemy_node_once_it_has_air_power() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    assert!(
+        world.diplomacy.is_at_war(faction, FactionId(1)),
+        "test setup: mvp's factions must start at war for there to be a hostile node to strike"
+    );
+
+    // Give faction 0 an air unit by moving an existing one of its own onto
+    // its own airfield - `Station::domain()` derives purely from the
+    // station variant, so this alone makes `air_strike_ai`'s own
+    // `own_unit_count(obs, Domain::Air) > 0` gate true, without needing to
+    // hand-build a fresh `Unit`.
+    let own_node = world
+        .transport_nodes
+        .iter()
+        .find(|n| n.kind == archipelago_sim::transport::TransportNodeKind::Airfield && world.region(n.region).owner == faction)
+        .map(|n| n.id)
+        .expect("mvp gives every faction's own territory an airfield");
+    let unit_id = UnitId(0);
+    assert_eq!(world.unit(unit_id).owner, faction, "scenario::build_world assigns unit 0 to faction 0");
+    world.unit_mut(unit_id).station = Station::Airfield(own_node);
+
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::StrikeNode { .. })),
+        "expected a StrikeNode order against a hostile faction's own airfield/port once air power exists: {actions:?}"
+    );
+}

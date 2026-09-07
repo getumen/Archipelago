@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
+    AIR_UNIT_MACHINERY_COST, ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
     CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT,
     FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_PER_PORT, MACHINERY_INPUT_STEEL,
     MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
@@ -24,6 +24,7 @@ use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, Unit
 use archipelago_sim::military::Unit;
 use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
+use archipelago_sim::transport::{TransportNode, TransportNodeKind};
 use archipelago_sim::world::{Domain, Station, World};
 
 pub mod composite;
@@ -44,9 +45,10 @@ fn unit_contested(world: &World, unit: &Unit, faction: FactionId) -> bool {
     match unit.station {
         Station::Region(r) => world.has_enemy_units(r, faction),
         Station::Sea(z) => world.has_enemy_fleets(z, faction),
-        // Stage 10A: no AI touches `Domain::Air` units yet (that's Stage
-        // 10D) - mirrors `military::is_pinned`'s `Station::Airfield` arm,
-        // the same "as contested as the region it sits inside" rule.
+        // Stage 10D: `disband_excess_air` now walks `Domain::Air` units
+        // through this too - mirrors `military::is_pinned`'s `Station::
+        // Airfield` arm, the same "as contested as the region it sits
+        // inside" rule.
         Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, faction),
     }
 }
@@ -212,6 +214,14 @@ const NAVY_MIN_FLEETS: f32 = 2.0;
 /// so a fleet won't engage a target at exact parity with nothing in
 /// reserve.
 const NAVY_ENGAGE_MARGIN: f32 = 0.6;
+/// Stage 10D air AI (docs/phase10-spec.md "Stage 10D": "recruit squadrons
+/// when it makes sense"): `air_recruit`'s own floor, `NAVY_MIN_FLEETS`'s
+/// exact shape one domain further - a minimal, standing air presence rather
+/// than a force scaled off industry the way land's `unit_cap` is. Air power's
+/// whole job here is contesting airspace over the front and striking enemy
+/// nodes (design.md §8), not winning a numbers race, so a small flat floor is
+/// enough to keep that capability in being at all times.
+const AIR_MIN_SQUADRONS: f32 = 2.0;
 
 /// Stage 3A AI (docs/phase3-spec.md "AI" under "Stage 3A"): how far above a
 /// political event's own threshold (`STRIKE_THRESHOLD`/`PROTEST_THRESHOLD`/
@@ -1194,6 +1204,8 @@ impl HeuristicAgent {
         disband_excess(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         naval_recruit(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         disband_excess_naval(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
+        air_recruit(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
+        disband_excess_air(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         build(self.faction, obs, &mut actions);
         transport_repair_ai(self.faction, obs, &mut actions);
 
@@ -1234,6 +1246,7 @@ impl HeuristicAgent {
         if allow_offense {
             offensive(self.faction, caution, obs, avoid, primary_target, &mut actions);
             transport_interdict_ai(self.faction, obs, &mut actions);
+            air_strike_ai(self.faction, obs, &mut actions);
         }
         naval_ops(self.faction, caution, obs, allow_offense, &mut actions);
 
@@ -2010,6 +2023,127 @@ fn disband_excess_naval(faction: FactionId, chronic_insolvency_ticks: u32, obs: 
     }
 }
 
+/// Stage 10D (docs/phase10-spec.md "Stage 10D"): the own, uncontested,
+/// operational airfield region closest to the front (`Observation::
+/// front_regions`) - basing a fresh squadron there actually contests the
+/// airspace over the fighting (`air::tick_air_superiority`'s own
+/// `AIR_OPERATING_RADIUS_KM` reach), rather than sitting uselessly out of
+/// range in the interior. `Stage 10A`/`10C` both note no shipped scenario
+/// deploys a `Domain::Air` unit or gives movement to one once recruited
+/// (`action::apply_move`'s doc: a `Station::Airfield` destination is never a
+/// legal `MoveUnit` target), so *where* this AI recruits is the only lever
+/// it has over which airspace its own air power actually projects over -
+/// there is no later "reposition the squadron" order to correct a bad
+/// initial choice.
+///
+/// Falls back to the lowest-id eligible region (`safe_own_regions`' own
+/// ascending order) when there is no front to measure against (not at war,
+/// or nothing currently contested) - the same deterministic, no-invented-
+/// priority tie-break `best_own_port_region` uses when ports tie on value.
+fn best_own_airfield_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    let world = obs.world;
+    let front = obs.front_regions();
+    let candidates: Vec<RegionId> =
+        safe_own_regions(faction, obs).into_iter().filter(|&r| world.airfield_node_operational(r)).collect();
+    if front.is_empty() {
+        return candidates.into_iter().next();
+    }
+    candidates
+        .into_iter()
+        .fold(None, |best: Option<(RegionId, f32)>, r| {
+            let pos = world.region(r).position;
+            let dist_sq = front
+                .iter()
+                .map(|&fr| {
+                    let fp = world.region(fr).position;
+                    let dx = pos[0] - fp[0];
+                    let dy = pos[1] - fp[1];
+                    dx * dx + dy * dy
+                })
+                .fold(f32::INFINITY, f32::min);
+            match best {
+                Some((_, best_dist)) if best_dist <= dist_sq => best,
+                _ => Some((r, dist_sq)),
+            }
+        })
+        .map(|(r, _)| r)
+}
+
+/// Stage 10D air AI (docs/phase10-spec.md "Stage 10D": "recruit squadrons
+/// when it makes sense") - `naval_recruit`'s exact shape one domain further:
+/// keeps at least `AIR_MIN_SQUADRONS` squadrons in being, at whichever own
+/// airfield `best_own_airfield_region` picks. Machinery is air's own extra
+/// recruit cost on top of manpower/Arms (`action::apply_recruit`'s
+/// `Domain::Air` branch, `balance::AIR_UNIT_MACHINERY_COST`) - checked here
+/// alongside the same margins `naval_recruit` already checks, so this never
+/// issues a `RecruitUnit` the simulation would only turn around and reject.
+fn air_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
+    let f = obs.world.faction(faction);
+    if own_unit_count(obs, Domain::Air) as f32 >= AIR_MIN_SQUADRONS {
+        return;
+    }
+    if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Machinery.index()] < AIR_UNIT_MACHINERY_COST * RECRUIT_STOCK_MARGIN
+    {
+        return;
+    }
+    // Stage 9D-style network-aware gate, the same one `recruit`/
+    // `naval_recruit` already carry: a network already failing to serve half
+    // of demand must not get another mouth to feed.
+    if f.supply_ratio < DISBAND_SOLVENCY_SUPPLY_RATIO {
+        return;
+    }
+    // Only blocks once `disband_excess_air` would actually be cutting - see
+    // `naval_recruit`'s own doc for why this specific gate (land force gone,
+    // chronically insolvent) exists at all.
+    if own_unit_count(obs, Domain::Land) == 0
+        && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM
+    {
+        return;
+    }
+    if let Some(region) = best_own_airfield_region(faction, obs) {
+        actions.push(Action::RecruitUnit { region, domain: Domain::Air });
+    }
+}
+
+/// The air-domain mirror of `disband_excess_naval` - see that function's own
+/// doc for the full account of why a chronically-unaffordable floor needs a
+/// shrink path at all (CLAUDE.md's own "状態には必ず回復経路を持たせる").
+fn disband_excess_air(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
+    let air_units: Vec<UnitId> =
+        obs.own_units().into_iter().filter(|&u| obs.world.unit(u).station.domain() == Domain::Air).collect();
+    let total = air_units.len() as f32;
+    if total <= 0.0 {
+        return;
+    }
+
+    let land_is_gone = own_unit_count(obs, Domain::Land) == 0;
+    let over_cap_excess = if total > AIR_MIN_SQUADRONS && munitions_insolvent(faction, obs) {
+        (total - AIR_MIN_SQUADRONS).round().max(0.0) as usize
+    } else {
+        0
+    };
+    let chronic_excess =
+        if land_is_gone && chronic_insolvency_ticks > CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM { 1 } else { 0 };
+    let excess = over_cap_excess.max(chronic_excess);
+    if excess == 0 {
+        return;
+    }
+
+    let mut eligible: Vec<UnitId> =
+        air_units.into_iter().filter(|&u| !unit_contested(obs.world, obs.world.unit(u), faction)).collect();
+    eligible.sort_by(|&a, &b| {
+        let power_a = obs.world.unit(a).combat_power();
+        let power_b = obs.world.unit(b).combat_power();
+        power_a.partial_cmp(&power_b).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+    });
+
+    for &unit in eligible.iter().take(excess) {
+        actions.push(Action::DisbandUnit { unit });
+    }
+}
+
 /// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, points
 /// 2-4): moves idle fleets, grouped by their current zone, toward whichever
 /// of three priorities applies -
@@ -2327,6 +2461,46 @@ fn transport_interdict_ai(faction: FactionId, obs: &Observation, actions: &mut V
         });
     if let Some(line) = best {
         actions.push(Action::InterdictLine { line: line.id });
+    }
+}
+
+/// Stage 10D (docs/phase10-spec.md "Stage 10D": "use them for what Phase 10
+/// built them for - striking the enemy's logistics nodes"):
+/// `transport_interdict_ai`'s node-level twin, picking the highest-condition
+/// (least-already-damaged - the same "not already reduced to near nothing"
+/// reasoning `transport_interdict_ai` itself uses via
+/// `TRANSPORT_INTERDICT_MIN_CONDITION`) enemy `Airfield`/`Port` node this
+/// faction is at war with, and issuing `Action::StrikeNode` against it.
+///
+/// Gated on actually owning at least one air unit
+/// (`own_unit_count(obs, Domain::Air) > 0`), even though `Action::StrikeNode`
+/// itself carries no such requirement (`action::apply_strike_node`'s own
+/// doc: "no locality requirement", closer to an abstract capability than a
+/// mission any specific squadron flies) - docs/phase10-spec.md's own framing
+/// is that air "becomes this action's... principal user from 10D's AI
+/// onward", so this heuristic ties the AI's *own* use of the action to
+/// having actually built the air power it represents, rather than issuing
+/// free strikes from a faction with no air force at all.
+fn air_strike_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    if own_unit_count(obs, Domain::Air) == 0 {
+        return;
+    }
+    let world = obs.world;
+    let best = world
+        .transport_nodes
+        .iter()
+        .filter(|n| {
+            (n.kind == TransportNodeKind::Airfield || n.kind == TransportNodeKind::Port)
+                && world.region(n.region).owner != faction
+                && world.diplomacy.is_at_war(faction, world.region(n.region).owner)
+                && n.condition.get() > TRANSPORT_INTERDICT_MIN_CONDITION
+        })
+        .fold(None, |best: Option<&TransportNode>, n| match best {
+            Some(b) if b.condition.get() >= n.condition.get() => best,
+            _ => Some(n),
+        });
+    if let Some(node) = best {
+        actions.push(Action::StrikeNode { node: node.id });
     }
 }
 

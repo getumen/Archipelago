@@ -504,6 +504,14 @@ mod tests {
             Action::DisbandUnit { unit: UnitId(2) },
             Action::RecruitUnit { region: RegionId(1), domain: Domain::Land },
             Action::RecruitUnit { region: RegionId(1), domain: Domain::Sea },
+            // Stage 10D: these two were never in this sample list even
+            // though `action_to_value`/`action_from_value` already handled
+            // them (`Domain::Air`'s own arm landed in Stage 10A,
+            // `StrikeNode` in Stage 10C) - this test's whole point is to
+            // catch a codec that silently mis-round-trips a variant, and
+            // neither variant was actually being checked here before.
+            Action::RecruitUnit { region: RegionId(1), domain: Domain::Air },
+            Action::StrikeNode { node: archipelago_sim::ids::TransportNodeId(2) },
             Action::ReinforceUnit { unit: UnitId(4) },
             Action::SetConscription(0.42),
             Action::SetIndustryPriority { good: Good::Steel, weight: 0.6 },

@@ -218,6 +218,61 @@ fn interdict_line_action_round_trips_through_the_http_codec() {
     assert_eq!(status, 200, "the session must still be usable after both requests");
 }
 
+/// Stage 10D: air-relevant actions must actually reach the simulation
+/// through the real HTTP/JSON codec, not just compile against
+/// `action_codec.rs` in isolation - `StrikeNode` landed in Stage 10C but this
+/// was never exercised end to end through `POST /action` before. Two things
+/// in one test since both share the same fixture: `RecruitUnit { domain:
+/// air }` at faction 0's own `hokkaido` airfield (region 0, node 20 -
+/// `scenarios/mvp.json`'s transport node list), and `StrikeNode` against
+/// faction 1's `shinetsu_hokuriku` airfield (node 24) - the same enemy
+/// region `interdict_line_action_round_trips_through_the_http_codec` above
+/// already established is a valid hostile target under mvp's unconditional
+/// starting war.
+#[test]
+fn air_actions_round_trip_through_the_http_codec() {
+    let handle = start(Duration::from_secs(3600), Duration::from_secs(3600));
+    let reset_body = reset(handle.addr, 1, &[0]);
+    let session_id = reset_body.get("session_id").and_then(Value::as_str).unwrap().to_string();
+
+    let recruit_body = format!(
+        r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"recruit_unit","region":0,"domain":"air"}}]}}"#
+    );
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&recruit_body)));
+    assert_eq!(status, 200);
+    let accepted = response.get("accepted").and_then(Value::as_array).expect("accepted[] present");
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(accepted.len(), 1, "recruiting a Domain::Air squadron at an owned, operational airfield must be accepted: {response:?}");
+    assert!(rejected.is_empty(), "{response:?}");
+
+    let strike_body =
+        format!(r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"strike_node","node":24}}]}}"#);
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&strike_body)));
+    assert_eq!(status, 200);
+    let accepted = response.get("accepted").and_then(Value::as_array).expect("accepted[] present");
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(accepted.len(), 1, "striking an enemy-owned airfield node must be accepted: {response:?}");
+    assert!(rejected.is_empty(), "{response:?}");
+
+    // Invalid: an out-of-range node id must be rejected, not panic the
+    // server or the session - the same shape `interdict_line`'s own
+    // out-of-range check gets above.
+    let bad_strike = format!(r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"strike_node","node":999999}}]}}"#);
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&bad_strike)));
+    assert_eq!(status, 200);
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(rejected.len(), 1, "an out-of-range node id must be rejected: {response:?}");
+
+    let (status, state_body) = state(handle.addr, &session_id);
+    assert_eq!(status, 200);
+    let node24 = state_body.get("transport_nodes").and_then(Value::as_array).unwrap()[24].clone();
+    let condition = node24.get("condition").and_then(Value::as_f64).expect("condition present");
+    assert!(condition < 1.0, "the struck node's own condition must show the strike in GET /state, got {condition}");
+
+    let (status, _) = step(handle.addr, &session_id, 1);
+    assert_eq!(status, 200, "the session must still be usable after every request above");
+}
+
 /// docs/phase5-spec.md "並列セッションが互いの結果に影響しないこと": two
 /// sessions from the *same* seed but different action sequences must
 /// diverge exactly as expected, and two sessions from different seeds must

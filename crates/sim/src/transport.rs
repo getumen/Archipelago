@@ -72,6 +72,31 @@ impl TransportNodeKind {
         }
     }
 
+    /// Stage 10D (`codex review` P1, docs/phase10-spec.md "Stage 10D"): a
+    /// stable numeric code, the same `NationalFocus::index()`/`Stance::
+    /// index()` convention `Observation::encode()` already uses to put an
+    /// enum into the flat float vector - `observation::TRANSPORT_NODE_
+    /// FIELD_COUNT`'s own `kind` field reads this. Without it, a flat-vector
+    /// consumer had `owned_by_self`/`blockaded`/`condition` for every node
+    /// but no way to tell which node *is* an airfield at all (short of
+    /// parsing the scenario JSON out of band, which the observation vector
+    /// exists specifically to avoid) - it could issue `Action::StrikeNode`
+    /// or expect a `Domain::Air` recruit to land somewhere, but never know
+    /// where. Order matches this enum's own declaration; never read as
+    /// anything but an opaque distinct code (a consumer that cares which
+    /// code means "airfield" specifically should still prefer `key()` via
+    /// `GET /schema`/the scenario JSON where text is available at all - this
+    /// exists only for the callers, like the RL flat vector, that have
+    /// nothing but floats to work with).
+    pub const fn index(self) -> usize {
+        match self {
+            TransportNodeKind::Junction => 0,
+            TransportNodeKind::Depot => 1,
+            TransportNodeKind::Port => 2,
+            TransportNodeKind::Airfield => 3,
+        }
+    }
+
     pub fn from_key(key: &str) -> Option<TransportNodeKind> {
         match key {
             "junction" => Some(TransportNodeKind::Junction),

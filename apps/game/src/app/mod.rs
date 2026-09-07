@@ -468,6 +468,17 @@ pub(crate) struct NewspaperPanelText;
 #[derive(Component)]
 pub(crate) struct OwnerBorderMarker(pub RegionId);
 
+/// Stage 10D (docs/phase10-spec.md "Stage 10D": "地図で...飛行場が見える"):
+/// one region's airfield status marker - pre-spawned once per region
+/// alongside `RegionMarker`/`ConstructionMarker` (`setup::setup`, the same
+/// "always spawn, toggle `Visibility`" convention those two already use,
+/// since the region graph itself never changes at runtime) and shown only
+/// while `MapMode::Air` is active *and* the region actually has an airfield
+/// node, colored by whether it's currently operational or struck
+/// (`overlay::sync_airfield_markers`).
+#[derive(Component)]
+pub(crate) struct AirfieldMarker(pub RegionId);
+
 /// Builds and runs the Bevy `App`. `world` must already be validated
 /// (`archipelago_sim::scenario::build_world`/`load_str`/`load_file`) -
 /// `main.rs` never constructs one any other way.
@@ -700,12 +711,17 @@ pub fn run(
             // be this frame's own post-tick state, same as every system in
             // the chain above - `.after(...)` alone (no `.chain()`, nothing
             // else in this call to chain against) gets that without needing
-            // to grow that tuple at all. The three are independent of each
+            // to grow that tuple at all. The four are independent of each
             // other (disjoint entities: labels, `OwnerBorderMarker`
-            // materials, and legend UI text), so no relative order between
-            // them is needed either.
+            // materials, legend UI text, and - Stage 10D - `AirfieldMarker`
+            // materials), so no relative order between them is needed either.
             Update,
-            (visuals::sync_region_label_visibility, visuals::sync_owner_border, map_mode::sync_mode_legend)
+            (
+                visuals::sync_region_label_visibility,
+                visuals::sync_owner_border,
+                map_mode::sync_mode_legend,
+                overlay::sync_airfield_markers,
+            )
                 .after(sim_control::advance_simulation),
         )
         .add_systems(

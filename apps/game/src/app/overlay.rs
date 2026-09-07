@@ -85,9 +85,9 @@ use super::map_mode::{MapMode, MapModeRes};
 use super::palette::Unit01;
 use super::setup::{link_style, Z_LINK, Z_LINK_CHOKEPOINT, Z_LINK_HIGHLIGHT};
 use super::{
-    BlockadeVisual, ChokepointMarker, ConstructionMarker, CutLineMarker, LinkVisualMarker,
-    MainCamera, RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion, SelectedSeaZone, SimRes,
-    SupplyRingMarker,
+    AirfieldMarker, BlockadeVisual, ChokepointMarker, ConstructionMarker, CutLineMarker,
+    LinkVisualMarker, MainCamera, RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion,
+    SelectedSeaZone, SimRes, SupplyRingMarker,
 };
 
 /// Chokepoint tint - a link whose flow has reached its own `max_throughput`
@@ -182,6 +182,19 @@ const Z_BLOCKADE_MARKER: f32 = 0.32;
 /// region labels so a revealed line never covers a name.
 const Z_BLOCKADE_LINE: f32 = 0.28;
 const BLOCKADE_LINE_THICKNESS: f32 = 2.5;
+
+/// Stage 10D airfield-marker tints (`sync_airfield_markers`,
+/// `map_mode::MapMode::Air`'s own legend). Operational is a clear
+/// sky/aviation teal, deliberately shifted away from `BLOCKADE_MARKER_COLOR`'s
+/// own ice-blue (lower blue, more green) so the two never read as the same
+/// mark on a region that happens to have both a port and an airfield -
+/// struck is a dim, desaturated red-brown, in the same "this is damaged"
+/// family as `COLOR_LINE_CUT` without being close enough to be mistaken for
+/// it (this overlay only ever draws one of the two on a region at once,
+/// gated by `MapMode`, but both hues were chosen readable side by side
+/// regardless).
+pub(super) const AIRFIELD_MARKER_OPERATIONAL: Color = Color::srgb(0.10, 0.65, 0.60);
+pub(super) const AIRFIELD_MARKER_STRUCK: Color = Color::srgb(0.55, 0.20, 0.15);
 
 /// In-progress-construction marker tint - also referenced by the legend
 /// (`setup::spawn_legend`) so its swatch always matches exactly what
@@ -412,6 +425,43 @@ pub(super) fn sync_construction_markers(
                     mat.color = CONSTRUCTION_TINT.with_alpha(0.35 + 0.55 * progress.get());
                 }
             }
+        }
+    }
+}
+
+/// Shows/hides and colors every region's airfield-status marker
+/// (`AirfieldMarker`, `AIRFIELD_MARKER_OPERATIONAL`/`AIRFIELD_MARKER_STRUCK`'s
+/// own doc) - unlike `sync_construction_markers` above, this *is* gated by
+/// `MapMode` (`MapMode::Air` only, `map_mode`'s own module doc): an airfield
+/// is a static topological fact for the life of a run (only its own
+/// `condition` changes at runtime), not a per-tick event, so there is no
+/// "always show, mode or not" case to make for it the way construction/
+/// blockade's own runtime-only existence justifies for themselves - and
+/// showing it in every mode would be one more mark competing for attention
+/// in modes that have nothing to do with air power at all.
+pub(super) fn sync_airfield_markers(
+    sim: Res<SimRes>,
+    mode: Res<MapModeRes>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut query: Query<(&AirfieldMarker, &MeshMaterial2d<ColorMaterial>, &mut Visibility)>,
+) {
+    let world = sim.0.world();
+    for (marker, material_handle, mut visibility) in &mut query {
+        if mode.0 != MapMode::Air {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        if !world.has_airfield_node(marker.0) {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        *visibility = Visibility::Visible;
+        if let Some(mut mat) = materials.get_mut(&material_handle.0) {
+            mat.color = if world.airfield_node_operational(marker.0) {
+                AIRFIELD_MARKER_OPERATIONAL
+            } else {
+                AIRFIELD_MARKER_STRUCK
+            };
         }
     }
 }
