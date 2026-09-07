@@ -238,6 +238,9 @@ pub fn action_to_value(action: &Action) -> Value {
         Action::InterdictLine { line } => {
             Value::obj(vec![("type", Value::str("interdict_line")), ("line", Value::num(line.0 as f64))])
         }
+        Action::StrikeNode { node } => {
+            Value::obj(vec![("type", Value::str("strike_node")), ("node", Value::num(node.0 as f64))])
+        }
     }
 }
 
@@ -327,6 +330,7 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             Ok(Action::RespondToNaturalLanguageProposal { from, terms, accept })
         }
         "interdict_line" => Ok(Action::InterdictLine { line: TransportLineId(u32_field("line")?) }),
+        "strike_node" => Ok(Action::StrikeNode { node: TransportNodeId(u32_field("node")?) }),
         other => Err(format!("unknown action type `{other}`")),
     }
 }
@@ -350,6 +354,9 @@ pub fn action_error_ja(e: ActionError) -> &'static str {
         ActionError::InvalidLine => "指定した輸送路線が存在しない",
         ActionError::LineNotOwned => "自国の輸送路線ではない",
         ActionError::LineNotHostile => "交戦中の敵の輸送路線ではない",
+        ActionError::InvalidNode => "指定した輸送ノードが存在しない",
+        ActionError::NodeNotStrikeable => "飛行場・港以外は攻撃対象にできない",
+        ActionError::NodeNotHostile => "交戦中の敵の拠点ではない",
     }
 }
 

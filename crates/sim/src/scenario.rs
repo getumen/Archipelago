@@ -1108,6 +1108,9 @@ impl Scenario {
                 name: def.name.clone(),
                 kind: def.kind,
                 region: RegionId(index_of[def.region.as_str()]),
+                // Stage 10C: never scenario-authored - see `TransportNode::
+                // condition`'s own doc.
+                condition: Condition::FULL,
             })
             .collect();
 

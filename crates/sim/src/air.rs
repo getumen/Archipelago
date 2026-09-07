@@ -38,13 +38,49 @@
 //! interdiction, supply or ground combat (10C's job) - so its correctness
 //! can be verified in isolation first, the same 8A/8B, 9A/9B split this
 //! phase's own §5 calls out by name.
+//!
+//! Stage 10C (docs/phase10-spec.md "3. 阻止") wires `Region::air_superiority`
+//! into the one thing 10B deliberately left alone: `air_line_factor` below
+//! is `naval::sea_line_factor`'s exact shape, one domain further - `1 -` the
+//! highest share held, over either of a line's own two endpoint regions, by
+//! a faction actually at war with the hauler (`World::hostile_air_
+//! superiority_max` - deliberately diplomacy-aware, unlike `naval::
+//! strait_factor`'s own raw form; see that function's own doc for why an
+//! explicitly hostile act like interdiction needs the distinction a shared
+//! sea lane's throttle does not). `logistics::
+//! TransportGraph::line_faction_factor` folds this into the very same
+//! per-(line, faction) decreasing budget `naval::sea_line_factor` already
+//! seeds there once a tick (`residual_line_faction`) - never a second,
+//! independently-spent throttle - so air interdiction is `naval`'s own
+//! Defect-2 fix applied to a second cause, not a new mechanism: a `Sea` line
+//! now answers to *both* sea control and air superiority at once, and every
+//! other line kind (Rail/Road, previously never faction-throttled at all)
+//! gains this one new cause. Recovery is automatic and requires no separate
+//! bookkeeping: `Region::air_superiority` already recomputes to `NEUTRAL`
+//! the moment nothing reaches a region (10B's own recovery path), and
+//! `line_faction_factor` re-reads it fresh every tick, so a line's capacity
+//! is never sampled once and held - it tracks today's airspace, every day.
+//!
+//! Striking a node (§3 "飛行場と港への攻撃") is a different mechanism from
+//! `Region::air_superiority`'s own recovery loop - see `transport::
+//! TransportNode::condition`/`transport::tick_node_condition` and `action::
+//! apply_strike_node` - but it does feed into this module: `node_air_power`
+//! below excludes every unit based at a currently non-`operational` node
+//! from `tick_air_superiority`'s committed-power tally (codex review P2,
+//! Stage 10C), and `action::apply_recruit`'s `Domain::Air` arm refuses a new
+//! recruit there the same way. Both read `TransportNode::operational`
+//! fresh, never a value sampled once, so the same automatic repair that
+//! reopens supply routing (`transport::tick_node_condition`'s own doc)
+//! restores air superiority projection and recruitment the instant
+//! `condition` crosses back over `balance::NODE_OPERATIONAL_THRESHOLD` -
+//! no second recovery path to keep in sync with the first.
 
 use crate::balance::{
     AIR_OPERATING_RADIUS_KM, ARMS_SUPPLY_NEED_PER_GAP, COMBAT_SUPPLY_MULT, SUPPLY_NEED_PER_MANPOWER,
     SUPPLY_SMOOTHING, UNIT_EQUIPMENT,
 };
 use crate::good::Good;
-use crate::ids::{RegionId, UnitId};
+use crate::ids::{FactionId, RegionId, UnitId};
 use crate::logistics;
 use crate::transport::TransportNodeKind;
 use crate::world::{AirSuperiority, World};
@@ -229,6 +265,20 @@ pub fn instantaneous_air_arms_delivery(world: &World, unit_id: UnitId) -> (f32, 
 /// ミング禁止" cuts the other way too: don't refuse to share a shape that
 /// already fits). A node that isn't an `Airfield` simply never has any
 /// `Station::Airfield(that node)` unit, so its row stays all zero.
+/// Stage 10C (codex review P2): a struck `Airfield` node projects no air
+/// power at all, no matter how much strength sits on its own tarmac -
+/// gated on `transport::TransportNode::operational` exactly the way
+/// `logistics::TransportGraph::node_operational` gates supply routing and
+/// `World::port_node_operational` gates `trade::tick_imports`, never a
+/// second, differently-shaped "is this node working" check of its own
+/// (that drift is exactly how the original defect - `apply_recruit` and
+/// this function never asking the question at all - survived alongside the
+/// port fix in the same stage). Before this, `Action::StrikeNode` lowered
+/// `condition` and stopped supply/transport traversal but left a wrecked
+/// airfield's own stationed squadrons contributing full `combat_power()` to
+/// `tick_air_superiority` below, unchanged and immediately, with no
+/// dependence on the attrition their now-cut-off supply would only start
+/// inflicting many ticks later.
 fn node_air_power(world: &World) -> Vec<Vec<f32>> {
     let n_nodes = world.transport_nodes.len();
     let n_factions = world.factions.len();
@@ -240,6 +290,9 @@ fn node_air_power(world: &World) -> Vec<Vec<f32>> {
         let Some(node) = unit.station.airfield() else {
             continue;
         };
+        if !world.transport_node(node).operational() {
+            continue;
+        }
         power[node.index()][unit.owner.index()] += unit.combat_power();
     }
     power
@@ -321,4 +374,26 @@ pub fn tick_air_superiority(world: &mut World) {
         };
         world.region_mut(region_id).air_superiority = shares;
     }
+}
+
+/// Stage 10C (docs/phase10-spec.md "3. 阻止": "制空権を取られた地域を通る輸送
+/// 路線の実効容量が落ちる"): the air-interdiction throttle a `transport::
+/// TransportLine` between `region_a` and `region_b` suffers, from `faction`'s
+/// own point of view as the hauler - `World::hostile_air_superiority_max`'s
+/// exact shape (`1 -` the highest share a faction *at war with `faction`*
+/// holds - see that function's own doc for why this, and not `naval::
+/// strait_factor`'s raw "any other faction" form, is the right analogue for
+/// an explicitly hostile act), asked at *both* endpoints and folded together
+/// with `f32::min` the same way `naval::sea_line_factor` folds together
+/// every shared sea zone: a line is only as open as its most-contested end,
+/// so dominating either side of a route is enough to throttle it, not just
+/// the "shared zone" case sea crossings have.
+///
+/// Read fresh every call, never cached (`Region::air_superiority`'s own
+/// doc): a front whose airspace changed hands after a route was chosen
+/// throttles - or reopens - the very same tick
+/// (CLAUDE.md「繰り返し踏んだ欠陥」: "発令時点の値を焼き込まない").
+pub fn air_line_factor(world: &World, region_a: RegionId, region_b: RegionId, faction: FactionId) -> f32 {
+    let factor_at = |r: RegionId| -> f32 { (1.0 - world.hostile_air_superiority_max(r, faction)).clamp(0.0, 1.0) };
+    factor_at(region_a).min(factor_at(region_b))
 }

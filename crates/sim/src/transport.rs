@@ -17,6 +17,7 @@
 
 use crate::balance::{
     INFRA_DAMAGE_SHARE, LINE_CONDITION_DAMAGE_PER_TICK, LINE_CONDITION_REPAIR_PER_TICK,
+    NODE_OPERATIONAL_THRESHOLD,
 };
 use crate::ids::{RegionId, TransportLineId, TransportNodeId};
 use crate::world::World;
@@ -92,6 +93,36 @@ pub struct TransportNode {
     pub name: String,
     pub kind: TransportNodeKind,
     pub region: RegionId,
+    /// Stage 10C (docs/phase10-spec.md "3. 阻止": "飛行場ノードと港ノードを
+    /// 叩けること"): this node's own structural health, `TransportLine::
+    /// condition`'s exact type and starting value (`Condition::FULL`, never
+    /// scenario-authored - a node has no declared starting damage the way a
+    /// `TransportLine` occasionally does). Lowered outright by `Action::
+    /// StrikeNode` (`action::apply_strike_node`), recovered passively every
+    /// tick by `tick_node_condition` below - the same damage/repair split
+    /// `TransportLine::condition` already has, one level down. Read only
+    /// through `operational` below (`balance::NODE_OPERATIONAL_THRESHOLD`'s
+    /// own doc explains why this is a binary gate rather than a graded
+    /// capacity multiplier) - never compared directly anywhere else, so
+    /// that threshold has exactly one place to live. Both `logistics::
+    /// TransportGraph::node_operational` (the supply graph) and `trade::
+    /// tick_imports` (a struck port's own import capacity) go through this
+    /// one method rather than each re-deriving the comparison, so the two
+    /// "is this port working" facts can never drift apart (codex review
+    /// P2, Stage 10C: `tick_imports` originally derived import capacity
+    /// from `Region::port` alone and ignored this field entirely).
+    pub condition: Condition,
+}
+
+impl TransportNode {
+    /// Whether this node currently relays anything at all. A node carries
+    /// no physical `Capacity` of its own (unlike a `TransportLine`) to
+    /// scale down gradually, so this is the one binary fact every reader of
+    /// `condition` must use instead of comparing against
+    /// `NODE_OPERATIONAL_THRESHOLD` itself.
+    pub fn operational(&self) -> bool {
+        self.condition.get() > NODE_OPERATIONAL_THRESHOLD
+    }
 }
 
 /// docs/phase9-spec.md "輸送路線": what a `TransportLine` carries.
@@ -271,5 +302,41 @@ pub fn tick_transport_condition(world: &mut World) {
         let next = (line.condition.get() + delta).clamp(0.0, 1.0);
         world.transport_lines[i].condition =
             Condition::new(next).expect("clamped into 0.0..=1.0 above");
+    }
+}
+
+/// Stage 10C (docs/phase10-spec.md "3. 阻止"): every `TransportNode`'s own
+/// `condition` recovers `LINE_CONDITION_REPAIR_PER_TICK` per tick, capped at
+/// `Condition::FULL` - the required recovery path (CLAUDE.md「繰り返し踏んだ
+/// 欠陥」: "状態には必ず回復経路を持たせる。入ったら出られない状態を作らない"):
+/// a struck airfield or port left alone eventually repairs past `balance::
+/// NODE_OPERATIONAL_THRESHOLD` and reopens on its own, with no further
+/// action required from anyone.
+///
+/// Deliberately no *damage* branch here, unlike `tick_transport_condition`'s
+/// line-level twin: a node only ever loses `condition` through a deliberate
+/// `Action::StrikeNode`, never merely by its own region being contested - a
+/// region can sit under total enemy air superiority (or ground contact)
+/// without any strike ever having been ordered against its airfield/port
+/// specifically, and this stage's whole design (docs/phase10-spec.md "3.
+/// 阻止") treats striking a node as the deliberate act that makes it a
+/// target, not a passive consequence of the front moving near it - passive
+/// erosion of *lines* through a contested region is already
+/// `tick_transport_condition`'s own job.
+///
+/// Reuses `LINE_CONDITION_REPAIR_PER_TICK` rather than a second, separately
+/// -tuned magnitude: this is the same kind of "0..1 health value with no
+/// active damage this tick recovers toward `FULL`" quantity `TransportLine::
+/// condition` already models at this exact rate, and conventions ask that an
+/// existing, already-measured constant be reused instead of inventing an
+/// unmeasured twin for a mechanism that means the same thing.
+///
+/// Fixed iteration order (`world.transport_nodes`'s own `Vec` order) - no
+/// branch reads any other node's state, so this is trivially order-
+/// independent.
+pub fn tick_node_condition(world: &mut World) {
+    for i in 0..world.transport_nodes.len() {
+        let next = (world.transport_nodes[i].condition.get() + LINE_CONDITION_REPAIR_PER_TICK).min(1.0);
+        world.transport_nodes[i].condition = Condition::new(next).expect("clamped into 0.0..=1.0 above");
     }
 }

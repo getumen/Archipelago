@@ -778,6 +778,13 @@ fn national_focus_ai(faction: FactionId, initialized: &mut bool, obs: &Observati
 /// `PortAccess` grant it didn't actually need. Applying the same
 /// `focus::active`-gated multiplier here, exactly as `tick_imports` does,
 /// keeps the two in lockstep again.
+///
+/// Stage 10C (codex review P2, same survey as `trade::tick_imports`'s own
+/// fix): a struck port node stops importing there too, so this mirror must
+/// also skip it via `World::port_node_operational` - otherwise the AI would
+/// keep believing a wrecked port still contributed capacity and never
+/// notice the drop, the exact "second import path that drifts" shape this
+/// function's own history above already warns about.
 fn own_port_capacity(faction: FactionId, world: &World) -> f32 {
     let maritime_mult = if focus::active(world.faction(faction)) == Some(NationalFocus::MaritimeTrade) {
         FOCUS_MARITIME_IMPORT_CAPACITY_MULT
@@ -792,6 +799,7 @@ fn own_port_capacity(faction: FactionId, world: &World) -> f32 {
                 && r.port > 0.0
                 && !world.has_enemy_units(r.id, faction)
                 && !naval::is_port_blockaded(world, r.id)
+                && world.port_node_operational(r.id)
         })
         .map(|r| r.port * IMPORT_PER_PORT * (1.0 - r.devastation) * maritime_mult)
         .sum()

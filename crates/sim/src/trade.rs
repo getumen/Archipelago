@@ -103,8 +103,17 @@ pub fn tick_imports(world: &mut World) {
         // Stage 2D (docs/phase2-spec.md "2. 港の封鎖"): a blockaded port
         // imports nothing, independent of (and in addition to) land contest
         // — judged per port, so a blockade of one port never touches
-        // another's `import_flow`.
-        if contested[i] || naval::is_port_blockaded(world, world.regions[i].id) {
+        // another's `import_flow`. Stage 10C (codex review P2): a port
+        // whose own transport node was wrecked by `Action::StrikeNode`
+        // must stop importing the same way `logistics::recompute_supply`
+        // already stops routing supply through it — `port_node_operational`
+        // is the same gate that check goes through, so the two "is this
+        // port working" facts can't drift apart.
+        let region_id = world.regions[i].id;
+        if contested[i]
+            || naval::is_port_blockaded(world, region_id)
+            || !world.port_node_operational(region_id)
+        {
             continue;
         }
         let region = &world.regions[i];

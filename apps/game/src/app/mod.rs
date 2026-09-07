@@ -270,7 +270,9 @@ pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
         // bucketed with the other broad, no-specific-panel strategic orders
         // (`SetNationalFocus`'s own bucket) rather than inventing a
         // `RejectionTarget` variant nothing can route to yet.
-        Action::InterdictLine { .. } => RejectionTarget::Policy,
+        // Stage 10C: `StrikeNode` is in the same position - no panel issues
+        // it yet either, same bucket for the same reason.
+        Action::InterdictLine { .. } | Action::StrikeNode { .. } => RejectionTarget::Policy,
     }
 }
 

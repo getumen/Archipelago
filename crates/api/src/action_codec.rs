@@ -224,6 +224,12 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             let line = v.get("line").and_then(Value::as_u32).ok_or("expected integer `line`")?;
             Ok(Action::InterdictLine { line: TransportLineId(line) })
         }
+        // Stage 10C (docs/phase10-spec.md "3. 阻止"): `Action::StrikeNode`'s
+        // wire form, `interdict_line`'s own node-level twin.
+        "strike_node" => {
+            let node = v.get("node").and_then(Value::as_u32).ok_or("expected integer `node`")?;
+            Ok(Action::StrikeNode { node: TransportNodeId(node) })
+        }
         other => Err(format!("unknown action type `{other}`")),
     }
 }
@@ -376,6 +382,7 @@ fn actions_schema() -> Value {
             ],
         ),
         action_entry("interdict_line", Layer::Military, vec![field("line", "integer", true)]),
+        action_entry("strike_node", Layer::Military, vec![field("node", "integer", true)]),
     ])
 }
 
@@ -487,6 +494,9 @@ pub fn action_error_key(e: ActionError) -> &'static str {
         ActionError::InvalidLine => "invalid_line",
         ActionError::LineNotOwned => "line_not_owned",
         ActionError::LineNotHostile => "line_not_hostile",
+        ActionError::InvalidNode => "invalid_node",
+        ActionError::NodeNotStrikeable => "node_not_strikeable",
+        ActionError::NodeNotHostile => "node_not_hostile",
     }
 }
 

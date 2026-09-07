@@ -165,6 +165,10 @@ impl Simulation {
         // state gates is computed, the same "snapshot before this tick's
         // changes" convention `recompute_supply`'s own `contested` follows.
         transport::tick_transport_condition(&mut self.world);
+        // Stage 10C: a struck node's own passive recovery runs in the same
+        // slot, for the same reason - see `transport::tick_node_condition`'s
+        // own doc for why it carries no damage branch of its own.
+        transport::tick_node_condition(&mut self.world);
         logistics::recompute_supply(&mut self.world);
         logistics::distribute_supply(&mut self.world);
         timings.logistics += t3.elapsed();

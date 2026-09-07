@@ -271,6 +271,14 @@ fn instantaneous_grant(
             if graph.is_inbound(v) && leftover.vertex_budget[v] <= SUPPLY_FLOW_EPSILON {
                 continue;
             }
+            // Stage 10C: a struck node (`TransportGraph::node_operational`'s
+            // own doc) is never entered, from either side - blocks every
+            // edge touching it (intake, outbound sink, or a same-region
+            // line) with this one check, since a `TransportNode`'s own
+            // vertex index always falls in `0..graph.n_nodes`.
+            if v < graph.n_nodes && !graph.node_operational(v) {
+                continue;
+            }
             if visited[v] {
                 continue;
             }
@@ -726,6 +734,13 @@ struct TransportGraph {
     /// for *every* faction rather than baked in once against each region's
     /// legal owner (Defect 1 fix - see `line_eligible_for`'s own doc).
     contested_for: Vec<Vec<bool>>,
+    /// `node_operational[n]` - Stage 10C: `world.transport_nodes[n].
+    /// operational()`, snapshotted once per tick alongside every other
+    /// static fact here. Never per-faction (unlike
+    /// `contested_for`/`controlled`): a wrecked runway or cratered quay is
+    /// down for everyone, hauler and owner alike, not a fact that depends on
+    /// who's asking.
+    node_operational: Vec<bool>,
 }
 
 impl TransportGraph {
@@ -784,11 +799,10 @@ impl TransportGraph {
 
     /// The absolute amount of `line`'s own physical capacity that faction
     /// `f` itself may push through *in total this tick* - `f32::INFINITY`
-    /// (unconstrained) for every non-`Sea` line; otherwise `line_capacity`
-    /// times `naval::sea_line_factor` asked with `f` as the hauler (Defect 2
-    /// fix: never the line's legal-owner region). Used only to seed
-    /// `compute_transport_flow`'s `residual_line_faction` once per tick -
-    /// *not* re-evaluated per round or per candidate, so it becomes a real
+    /// (unconstrained) when neither throttle below actually applies;
+    /// otherwise `line_capacity` times whichever factor(s) do. Used only to
+    /// seed `compute_transport_flow`'s `residual_line_faction` once per tick
+    /// - *not* re-evaluated per round or per candidate, so it becomes a real
     /// shrinking budget rather than a ratio silently re-applied to whatever
     /// demand remains after each round (CLAUDE.md's standing rule against
     /// exactly that shape: re-deriving a candidate's share from a fraction
@@ -799,13 +813,47 @@ impl TransportGraph {
     /// came back numerically equal, `4.6153846` vs `4.615385`, because 20
     /// rounds of "grant 10% of what's left" converges to essentially 100%
     /// of `open`).
+    ///
+    /// Two independent factors, both `naval::sea_line_factor`'s "1 - highest
+    /// enemy share" shape:
+    /// - `naval::sea_line_factor` (Defect 2 fix): sea control, `Sea` lines
+    ///   only.
+    /// - `air::air_line_factor` (Stage 10C, docs/phase10-spec.md "3. 阻止"):
+    ///   air superiority over either endpoint region, *every* line kind -
+    ///   aircraft interdict a rail or road route exactly as they do a sea
+    ///   crossing, so this is not folded into `line_is_sea`'s branch at all.
+    ///
+    /// A non-`Sea` line under no air interdiction still returns `INFINITY`
+    /// outright rather than `line_capacity * 1.0` (a `Sea` line always gets
+    /// the finite form, air-throttled or not) - preserves the exact
+    /// pre-10C numeric result for every shipped scenario, none of which
+    /// places a `Domain::Air` unit yet, since `air_line_factor` can only
+    /// ever read `1.0` with `Region::air_superiority` at `NEUTRAL`
+    /// everywhere.
     fn line_faction_factor(&self, world: &World, line: usize, f: usize) -> f32 {
-        if !self.line_is_sea[line] {
-            return f32::INFINITY;
-        }
         let (ra, rb) = self.line_regions[line];
-        let factor = naval::sea_line_factor(world, RegionId(ra as u32), RegionId(rb as u32), FactionId(f as u32));
-        self.line_capacity[line] * factor
+        let air = air::air_line_factor(world, RegionId(ra as u32), RegionId(rb as u32), FactionId(f as u32));
+        if !self.line_is_sea[line] {
+            return if air >= 1.0 { f32::INFINITY } else { self.line_capacity[line] * air };
+        }
+        let sea = naval::sea_line_factor(world, RegionId(ra as u32), RegionId(rb as u32), FactionId(f as u32));
+        self.line_capacity[line] * sea * air
+    }
+
+    /// Stage 10C (docs/phase10-spec.md "3. 阻止": "飛行場と港への攻撃"):
+    /// whether `node` (an index into `World::transport_nodes`) currently
+    /// relays anything at all - `balance::NODE_OPERATIONAL_THRESHOLD`'s own
+    /// doc explains why this is a binary fact rather than a graded budget.
+    /// Snapshotted once per tick in `build_transport_graph` (`node_
+    /// operational`, below), read by every BFS below (`compute_transport_
+    /// flow`'s round loop and `instantaneous_grant`) at the point a vertex
+    /// is about to be visited - see `build_transport_graph`'s own doc for
+    /// why gating vertex visitation there, rather than any one edge kind,
+    /// is what makes this reach *every* edge touching the node (its own
+    /// production/import intake, its outbound demand/sea-demand/air-demand
+    /// sink, and any same-region line into or out of it) with one check.
+    fn node_operational(&self, node: usize) -> bool {
+        self.node_operational[node]
     }
 }
 
@@ -837,6 +885,14 @@ fn build_transport_graph(world: &World) -> TransportGraph {
                 .collect()
         })
         .collect();
+
+    // Stage 10C: `node_operational[n]` - see `TransportGraph::node_
+    // operational`'s own doc. Fixed order (`world.transport_nodes`'s own
+    // `Vec` order). Goes through `TransportNode::operational` rather than
+    // comparing `condition` against `NODE_OPERATIONAL_THRESHOLD` here
+    // directly, so this and `trade::tick_imports`'s own port-operability
+    // check can never drift apart (codex review P2).
+    let node_operational: Vec<bool> = world.transport_nodes.iter().map(|n| n.operational()).collect();
 
     // `controlled[r][f]` - see `compute_transport_flow`'s own doc, "Which
     // lines an occupier may use". Fixed order (`world.regions` then
@@ -924,7 +980,18 @@ fn build_transport_graph(world: &World) -> TransportGraph {
         }
     }
 
-    TransportGraph { n_nodes, n_regions, n_zones, adj, line_capacity, line_regions, line_is_sea, controlled, contested_for }
+    TransportGraph {
+        n_nodes,
+        n_regions,
+        n_zones,
+        adj,
+        line_capacity,
+        line_regions,
+        line_is_sea,
+        controlled,
+        contested_for,
+        node_operational,
+    }
 }
 
 /// Walks `parent` back from `sink` to its source vertex, collecting every
@@ -1141,6 +1208,12 @@ fn compute_transport_flow(world: &World) -> TransportFlow {
                     }
                     let v = edge.to;
                     if is_inbound(v) && vertex_budget[v] <= SUPPLY_FLOW_EPSILON {
+                        continue;
+                    }
+                    // Stage 10C: see `instantaneous_grant`'s identical check
+                    // for why gating vertex visitation here reaches every
+                    // edge touching a struck node with one guard.
+                    if v < n_nodes && !graph.node_operational(v) {
                         continue;
                     }
                     if visited[v] {

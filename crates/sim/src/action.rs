@@ -5,17 +5,17 @@ use crate::air;
 use crate::balance::{
     AIR_UNIT_MACHINERY_COST, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT,
     FOCUS_SWITCH_DAYS, IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_TEXT_MAX_CHARS,
-    UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
+    NODE_STRIKE_DAMAGE, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
 use crate::focus::{self, NationalFocus};
 use crate::good::Good;
-use crate::ids::{FactionId, RegionId, TransportLineId, UnitId};
+use crate::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use crate::logistics;
 use crate::military::{fleet_move_required, move_required, Movement, Unit};
 use crate::naval;
-use crate::transport::Condition;
+use crate::transport::{Condition, TransportNodeKind};
 use crate::world::{Domain, Station, World};
 
 /// Stage 4B (docs/phase4-spec.md "Stage 4B"): `RespondToNaturalLanguageProposal`
@@ -113,6 +113,21 @@ pub enum Action {
     /// instead, since restoring a route is funded, gradual infrastructure
     /// work, not a one-shot strike.
     InterdictLine { line: TransportLineId },
+    /// Stage 10C (docs/phase10-spec.md "3. 阻止": "飛行場ノードと港ノードを叩
+    /// けること"): a deliberate strike against one `transport::TransportNode`
+    /// - lowers its own `condition` by `balance::NODE_STRIKE_DAMAGE` outright,
+    /// the node-level twin of `InterdictLine`'s line-level strike. Only valid
+    /// against an `Airfield` or `Port` node (design.md §8's own "物流拠点";
+    /// a `Depot`/`Junction` target is rejected - `ActionError::
+    /// NodeNotStrikeable`) in a region this faction is currently at war with
+    /// (`ActionError::NodeNotHostile`). Deliberately no locality requirement,
+    /// the same as `InterdictLine`'s own doc: this is the one action stage
+    /// 10C gives air power to demonstrate design.md §8's "敵は領土そのもの
+    /// ではなく、物流拠点を攻撃することも可能" without requiring this crate to
+    /// model an actual air-to-ground strike mission - air becomes this
+    /// action's (and `InterdictLine`'s) principal user from 10D's AI onward,
+    /// never its only legal one.
+    StrikeNode { node: TransportNodeId },
 }
 
 /// One of the four decision domains every `Action` belongs to (design.md
@@ -226,8 +241,11 @@ impl Action {
             // (`Economy`'s own boundary is national resource *policy*,
             // which this isn't: it's a one-shot combat-like act against a
             // specific enemy target, the same shape `MoveUnit` into
-            // contact already has).
-            | Action::InterdictLine { .. } => Layer::Military,
+            // contact already has). `StrikeNode` (Stage 10C) is
+            // `InterdictLine`'s own node-level twin, the same reasoning
+            // applies verbatim.
+            | Action::InterdictLine { .. }
+            | Action::StrikeNode { .. } => Layer::Military,
 
             Action::SetConscription(_)
             | Action::SetCivilianRation(_)
@@ -287,7 +305,8 @@ impl Action {
             | Action::BreakTreaty { .. }
             | Action::ProposeInNaturalLanguage { .. }
             | Action::RespondToNaturalLanguageProposal { .. }
-            | Action::InterdictLine { .. } => None,
+            | Action::InterdictLine { .. }
+            | Action::StrikeNode { .. } => None,
         }
     }
 }
@@ -332,6 +351,17 @@ pub enum ActionError {
     /// line with mixed ownership, one owned by the acting faction itself,
     /// or one whose owner isn't a current war opponent).
     LineNotHostile,
+    /// Stage 10C: `Action::StrikeNode` named a `TransportNodeId` past the
+    /// end of `World::transport_nodes` - `InvalidLine`'s node-level twin.
+    InvalidNode,
+    /// Stage 10C: `Action::StrikeNode` named a node whose `kind` isn't
+    /// `Airfield` or `Port` (design.md §8's own "物流拠点") - a `Depot`/
+    /// `Junction` is not a legal strike target.
+    NodeNotStrikeable,
+    /// Stage 10C: `Action::StrikeNode` named a node whose own region isn't
+    /// owned by a faction this one is currently at war with (its own
+    /// region, or one at peace) - `LineNotHostile`'s node-level twin.
+    NodeNotHostile,
 }
 
 pub fn apply_action(
@@ -367,6 +397,7 @@ pub fn apply_action(
             apply_respond_nl(world, faction, from, terms, accept)
         }
         Action::InterdictLine { line } => apply_interdict_line(world, faction, line),
+        Action::StrikeNode { node } => apply_strike_node(world, faction, node),
     }
 }
 
@@ -566,7 +597,17 @@ fn apply_recruit(
     let station = match domain {
         Domain::Land => Station::Region(region_id),
         Domain::Sea => {
-            if !world.has_port_node(region_id) {
+            // Stage 10C (codex review P2, same survey as the `Domain::Air`
+            // arm below): a port node wrecked by `Action::StrikeNode` must
+            // refuse a new fleet exactly as it already refuses one with no
+            // port at all - reusing `ActionError::NoPort` rather than a
+            // fresh variant, since "no port node" and "the port node is
+            // currently rubble" both cash out to the same fact from a
+            // recruiting faction's point of view: there is nowhere here to
+            // launch a fleet from right now. Gated on the same shared
+            // `World::port_node_operational` `trade::tick_imports` already
+            // uses, never a second, differently-shaped check.
+            if !world.port_node_operational(region_id) {
                 return Err(ActionError::NoPort);
             }
             let zone = naval::home_zone(world, region_id).ok_or(ActionError::NoPort)?;
@@ -577,8 +618,34 @@ fn apply_recruit(
         // `Domain::Sea`'s port requirement above - `World::airfield_node`
         // is the sole authority for whether `region_id` has one at all
         // (`transport::TransportNodeKind::Airfield`'s own doc).
+        //
+        // Stage 10C (codex review P2): existence alone isn't enough any
+        // more than it is for `Domain::Sea` above - a node wrecked by
+        // `Action::StrikeNode` must refuse a fresh squadron the same way a
+        // missing node does, via the exact `TransportNode::operational`
+        // gate `air::node_air_power`/`logistics`'s supply graph already use
+        // (never a second, independently-derived "does this airfield work"
+        // check). Reuses `ActionError::NoAirfield` rather than a new
+        // variant - "no airfield" and "the airfield is currently rubble"
+        // are the same fact to a recruiting faction: nowhere to base a
+        // squadron right now.
         Domain::Air => {
-            let node = world.airfield_node(region_id).ok_or(ActionError::NoAirfield)?;
+            // `codex review` (P2): a region may declare several airfields
+            // and `logistics::build_transport_graph` gates each one's vertex
+            // independently, so "can this region base a squadron" has to ask
+            // every airfield, not just the lowest-id one - otherwise
+            // striking the first grounded a region that still had a working
+            // field, and striking a later one changed nothing. Base the new
+            // squadron at an airfield that is actually standing.
+            let node = world
+                .transport_nodes
+                .iter()
+                .find(|n| {
+                    n.region == region_id
+                        && n.kind == crate::transport::TransportNodeKind::Airfield
+                        && n.operational()
+                })
+                .ok_or(ActionError::NoAirfield)?;
             Station::Airfield(node.id)
         }
     };
@@ -1210,6 +1277,37 @@ fn apply_interdict_line(
 
     let next = (existing.condition.get() - LINE_INTERDICTION_DAMAGE).max(0.0);
     world.transport_lines[line.index()].condition =
+        Condition::new(next).expect("clamped into 0.0..=1.0 above");
+    Ok(())
+}
+
+/// `Action::StrikeNode` (docs/phase10-spec.md "3. 阻止": "飛行場と港への攻撃")
+/// - `apply_interdict_line`'s node-level twin. Valid only against an
+/// `Airfield` or `Port` node (`ActionError::NodeNotStrikeable` otherwise -
+/// design.md §8 names ports and airfields, not every transport node, as
+/// legitimate strike targets) whose own region is owned by a faction
+/// `faction` is currently at war with, distinct from `faction` itself
+/// (`ActionError::NodeNotHostile`) - the same "hostile and not your own"
+/// shape `apply_interdict_line` checks per line endpoint, collapsed to one
+/// region here since a node (unlike a line) has only one. No locality
+/// requirement, for the same reason `apply_interdict_line` has none: see
+/// `Action::StrikeNode`'s own doc.
+fn apply_strike_node(
+    world: &mut World,
+    faction: FactionId,
+    node: TransportNodeId,
+) -> Result<(), ActionError> {
+    let existing = world.transport_nodes.get(node.index()).ok_or(ActionError::InvalidNode)?;
+    if existing.kind != TransportNodeKind::Airfield && existing.kind != TransportNodeKind::Port {
+        return Err(ActionError::NodeNotStrikeable);
+    }
+    let owner = world.region(existing.region).owner;
+    if owner == faction || !world.diplomacy.is_at_war(faction, owner) {
+        return Err(ActionError::NodeNotHostile);
+    }
+
+    let next = (existing.condition.get() - NODE_STRIKE_DAMAGE).max(0.0);
+    world.transport_nodes[node.index()].condition =
         Condition::new(next).expect("clamped into 0.0..=1.0 above");
     Ok(())
 }

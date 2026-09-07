@@ -8,9 +8,9 @@ use crate::balance::{
     CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE,
     FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
     INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_COOLDOWN_DAYS,
-    OCCUPATION_RATE, SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT,
-    TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT,
-    UNIT_MANPOWER, UNIT_ORG,
+    NODE_OPERATIONAL_THRESHOLD, OCCUPATION_RATE, SEPARATISM_THRESHOLD,
+    STRIKE_DAYS, STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
+    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
 };
 use crate::construction::{self, Construction, Project};
 use crate::diplomacy::{self, Treaty, TreatyTerm};
@@ -33,7 +33,7 @@ use crate::scenario;
 use crate::sim::{Outcome, Simulation};
 use crate::trade;
 use crate::transport::{self, Capacity, Condition, TransportLineKind, TransportNodeKind};
-use crate::world::{Domain, DominationShare, Station, VictoryCondition, VictoryDeclaration, World};
+use crate::world::{AirSuperiority, Domain, DominationShare, Station, VictoryCondition, VictoryDeclaration, World};
 
 /// Stage 6C (docs/phase6-spec.md "Stage 6C" item 1): this test used to
 /// "cut" the corridor by reassigning `RegionId(2)`'s `owner` to another
@@ -1675,6 +1675,149 @@ fn contested_port_does_not_import() {
         total > 0.0,
         "faction 1's other, uncontested ports should still import: {total}"
     );
+}
+
+/// Stage 10C (codex review P2): `tick_imports` used to derive a region's
+/// import capacity from `Region::port` alone, so a port whose own
+/// `TransportNode` was struck to rubble by `Action::StrikeNode` kept
+/// crediting faction stock and recording `import_flow` every tick even
+/// though `logistics::recompute_supply` had already stopped routing any
+/// supply through it (`striking_a_port_node_stops_supply_routed_through_it`
+/// covers that side). This is the import-side twin: a struck port must stop
+/// importing, and must resume once it repairs past `NODE_OPERATIONAL_
+/// THRESHOLD` - the same recovery-path requirement (CLAUDE.md「繰り返し踏ん
+/// だ欠陥」: 状態には必ず回復経路を持たせる).
+///
+/// **Confirmed this test can fail.** Temporarily reverted `tick_imports`'s
+/// gate to only `contested[i] || naval::is_port_blockaded(...)` (dropping
+/// the `!world.port_node_operational(region_id)` clause, i.e. exactly the
+/// P2 defect as filed). Re-ran: `after_strike` came back `3.6000001`,
+/// bit-identical to `before`'s own `3.6000001`, even though `Action::
+/// StrikeNode` had already driven the port node's own `condition` to `0.4`
+/// - the strike "succeeded" on paper while a wrecked port kept importing as
+/// if nothing had happened. Restored the gate before committing; with the
+/// fix in place the same run gives `before=3.6000001`, `after_strike=0`,
+/// `food_stock` unchanged across the struck tick at `203.6`, and
+/// `after_recovery=3.6000001` again once the node repairs.
+#[test]
+fn a_struck_port_stops_importing_and_resumes_once_repaired() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1);
+    let region = RegionId(5); // 東海 (Tokai) - one of faction 1's own ports.
+    let attacker = FactionId(2); // mvp's default empty `blocs` means unconditional war.
+    assert_ne!(world.region(region).owner, attacker, "sanity: distinct factions");
+    // Zero faction 1's other two ports (信越・北陸, 近畿) so every import it
+    // lands can only have come through 東海 - isolates the stock-crediting
+    // half of the defect (§ trade.rs's own doc: "a wrecked port keeps
+    // accepting imports, crediting faction stock") from the unrelated fact
+    // that a multi-port faction still imports fine through its other ports.
+    world.region_mut(RegionId(4)).port = 0.0;
+    world.region_mut(RegionId(6)).port = 0.0;
+    {
+        let f = world.faction_mut(faction);
+        f.stock[Good::Machinery.index()] = 1_000_000.0;
+        f.import_plan[Good::Food.index()] = 1_000.0; // saturate capacity
+    }
+
+    trade::tick_imports(&mut world);
+    let before = world.region(region).import_flow;
+    assert!(before > 1.0, "sanity: an intact, uncontested, unblockaded port must import something real: {before}");
+    let food_stock_before_strike = world.faction(faction).stock[Good::Food.index()];
+    assert!(food_stock_before_strike > 0.0, "sanity: that import must have actually credited Food to faction stock: {food_stock_before_strike}");
+
+    let port = world.port_node(region).expect("tokai has a Port node").id;
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
+        .expect("a hostile Port node is a valid StrikeNode target");
+    assert!(
+        world.transport_node(port).condition.get() <= NODE_OPERATIONAL_THRESHOLD,
+        "one strike against a full-health node must cross NODE_OPERATIONAL_THRESHOLD outright: got {}",
+        world.transport_node(port).condition.get()
+    );
+
+    trade::tick_imports(&mut world);
+    let after_strike = world.region(region).import_flow;
+    assert_eq!(
+        after_strike, 0.0,
+        "a struck port must stop importing outright, same demand/Machinery as before: before={before}, after_strike={after_strike}"
+    );
+    let food_stock_after_strike = world.faction(faction).stock[Good::Food.index()];
+    assert_eq!(
+        food_stock_after_strike, food_stock_before_strike,
+        "a struck port's own tick must not have credited any further Food to faction stock: \
+         before_strike={food_stock_before_strike}, after_strike={food_stock_after_strike}"
+    );
+
+    // Recovery path: passive repair alone (no further action, no repeated
+    // strike) must eventually reopen the node and let imports resume.
+    for _ in 0..40 {
+        transport::tick_node_condition(&mut world);
+    }
+    assert!(
+        world.transport_node(port).condition.get() > NODE_OPERATIONAL_THRESHOLD,
+        "passive repair alone must eventually reopen a struck node - no state without a recovery path"
+    );
+    trade::tick_imports(&mut world);
+    let after_recovery = world.region(region).import_flow;
+    assert!(
+        after_recovery > before * 0.9,
+        "once the node itself recovers, imports through it must resume too: before={before}, after_recovery={after_recovery}"
+    );
+}
+
+/// Full enumeration sweep (docs/phase10-spec.md §6 Stage 10C, the same
+/// codex review P2 survey that found `tick_imports` and this stage's own
+/// `Domain::Air` recruit gap): `Action::RecruitUnit { domain: Domain::Sea,
+/// .. }` used to ask only `World::has_port_node` - a port node wrecked by
+/// `Action::StrikeNode` still let a faction launch a brand new fleet from
+/// it, the exact same "keeps producing units at a dead node" shape the
+/// `Domain::Air` fix above closes, one domain over. `apply_recruit`'s
+/// `Domain::Sea` arm now also asks `World::port_node_operational` - the
+/// same shared gate `trade::tick_imports` already uses - before `naval::
+/// home_zone` ever runs, reusing `ActionError::NoPort` rather than a new
+/// variant.
+///
+/// **Confirmed this test can fail.** Temporarily removed the
+/// `if !world.port_node_operational(region_id) { return Err(ActionError::
+/// NoPort); }` check from `apply_recruit`'s `Domain::Sea` arm. Re-ran: the
+/// `RecruitUnit` against the freshly-struck port (`condition = 0.4`, below
+/// `NODE_OPERATIONAL_THRESHOLD`) returned `Ok(())` and `world.units.len()`
+/// grew by one, instead of the expected `Err(NoPort)` with the unit count
+/// unchanged. Restored the check before committing.
+#[test]
+fn recruit_fleet_at_a_struck_port_is_rejected_until_repaired() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(1);
+    let region = RegionId(5); // 東海 (Tokai) - one of faction 1's own ports.
+    let attacker = FactionId(2); // mvp's default empty `blocs` means unconditional war.
+    assert_ne!(world.region(region).owner, attacker, "sanity: distinct factions");
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+
+    let port = world.port_node(region).expect("tokai has a Port node").id;
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
+        .expect("a hostile Port node is a valid StrikeNode target");
+    assert!(
+        world.transport_node(port).condition.get() <= NODE_OPERATIONAL_THRESHOLD,
+        "sanity: one strike against a full-health node must cross NODE_OPERATIONAL_THRESHOLD outright"
+    );
+
+    let units_before = world.units.len();
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea });
+    assert_eq!(result, Err(ActionError::NoPort), "a struck port must not let a faction launch a new fleet from it");
+    assert_eq!(world.units.len(), units_before, "a rejected recruit must not have raised anything");
+
+    // Recovery path: passive repair alone reopens recruiting too.
+    for _ in 0..40 {
+        transport::tick_node_condition(&mut world);
+    }
+    assert!(
+        world.transport_node(port).condition.get() > NODE_OPERATIONAL_THRESHOLD,
+        "passive repair alone must eventually reopen the port"
+    );
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea });
+    assert_eq!(result, Ok(()), "once the port repairs past the threshold, recruiting there must succeed again");
+    assert_eq!(world.units.len(), units_before + 1, "exactly one unit must have been raised once the port reopened");
 }
 
 /// Stage 2C acceptance test: `logistics::recompute_supply`'s node-side cap
@@ -8579,6 +8722,7 @@ fn unreachable_airfield_supplies_no_air_unit() {
         name: "Isolated Airfield".to_string(),
         kind: TransportNodeKind::Airfield,
         region,
+        condition: Condition::FULL,
     });
 
     let unit_id = UnitId(world.units.len() as u32);
@@ -8705,6 +8849,7 @@ fn two_air_units_at_one_airfield_share_its_capacity() {
             name: "Test Airfield".to_string(),
             kind: TransportNodeKind::Airfield,
             region,
+            condition: Condition::FULL,
         });
         world.transport_lines.push(transport::TransportLine {
             id: TransportLineId(world.transport_lines.len() as u32),
@@ -9196,4 +9341,520 @@ fn air_superiority_has_no_effect_outside_the_operating_radius() {
             "a region far outside AIR_OPERATING_RADIUS_KM must stay fully neutral regardless of committed strength elsewhere (faction {f})"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Stage 10C (docs/phase10-spec.md "3. 阻止"): interdiction actually bites.
+// Air superiority throttles line capacity (with a recovery path - criteria
+// 1/2), and striking an airfield/port node stops supply routed through it,
+// including without ever occupying the region it sits in (criteria 3/4 -
+// design.md §8's own case for this whole phase, and this stage's own "the
+// decisive one").
+// ---------------------------------------------------------------------
+
+/// Isolates 南東北(2)'s own rail corridor from 北東北(1) for the two
+/// line-throttle tests below, `sea_control_throttles_strait`'s exact
+/// isolation shape one region over: zeroes 関東(3) (the only other neighbor
+/// that could otherwise backfill 南東北 through the same rail network) and
+/// 南東北 itself, then floods 北東北 with production, so the *only* route
+/// this measures is the one `hokkaido<->kita_tohoku`... `kita_tohoku<->
+/// minami_tohoku` `Rail` line - a line kind the naval throttle (`naval::
+/// sea_line_factor`) never touches at all, which is exactly what
+/// discriminates "Stage 10C adds a new cause" from "Stage 9's sea throttle
+/// was already doing this".
+fn isolate_minami_tohoku_rail_corridor(world: &mut World) {
+    for &r in &[RegionId(2), RegionId(3)] {
+        world.region_mut(r).capacity = [0.0; GOOD_COUNT];
+        world.region_mut(r).port = 0.0;
+    }
+    for good in crate::good::ALL_GOODS {
+        world.region_mut(RegionId(1)).capacity[good.index()] = 1000.0;
+    }
+    world.region_mut(RegionId(1)).infrastructure = 1.0;
+    world.region_mut(RegionId(2)).infrastructure = 1.0;
+}
+
+/// Ten garrison units in `region`, well above any one line's own capacity -
+/// `sea_control_throttles_strait`'s own reasoning: demand, not one unit's
+/// tiny appetite, must be what a throttle actually holds back.
+fn push_garrison(world: &mut World, region: RegionId, owner: FactionId) {
+    for i in 0..10 {
+        let id = crate::ids::UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner,
+            name: format!("Garrison {i}"),
+            station: Station::Region(region),
+            movement: None,
+            manpower: 1.0,
+            equipment: UNIT_EQUIPMENT,
+            organization: 100.0,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+        });
+    }
+}
+
+/// Stage 10C acceptance criterion 1 (docs/phase10-spec.md §6): "制空権を取
+/// ると、その地域を通る路線の実効容量が落ちる。" Deliberately a `Rail` line,
+/// not a `Sea` one - `naval::sea_line_factor` already throttles `Sea` lines
+/// on its own; the discriminating claim Stage 10C adds is that *every* line
+/// kind now answers to air superiority, `air::air_line_factor` folded into
+/// `logistics::TransportGraph::line_faction_factor` alongside (never instead
+/// of) the pre-existing sea throttle. Mirrors `sea_control_throttles_strait`'s
+/// structure with one field substituted (`Region::air_superiority` in place
+/// of `SeaZone::control`).
+///
+/// **Confirmed this test can fail.** Temporarily hardcoded `air::
+/// air_line_factor` to always return `1.0` (as if Stage 10C never folded it
+/// into `line_faction_factor` at all). Re-ran: `contested` came back `11`,
+/// identical to `open`'s own `11`, instead of collapsing to the real fixed
+/// behavior's `2.115385` - measured from that run, restored before
+/// committing.
+#[test]
+fn air_superiority_throttles_a_rail_lines_capacity() {
+    let build = |enemy_air: f32| {
+        let mut world = scenario::build_world();
+        isolate_minami_tohoku_rail_corridor(&mut world);
+
+        let n_factions = world.factions.len();
+        let mut shares = vec![AirSuperiority::NEUTRAL; n_factions];
+        // faction 1 (中央同盟) dominating the airspace over 南東北 - a
+        // faction with no ground presence there at all, since air
+        // superiority is a fact about the sky, not the ground.
+        shares[1] = AirSuperiority::new(enemy_air).expect("test share stays in 0.0..=1.0");
+        world.region_mut(RegionId(2)).air_superiority = shares;
+
+        let owner = world.region(RegionId(2)).owner;
+        push_garrison(&mut world, RegionId(2), owner);
+
+        logistics::recompute_supply(&mut world);
+        world.supply[RegionId(2).index()]
+    };
+
+    let open = build(0.0);
+    let contested = build(0.9);
+
+    assert!(open > 0.0, "sanity: the rail corridor should relay something when the airspace is neutral: {open}");
+    assert!(
+        contested < open * 0.3,
+        "air superiority over the destination region must cut a Rail line's throughput just as it does a Sea one: \
+         open={open}, contested={contested}"
+    );
+}
+
+/// Stage 10C acceptance criterion 2 (docs/phase10-spec.md §6): "効果に回復
+/// 経路がある。" Same rail corridor, but driven end to end through the real
+/// pipeline (`air::tick_air_superiority` from a genuine air unit, not a
+/// hand-set `Region::air_superiority`) rather than criterion 1's isolated
+/// unit-level check: an enemy air unit based within `AIR_OPERATING_RADIUS_KM`
+/// of 南東北(2) measurably cuts the corridor; once that unit is gone and
+/// `tick_air_superiority` recomputes, the very next `recompute_supply` must
+/// show it recovered - `Region::air_superiority`'s own Stage 10B recovery
+/// path (back to `AirSuperiority::NEUTRAL`) actually reaching all the way
+/// through to delivered supply is what this test proves, not merely that
+/// the field itself resets (`air_superiority_returns_to_neutral_once_air_
+/// units_are_gone` already covers that in isolation).
+///
+/// **Confirmed this test can fail.** Temporarily changed `logistics::
+/// TransportGraph::line_faction_factor` to skip folding `air::air_line_
+/// factor` in for non-`Sea` lines (returning `f32::INFINITY` unconditionally,
+/// Stage 10C's own pre-change behaviour). Re-ran: `during` came back `11`,
+/// equal to `before`'s own `11` (fixed behaviour: `during` collapses to `0`,
+/// `after` recovers back to `11`) - the enemy air unit's presence changed
+/// nothing on this `Rail` line. Reverted before committing.
+#[test]
+fn air_superiority_effect_on_supply_recovers_once_air_units_leave() {
+    let mut world = scenario::build_world();
+    isolate_minami_tohoku_rail_corridor(&mut world);
+    let defender = world.region(RegionId(2)).owner;
+    push_garrison(&mut world, RegionId(2), defender);
+
+    // Deliberate positions (mvp's own schematic `position` field carries no
+    // physical scale - `Region::position`'s own doc), the same
+    // `air_superiority_derives_from_...` convention: place the target and
+    // the enemy's own airfield comfortably inside AIR_OPERATING_RADIUS_KM of
+    // each other.
+    world.region_mut(RegionId(2)).position = [0.0, 0.0];
+    let enemy = world.region(RegionId(4)).owner; // 信越・北陸, 中央同盟 - not the corridor's owner
+    assert_ne!(enemy, defender, "sanity: the enemy air unit's own faction must not be the corridor's owner");
+    world.region_mut(RegionId(4)).position = [50.0, 0.0];
+    let enemy_airfield = world.airfield_node(RegionId(4)).expect("Stage 10A scenarios declare an airfield in every region").id;
+
+    logistics::recompute_supply(&mut world);
+    let before = world.supply[RegionId(2).index()];
+    assert!(before > 0.0, "sanity: the corridor should relay something before any enemy air unit exists: {before}");
+
+    let enemy_unit = push_full_strength_air_unit(&mut world, enemy, enemy_airfield, 50.0);
+    air::tick_air_superiority(&mut world);
+    logistics::recompute_supply(&mut world);
+    let during = world.supply[RegionId(2).index()];
+    assert!(during < before * 0.3, "the enemy air unit's presence must cut the corridor: before={before}, during={during}");
+
+    world.unit_mut(enemy_unit).alive = false;
+    air::tick_air_superiority(&mut world);
+    logistics::recompute_supply(&mut world);
+    let after = world.supply[RegionId(2).index()];
+    assert!(
+        after > before * 0.9,
+        "once the enemy air unit is gone and air_superiority itself recovers, supply through the corridor must \
+         recover too - no state without a recovery path: before={before}, during={during}, after={after}"
+    );
+}
+
+/// Stage 10C (codex review P2): `Action::StrikeNode` on an `Airfield` used
+/// to lower `condition` and stop transport traversal through it and
+/// nothing else - `tick_air_superiority` kept counting every squadron
+/// stationed there at full `combat_power()`, immediately, with no
+/// dependence on the attrition their now-cut-off supply would only start
+/// inflicting many ticks later. `air::node_air_power`'s new
+/// `TransportNode::operational` gate (the same one `logistics`'s supply
+/// graph and `World::port_node_operational` already share) closes this: a
+/// struck airfield's own squadron must stop projecting air superiority the
+/// very same tick it's struck, and resume the very same tick it repairs
+/// past `NODE_OPERATIONAL_THRESHOLD` - no separate recovery bookkeeping,
+/// since `tick_air_superiority` (10B's own doc) already recomputes fresh
+/// every call.
+///
+/// **Confirmed this test can fail.** Temporarily reverted `node_air_power`'s
+/// `if !world.transport_node(node).operational() { continue; }` gate (the
+/// exact P2 defect as filed - `StrikeNode` still worked, but nothing read
+/// `operational()` from this function at all). Re-ran: `after_strike` came
+/// back `1.0`, bit-identical to `before`'s own `1.0`, even though
+/// `Action::StrikeNode` had already driven the airfield's own `condition`
+/// to `0.4` - a wrecked airfield's squadron kept projecting full air
+/// superiority as if nothing had happened. Restored the gate before
+/// committing; with the fix in place the same run gives `before=1.0`,
+/// `after_strike=0.0`, and `after_recovery=1.0` again once the node
+/// repairs.
+#[test]
+fn striking_an_airfield_stops_air_superiority_projection_and_resumes_once_repaired() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0); // 東方連合 owns 北海道 (RegionId(0)).
+    let attacker = FactionId(2); // mvp's default empty `blocs` means unconditional war.
+    assert_ne!(world.region(RegionId(0)).owner, attacker, "sanity: distinct factions");
+    let base = RegionId(0);
+    let target = RegionId(1);
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(target).position = [50.0, 0.0];
+    let airfield = world.airfield_node(base).expect("Stage 10A scenarios declare an airfield in every region").id;
+
+    push_full_strength_air_unit(&mut world, faction, airfield, 20.0);
+    air::tick_air_superiority(&mut world);
+    let before = world.region(target).air_superiority[faction.index()].get();
+    assert!((before - 1.0).abs() < 1e-5, "sanity: the sole reaching faction holds full superiority before any strike: {before}");
+
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: airfield })
+        .expect("a hostile Airfield node is a valid StrikeNode target");
+    assert!(
+        world.transport_node(airfield).condition.get() <= NODE_OPERATIONAL_THRESHOLD,
+        "one strike against a full-health node must cross NODE_OPERATIONAL_THRESHOLD outright: got {}",
+        world.transport_node(airfield).condition.get()
+    );
+
+    air::tick_air_superiority(&mut world);
+    let after_strike = world.region(target).air_superiority[faction.index()].get();
+    assert_eq!(
+        after_strike, 0.0,
+        "a struck airfield's own squadron must project no air superiority at all: before={before}, after_strike={after_strike}"
+    );
+
+    // Recovery path: passive repair alone (no further action, no repeated
+    // strike, and no movement - Stage 10A ships no `Domain::Air` movement at
+    // all) must eventually reopen the node and restore projection.
+    for _ in 0..40 {
+        transport::tick_node_condition(&mut world);
+    }
+    assert!(
+        world.transport_node(airfield).condition.get() > NODE_OPERATIONAL_THRESHOLD,
+        "passive repair alone must eventually reopen a struck airfield - no state without a recovery path"
+    );
+    air::tick_air_superiority(&mut world);
+    let after_recovery = world.region(target).air_superiority[faction.index()].get();
+    assert!(
+        (after_recovery - 1.0).abs() < 1e-5,
+        "once the airfield itself recovers, its squadron's air superiority projection must resume too: \
+         before={before}, after_strike={after_strike}, after_recovery={after_recovery}"
+    );
+}
+
+/// Stage 10C (codex review P2), the sibling of `recruit_air_unit_without_
+/// airfield_is_rejected`: existence of an `Airfield` node was never enough
+/// on its own - a node wrecked by `Action::StrikeNode` still let a faction
+/// raise a brand new squadron there, an airframe appearing out of a smoking
+/// runway. `apply_recruit`'s `Domain::Air` arm now also asks `TransportNode
+/// ::operational` (reusing `ActionError::NoAirfield`, since "no airfield"
+/// and "the airfield is rubble" are the same fact to a recruiting faction),
+/// and the same passive repair that reopens supply/air-superiority
+/// (`striking_an_airfield_stops_air_superiority_projection_and_resumes_
+/// once_repaired`) reopens recruiting too, with no separate action required.
+///
+/// **Confirmed this test can fail.** Temporarily removed the
+/// `if !node.operational() { return Err(ActionError::NoAirfield); }` check
+/// from `apply_recruit`'s `Domain::Air` arm (the exact P2 defect as filed).
+/// Re-ran: the `RecruitUnit` against the freshly-struck airfield (`condition
+/// = 0.4`, below `NODE_OPERATIONAL_THRESHOLD`) returned `Ok(())` and
+/// `world.units.len()` grew from `0` to `1`, instead of the expected
+/// `Err(NoAirfield)` with the unit count unchanged. Restored the check
+/// before committing.
+/// A region with two of the same node kind must be judged on **all** of
+/// them (`codex review`, P2). `World::port_node`/`airfield_node` return the
+/// lowest-id node, and answering "is this region's port/airfield working"
+/// from that one node alone disagreed with
+/// `logistics::build_transport_graph`, which gates every node's vertex
+/// independently: striking the *second* port changed nothing, and striking
+/// the *first* shut the region down even though another was still standing.
+///
+/// **Confirmed this test can fail.** Reverting `port_node_operational` to
+/// `self.port_node(region).is_some_and(|n| n.operational())` and the air
+/// recruit gate to `airfield_node(region)` makes both assertions below trip:
+/// imports read 0 and the recruit returns `Err(NoAirfield)` even though the
+/// second, undamaged node of each kind is untouched. Restored, both pass.
+#[test]
+fn a_region_keeps_working_while_any_node_of_that_kind_stands() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+
+    // Give the region a second port and a second airfield, both intact.
+    for kind in [TransportNodeKind::Port, TransportNodeKind::Airfield] {
+        let id = crate::ids::TransportNodeId(world.transport_nodes.len() as u32);
+        world.transport_nodes.push(crate::transport::TransportNode {
+            id,
+            name: format!("{region:?} spare {kind:?}"),
+            kind,
+            region,
+            condition: Condition::FULL,
+        });
+    }
+
+    // Wreck the *first* node of each kind.
+    for kind in [TransportNodeKind::Port, TransportNodeKind::Airfield] {
+        let first = world.transport_nodes.iter().position(|n| n.region == region && n.kind == kind).expect("region has one");
+        world.transport_nodes[first].condition = Condition::new(0.0).unwrap();
+    }
+
+    assert!(
+        world.port_node_operational(region),
+        "a region whose second port is undamaged must still count as having a working port"
+    );
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+    assert_eq!(
+        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air }),
+        Ok(()),
+        "a squadron must still be raisable at the region's surviving airfield"
+    );
+}
+
+#[test]
+fn recruit_air_unit_at_a_struck_airfield_is_rejected_until_repaired() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0); // 東方連合 owns 北海道 (RegionId(0)).
+    let attacker = FactionId(2); // mvp's default empty `blocs` means unconditional war.
+    let region = world.regions_of(faction)[0];
+    let airfield = world.airfield_node(region).expect("Stage 10A scenarios declare an airfield in every region").id;
+    assert_ne!(world.region(region).owner, attacker, "sanity: distinct factions");
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: airfield })
+        .expect("a hostile Airfield node is a valid StrikeNode target");
+    assert!(
+        world.transport_node(airfield).condition.get() <= NODE_OPERATIONAL_THRESHOLD,
+        "sanity: one strike against a full-health node must cross NODE_OPERATIONAL_THRESHOLD outright"
+    );
+
+    let units_before = world.units.len();
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    assert_eq!(result, Err(ActionError::NoAirfield), "a struck airfield must not let a faction raise a new air unit there");
+    assert_eq!(world.units.len(), units_before, "a rejected recruit must not have raised anything");
+
+    // Recovery path: passive repair alone reopens recruiting too.
+    for _ in 0..40 {
+        transport::tick_node_condition(&mut world);
+    }
+    assert!(
+        world.transport_node(airfield).condition.get() > NODE_OPERATIONAL_THRESHOLD,
+        "passive repair alone must eventually reopen the airfield"
+    );
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    assert_eq!(result, Ok(()), "once the airfield repairs past the threshold, recruiting there must succeed again");
+    assert_eq!(world.units.len(), units_before + 1, "exactly one unit must have been raised once the airfield reopened");
+}
+
+/// Isolates 北海道(0)'s own port/depot corridor for the node-strike tests
+/// below: zeroes 北東北(1)'s own capacity/port (so it can't backfill
+/// anything) and severs the `hokkaido_port<->kita_tohoku_port` `Sea` line
+/// outright (zero `Capacity`) so nothing can relay into 北海道 from anywhere
+/// but its own port - isolating the node-strike mechanism from every other
+/// route the network would otherwise still offer, the same reasoning
+/// `isolate_minami_tohoku_rail_corridor` applies one corridor over. 北海道's
+/// own local production is zeroed too, so the region's *entire* supply is
+/// import-fed through the one node the tests below strike.
+fn isolate_hokkaido_port_corridor(world: &mut World) {
+    world.region_mut(RegionId(1)).capacity = [0.0; GOOD_COUNT];
+    world.region_mut(RegionId(1)).port = 0.0;
+    let sea_line = world
+        .transport_lines
+        .iter()
+        .position(|l| {
+            let (a, b) = (world.transport_node(l.from).region, world.transport_node(l.to).region);
+            l.kind == TransportLineKind::Sea && ((a == RegionId(0) && b == RegionId(1)) || (a == RegionId(1) && b == RegionId(0)))
+        })
+        .expect("mvp.json connects hokkaido and kita_tohoku by a Sea line");
+    world.transport_lines[sea_line].capacity = Capacity::new(0.0).expect("0.0 is a valid Capacity");
+    world.region_mut(RegionId(0)).capacity = [0.0; GOOD_COUNT];
+    world.region_mut(RegionId(0)).infrastructure = 1.0;
+}
+
+/// Stage 10C acceptance criterion 3 (docs/phase10-spec.md §6): "飛行場・港を
+/// 叩くと、そこを経由する補給が止まる。" Also exercises `Action::StrikeNode`'s
+/// own validation (own node, wrong kind, out-of-range id - `apply_interdict_
+/// line`'s own three-way rejection shape, one level down), and the required
+/// recovery path: passive repair alone, no further action, must eventually
+/// reopen a struck node.
+///
+/// **Confirmed this test can fail.** Temporarily changed `logistics::
+/// TransportGraph::node_operational` to always return `true` (as if a struck
+/// node's own `condition` were never actually read anywhere). Re-ran:
+/// `after_strike` came back `4`, equal to `before`'s own `4`, even though
+/// `Action::StrikeNode` still reported success and `world.transport_node
+/// (port).condition` still read `0.4` - the strike "succeeded" on paper
+/// while doing nothing to the one thing that matters. Reverted before
+/// committing.
+#[test]
+fn striking_a_port_node_stops_supply_routed_through_it() {
+    let mut world = scenario::build_world();
+    isolate_hokkaido_port_corridor(&mut world);
+    let defender = world.region(RegionId(0)).owner;
+    let attacker = FactionId(2); // 西方同盟 - mvp's default empty `blocs` means unconditional war
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    push_garrison(&mut world, RegionId(0), defender);
+
+    logistics::recompute_supply(&mut world);
+    let before = world.supply[RegionId(0).index()];
+    assert!(before > 0.0, "sanity: hokkaido's own port must relay something before any strike: {before}");
+
+    let port = world.port_node(RegionId(0)).expect("hokkaido has a Port node").id;
+
+    // Validation: the same three-way rejection `apply_interdict_line` has,
+    // one level down - none of these may touch `condition` at all.
+    assert_eq!(
+        action::apply_action(&mut world, defender, Action::StrikeNode { node: port }),
+        Err(ActionError::NodeNotHostile),
+        "a faction must not be able to strike its own node"
+    );
+    let depot = world
+        .transport_nodes
+        .iter()
+        .find(|n| n.region == RegionId(0) && n.kind == TransportNodeKind::Depot)
+        .expect("hokkaido has a Depot node")
+        .id;
+    assert_eq!(
+        action::apply_action(&mut world, attacker, Action::StrikeNode { node: depot }),
+        Err(ActionError::NodeNotStrikeable),
+        "only Airfield/Port nodes are legal StrikeNode targets"
+    );
+    let bogus = TransportNodeId(world.transport_nodes.len() as u32 + 5);
+    assert_eq!(
+        action::apply_action(&mut world, attacker, Action::StrikeNode { node: bogus }),
+        Err(ActionError::InvalidNode),
+        "an out-of-range node id must be rejected, never panic"
+    );
+    assert_eq!(world.transport_node(port).condition.get(), Condition::FULL.get(), "none of the rejected attempts above may have touched condition");
+
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
+        .expect("a hostile Port node is a valid StrikeNode target");
+    assert!(
+        world.transport_node(port).condition.get() <= NODE_OPERATIONAL_THRESHOLD,
+        "one strike against a full-health node must cross NODE_OPERATIONAL_THRESHOLD outright: got {}",
+        world.transport_node(port).condition.get()
+    );
+
+    logistics::recompute_supply(&mut world);
+    let after_strike = world.supply[RegionId(0).index()];
+    assert!(
+        after_strike < before * 0.05,
+        "a struck port must stop essentially all supply that used to route through it: before={before}, after_strike={after_strike}"
+    );
+
+    // Recovery path: passive repair alone (no further action, no repeated
+    // strike) must eventually reopen the node and restore supply through it.
+    for _ in 0..40 {
+        transport::tick_node_condition(&mut world);
+    }
+    assert!(
+        world.transport_node(port).condition.get() > NODE_OPERATIONAL_THRESHOLD,
+        "passive repair alone must eventually reopen a struck node - no state without a recovery path"
+    );
+    logistics::recompute_supply(&mut world);
+    let after_recovery = world.supply[RegionId(0).index()];
+    assert!(
+        after_recovery > before * 0.9,
+        "once the node itself recovers, supply through it must recover too: before={before}, after_recovery={after_recovery}"
+    );
+}
+
+/// Stage 10C acceptance criterion 4 (docs/phase10-spec.md §6: "地域を占領せ
+/// ずに補給を断てることを、テストで示す") - **the decisive test for whether
+/// Phase 10 was worth doing** (this stage's own brief). design.md §8 states
+/// this in one line - 「敵は領土そのものではなく、物流拠点を攻撃することも
+/// 可能」 - and this is the test that proves the engine actually delivers
+/// it: 西方同盟 (faction 2 - 中国・四国・九州, nowhere near 北海道) strikes
+/// 東方連合's (faction 0) own port and measurably starves the garrison
+/// stationed behind it, while 北海道 remains 東方連合's own, uncontested,
+/// unoccupied territory throughout - no attacker unit, no combat, no
+/// movement anywhere in this test.
+///
+/// **Confirmed this test can fail.** Same injected defect as `striking_a_
+/// port_node_stops_supply_routed_through_it` (`node_operational` hardcoded
+/// to `true`). Re-ran: `after` came back `4`, equal to `before`'s own `4` -
+/// the strike left the garrison exactly as well supplied as before it,
+/// which would make this test's own claim false. Reverted before committing.
+#[test]
+fn a_faction_can_cut_enemy_supply_by_striking_a_node_without_occupying_the_region() {
+    let mut world = scenario::build_world();
+    isolate_hokkaido_port_corridor(&mut world);
+    let defender = world.region(RegionId(0)).owner;
+    let attacker = FactionId(2);
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    push_garrison(&mut world, RegionId(0), defender);
+
+    logistics::recompute_supply(&mut world);
+    let before = world.supply[RegionId(0).index()];
+    assert!(before > 0.0, "sanity: the garrison must actually be supplied before any strike: {before}");
+    assert!(!world.has_enemy_units(RegionId(0), defender), "sanity: hokkaido starts uncontested");
+
+    let port = world.port_node(RegionId(0)).expect("hokkaido has a Port node").id;
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
+        .expect("a hostile Port node is a valid StrikeNode target - no locality requirement, the same as InterdictLine");
+
+    logistics::recompute_supply(&mut world);
+    let after = world.supply[RegionId(0).index()];
+
+    assert!(
+        after < before * 0.05,
+        "striking the port must starve the garrison stationed behind it: before={before}, after={after}"
+    );
+    assert_eq!(
+        world.region(RegionId(0)).owner,
+        defender,
+        "hokkaido must remain the defender's own territory throughout - the attacker never captured it"
+    );
+    assert!(
+        !world.has_enemy_units(RegionId(0), defender),
+        "the attacker must never have set foot in hokkaido - supply was cut without occupying the region"
+    );
 }

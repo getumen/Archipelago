@@ -1004,3 +1004,30 @@ pub const CONSTRUCTION_REQUIRED_TRANSPORT_LINE: f32 = 40.0;
 /// devastation, so a badly damaged line still needs more than one
 /// completed project to fully recover.
 pub const TRANSPORT_LINE_REPAIR_STEP: f32 = 0.3;
+
+/// Stage 10C (docs/phase10-spec.md "3. 阻止": "飛行場ノードと港ノードを叩ける
+/// こと"): the `transport::TransportNode::condition` a node must stay above
+/// to keep relaying anything at all (`logistics::TransportGraph::
+/// node_operational`) - a binary open/closed fact, not a graded throughput
+/// cut, because unlike a `TransportLine` a node carries no physical
+/// `Capacity` of its own to scale down in the first place (its own edges are
+/// unconstrained hubs - see `logistics::build_transport_graph`'s own doc);
+/// "half its structural integrity gone" is where a real facility (a runway,
+/// a set of quays and cranes) stops functioning as a whole rather than
+/// merely slower, the same all-or-nothing character `naval::
+/// is_port_blockaded`'s own threshold already treats a port's usability as
+/// having, one level down (a specific fraction of *this* node's own health,
+/// not of enemy control over the water it faces).
+pub const NODE_OPERATIONAL_THRESHOLD: f32 = 0.5;
+
+/// Stage 10C: `Condition` lost in one `Action::StrikeNode` - large enough
+/// that a single successful strike against a fully healthy node
+/// (`transport::TransportNode::condition` starts at `Condition::FULL`)
+/// crosses `NODE_OPERATIONAL_THRESHOLD` outright (`1.0 - 0.6 = 0.4 < 0.5`)
+/// and closes it on the spot, deliberately unlike `LINE_INTERDICTION_DAMAGE`
+/// (which never alone severs a healthy route): design.md §8's whole case for
+/// this stage is that a single strike against one concentrated point target
+/// - one airfield, one port - can decisively cut supply without occupying
+/// the region it sits in, not merely wear it down the way repeated raids
+/// along an entire spread-out route must.
+pub const NODE_STRIKE_DAMAGE: f32 = 0.6;

@@ -927,6 +927,29 @@ impl World {
             .fold(0.0f32, f32::max)
     }
 
+    /// Stage 10C (docs/phase10-spec.md "3. 阻止"): `hostile_control_max`'s
+    /// exact shape, one domain further - the highest `Region::air_
+    /// superiority` share held by a faction currently at `Stance::War` with
+    /// `faction`. Deliberately *not* `SeaZone::enemy_control_max`'s raw
+    /// "every other faction" form the way `naval::strait_factor` uses for
+    /// sea crossings: `hostile_control_max`'s own doc explains that a sea
+    /// lane's own throttle is about contested control of the water itself,
+    /// not a punitive effect targeted at `faction` - air interdiction has no
+    /// such excuse. design.md §8 frames it as an explicitly hostile act
+    /// ("敵は...物流拠点を攻撃することも可能"), so an allied, `Ceasefire`,
+    /// `NonAggression`, or otherwise at-peace faction's air power over a
+    /// region must never throttle `faction`'s own logistics through it,
+    /// however dominant that presence is (`codex review` P1: the first
+    /// version of this function used the raw form and would have penalized
+    /// a faction's own logistics for a friendly air force's presence).
+    pub fn hostile_air_superiority_max(&self, region: RegionId, faction: FactionId) -> f32 {
+        let region = self.region(region);
+        (0..self.factions.len())
+            .filter(|&f| f != faction.index() && self.diplomacy.is_at_war(faction, FactionId(f as u32)))
+            .map(|f| region.air_superiority[f].get())
+            .fold(0.0f32, f32::max)
+    }
+
     /// Sum of `combat_power` for a faction's alive fleets present in `zone`.
     pub fn zone_power(&self, zone: SeaZoneId, faction: FactionId) -> f32 {
         self.fleets_in(zone)
@@ -1006,6 +1029,29 @@ impl World {
         self.port_node(region).is_some()
     }
 
+    /// Whether `region`'s own `Port` node (if any) is currently operational
+    /// (`TransportNode::operational`'s own doc) - Stage 10C: `trade::
+    /// tick_imports`'s counterpart to `naval::is_port_blockaded`, so a port
+    /// wrecked by `Action::StrikeNode` stops accepting imports the same way
+    /// `logistics::recompute_supply` already stops routing supply through
+    /// it (codex review P2: `tick_imports` used to derive import capacity
+    /// from `Region::port` alone and never asked this question at all).
+    /// `false` for a region with no `Port` node, matching `has_port_node`.
+    ///
+    /// **Every** `Port` node of the region is considered, not just the first
+    /// (`codex review`, P2). A scenario may declare more than one, and
+    /// `logistics::build_transport_graph` already gates each node's own
+    /// vertex independently - so answering from `port_node`'s lowest-id node
+    /// alone disagreed with the graph in both directions: striking a second
+    /// port left imports untouched, and striking the first cut them off even
+    /// though another port was still standing. A region's port capacity is
+    /// working as long as any of its ports is.
+    pub fn port_node_operational(&self, region: RegionId) -> bool {
+        self.transport_nodes
+            .iter()
+            .any(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Port && n.operational())
+    }
+
     /// Stage 10A: `port_node`'s airfield-domain counterpart - the first
     /// (lowest `TransportNodeId`) `Airfield` node belonging to `region`, if
     /// any. The sole source of truth for "does this region have an
@@ -1016,6 +1062,17 @@ impl World {
         self.transport_nodes
             .iter()
             .find(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Airfield)
+    }
+
+    /// Whether `region` has any operational `Airfield` node - the airfield
+    /// twin of `port_node_operational`, and subject to the same
+    /// `codex review` P2 finding: a region may declare several airfields,
+    /// `logistics::build_transport_graph` gates each independently, so
+    /// "can this region fly" must ask all of them rather than the first.
+    pub fn airfield_node_operational(&self, region: RegionId) -> bool {
+        self.transport_nodes
+            .iter()
+            .any(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Airfield && n.operational())
     }
 
     pub fn has_airfield_node(&self, region: RegionId) -> bool {
