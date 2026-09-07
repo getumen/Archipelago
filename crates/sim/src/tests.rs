@@ -9805,6 +9805,39 @@ fn a_sortie_that_grounds_its_target_still_pays_for_the_defence_it_faced() {
     );
 }
 
+/// A squadron cannot be ordered to fly to the field it is already on
+/// (`codex review`, P2). Every other check passes for such an order - the
+/// destination is operational, owned, and zero kilometres away - so it would
+/// start a one-day `Movement` to nowhere, and repeating it keeps the
+/// squadron permanently in transit, bleeding organization and never being
+/// anywhere. `docs/mvp-spec.md` §5 fixes the API contract on the premise
+/// that an optimiser submits exactly this sort of thing at volume. Land and
+/// sea get the property for free: no region is adjacent to itself.
+///
+/// **Confirmed this test can fail.** Removing the `from_node == to_node`
+/// guard makes the order return `Ok(())` and leaves `movement` as
+/// `Some(..)` with `required` equal to `AIR_MOVE_DAYS`, tripping both
+/// assertions. Restored, and it passes.
+#[test]
+fn an_air_unit_cannot_be_ordered_to_its_own_airfield() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+    let airfield = world.airfield_node(region).expect("mvp gives every region an airfield").id;
+    let unit = push_full_strength_air_unit(&mut world, faction, airfield, 10.0);
+
+    assert_eq!(
+        action::apply_action(&mut world, faction, Action::MoveUnit { unit, to: Station::Airfield(airfield) }),
+        Err(ActionError::NotAdjacent),
+        "a move to the squadron's own airfield must be rejected, not started as a flight to nowhere"
+    );
+    assert!(
+        world.unit(unit).movement.is_none(),
+        "a rejected order must not have put the squadron into transit"
+    );
+}
+
 #[test]
 fn grounding_the_defender_stops_it_defending_within_the_same_batch() {
     let mut world = scenario::build_world();
@@ -10220,4 +10253,400 @@ fn a_faction_can_cut_enemy_supply_by_striking_a_node_without_occupying_the_regio
         !world.has_enemy_units(RegionId(0), defender),
         "the attacker must never have set foot in hokkaido - supply was cut without occupying the region"
     );
+}
+
+// ---------------------------------------------------------------------
+// Stage 10 follow-up: air movement. `Action::MoveUnit` used to fall through
+// to `_ => Err(ActionError::NotAdjacent)` for every `Station::Airfield`
+// combination - a squadron recruited at one airfield could never redeploy
+// to another, no matter how the front moved. `apply_move`'s new `(Station::
+// Airfield, Station::Airfield)` arm closes that gap: geographic range
+// (`AIR_OPERATING_RADIUS_KM`, the same reach `air::tick_air_superiority`
+// already uses), the destination must be this faction's own operational
+// airfield, and travel goes through the same `Movement`/`tick_movement`
+// machinery every other domain uses.
+// ---------------------------------------------------------------------
+
+/// A squadron redeployed to another of its own airfields within range must
+/// arrive and then project air superiority from the *new* base - and,
+/// along the way, from the new base only once it has actually arrived,
+/// never from both bases at once and never from the old base after leaving
+/// it. Four regions pinned to a cross layout make every claim measurable
+/// with a single-coordinate distance: `base_old` at `x=0`, `base_new` at
+/// `x=250` (in range of each other, 250 < 300), `region_near_old` at
+/// `x=-250` (250 from `base_old`, 500 from `base_new` - reachable only from
+/// the old base) and `region_near_new` at `x=500` (250 from `base_new`, 500
+/// from `base_old` - reachable only from the new one).
+///
+/// **Confirmed this can fail (three ways).**
+/// - Deleted the new `(Station::Airfield, Station::Airfield)` arm in
+///   `apply_move` (falling through to the `_ => NotAdjacent` wildcard).
+///   Re-ran: `apply_action` returned `Err(NotAdjacent)` instead of
+///   `Ok(())`, and the squadron never moved at all.
+/// - Changed `apply_move`'s new arm to write `unit.station = to` directly
+///   instead of going through `Movement`/`tick_movement` (skipping travel
+///   time). Re-ran: the "the order alone must not relocate the squadron"
+///   assertion below failed immediately - `Unit::station` already read as
+///   the new airfield on the very tick the order was placed, before
+///   `tick_movement` ever ran.
+/// - Changed `node_air_power` to also count a unit whose `Movement::to`
+///   names the same node (i.e. credited the destination early, "helping"
+///   redeployment feel less like limbo). Re-ran: the "still in transit"
+///   assertion on `region_near_new` failed - it read a positive share
+///   before arrival, i.e. the squadron projected from both ends at once.
+///
+/// All three reverted before committing.
+#[test]
+fn squadron_redeploys_and_projects_air_superiority_from_the_new_base_only() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base_old = RegionId(0);
+    let base_new = RegionId(1);
+    let region_near_old = RegionId(2);
+    let region_near_new = RegionId(3);
+
+    world.region_mut(base_old).owner = faction;
+    world.region_mut(base_new).owner = faction;
+    world.region_mut(base_old).position = [0.0, 0.0];
+    world.region_mut(base_new).position = [250.0, 0.0];
+    world.region_mut(region_near_old).position = [-250.0, 0.0];
+    world.region_mut(region_near_new).position = [500.0, 0.0];
+
+    let airfield_old = world.airfield_node(base_old).expect("mvp regions all carry an airfield node").id;
+    let airfield_new = world.airfield_node(base_new).expect("mvp regions all carry an airfield node").id;
+
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield_old, 20.0);
+
+    air::tick_air_superiority(&mut world);
+    assert!(
+        world.region(region_near_old).air_superiority[faction.index()].get() > 0.0,
+        "sanity: before any move, the squadron at the old base must reach the region near it"
+    );
+    assert_eq!(
+        world.region(region_near_new).air_superiority[faction.index()].get(),
+        0.0,
+        "sanity: before any move, the squadron must not yet reach the region near the new base"
+    );
+
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(airfield_new) },
+    )
+    .expect("a destination airfield within range, owned by this faction and operational must be accepted");
+    assert!(world.unit(unit_id).movement.is_some(), "a legal redeploy order must start a Movement");
+    assert_eq!(
+        world.unit(unit_id).station,
+        Station::Airfield(airfield_old),
+        "the order alone must not relocate the squadron - only arrival does"
+    );
+
+    // Mid-flight: still based (per `Unit::station`) at the old airfield -
+    // must still project from there, and nowhere near the new one yet.
+    air::tick_air_superiority(&mut world);
+    assert!(
+        world.region(region_near_old).air_superiority[faction.index()].get() > 0.0,
+        "still in transit: must still project from the base it has not yet left"
+    );
+    assert_eq!(
+        world.region(region_near_new).air_superiority[faction.index()].get(),
+        0.0,
+        "still in transit: must not project from the destination before arriving - projecting from both \
+         ends at once would let one squadron hold two skies for the price of one"
+    );
+
+    let mut arrived = false;
+    for _ in 0..10 {
+        military::tick_movement(&mut world);
+        if world.unit(unit_id).movement.is_none() {
+            arrived = true;
+            break;
+        }
+    }
+    assert!(arrived, "AIR_MOVE_DAYS is 1.0 and a full-supply squadron makes a full step per tick - 10 ticks is ample margin");
+    assert_eq!(world.unit(unit_id).station, Station::Airfield(airfield_new), "the squadron must now be based at the new airfield");
+
+    air::tick_air_superiority(&mut world);
+    assert_eq!(
+        world.region(region_near_old).air_superiority[faction.index()].get(),
+        0.0,
+        "after arrival, the squadron must no longer project from the base it left"
+    );
+    assert!(
+        world.region(region_near_new).air_superiority[faction.index()].get() > 0.0,
+        "after arrival, the squadron must project from its new base"
+    );
+}
+
+/// A redeploy order naming a destination airfield beyond `AIR_OPERATING_
+/// RADIUS_KM` must be rejected outright, leaving the squadron exactly where
+/// it was - the air-domain instance of the same "range is a hard cutoff,
+/// not a suggestion" rule `air_superiority_has_no_effect_outside_the_
+/// operating_radius` already proves for projection.
+///
+/// **Confirmed this can fail.** Temporarily dropped the `if air::
+/// geographic_distance(...) > AIR_OPERATING_RADIUS_KM` guard from `apply_
+/// move`'s new arm. Re-ran: `apply_action` returned `Ok(())` and the
+/// squadron started marching 601km in one hop. Reverted before committing.
+#[test]
+fn redeploy_beyond_operating_radius_is_rejected() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base = RegionId(0);
+    let far = RegionId(1);
+    world.region_mut(base).owner = faction;
+    world.region_mut(far).owner = faction;
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(far).position = [AIR_OPERATING_RADIUS_KM + 1.0, 0.0];
+
+    let airfield = world.airfield_node(base).expect("mvp regions all carry an airfield node").id;
+    let far_airfield = world.airfield_node(far).expect("mvp regions all carry an airfield node").id;
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield, 20.0);
+
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(far_airfield) },
+    );
+    assert_eq!(result, Err(ActionError::NotAdjacent));
+    assert!(world.unit(unit_id).movement.is_none(), "a rejected order must not start a Movement");
+    assert_eq!(world.unit(unit_id).station, Station::Airfield(airfield), "a rejected order must leave the squadron exactly where it was");
+}
+
+/// A redeploy order naming a destination airfield struck below `NODE_
+/// OPERATIONAL_THRESHOLD` must be rejected - the same "no usable airfield
+/// there" fact `recruit_air_unit_without_airfield_is_rejected` already
+/// proves for `RecruitUnit`, now proven for `MoveUnit` too.
+///
+/// **Confirmed this can fail.** Temporarily dropped the `!dest.
+/// operational()` half of `apply_move`'s new arm's guard (kept only the
+/// `kind != Airfield` check). Re-ran: `apply_action` returned `Ok(())`
+/// against a node at `Condition::new(0.0)` - the squadron was ordered to
+/// redeploy onto rubble. Reverted before committing.
+#[test]
+fn redeploy_to_a_wrecked_airfield_is_rejected() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base = RegionId(0);
+    let dest = RegionId(1);
+    world.region_mut(base).owner = faction;
+    world.region_mut(dest).owner = faction;
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(dest).position = [100.0, 0.0];
+
+    let airfield = world.airfield_node(base).expect("mvp regions all carry an airfield node").id;
+    let dest_airfield = world.airfield_node(dest).expect("mvp regions all carry an airfield node").id;
+    world.transport_nodes[dest_airfield.index()].condition =
+        Condition::new(0.0).expect("0.0 is a valid Condition");
+    assert!(!world.transport_node(dest_airfield).operational(), "sanity: the destination must actually be wrecked");
+
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield, 20.0);
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(dest_airfield) },
+    );
+    assert_eq!(result, Err(ActionError::NoAirfield));
+    assert!(world.unit(unit_id).movement.is_none(), "a rejected order must not start a Movement");
+}
+
+/// A redeploy order naming a destination airfield in another faction's
+/// territory must be rejected - unlike a land unit (which can be ordered
+/// into hostile territory, that is how an invasion happens) or a fleet
+/// (which can enter contested water), a squadron has no way to fight its
+/// way onto a foreign field, exactly as `RecruitUnit`'s own `Domain::Air`
+/// arm already requires an owned airfield to raise one at all.
+///
+/// **Confirmed this can fail.** Temporarily dropped the `world.region(dest.
+/// region).owner != faction` guard from `apply_move`'s new arm. Re-ran:
+/// `apply_action` returned `Ok(())` against a same faction's own squadron
+/// ordered onto a rival faction's own, fully intact airfield. Reverted
+/// before committing.
+#[test]
+fn redeploy_to_a_foreign_airfield_is_rejected() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let rival = FactionId(1);
+    let base = RegionId(0);
+    let dest = RegionId(1);
+    world.region_mut(base).owner = faction;
+    world.region_mut(dest).owner = rival;
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(dest).position = [100.0, 0.0];
+
+    let airfield = world.airfield_node(base).expect("mvp regions all carry an airfield node").id;
+    let dest_airfield = world.airfield_node(dest).expect("mvp regions all carry an airfield node").id;
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield, 20.0);
+
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(dest_airfield) },
+    );
+    assert_eq!(result, Err(ActionError::RegionNotOwned));
+    assert!(world.unit(unit_id).movement.is_none(), "a rejected order must not start a Movement");
+}
+
+/// A redeploy order naming a `TransportNodeId` past the end of `World::
+/// transport_nodes` must be rejected cleanly (`ActionError::InvalidNode`),
+/// not panic on an out-of-bounds index - the same bounds discipline
+/// `apply_strike_node` already applies to arbitrary caller-supplied node
+/// ids (this crate's own `docs/mvp-spec.md` §5 contract: an RL agent can
+/// throw garbage `Action`s and must get a clean `Err`, never a panic).
+#[test]
+fn redeploy_to_an_unknown_node_is_rejected() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base = RegionId(0);
+    world.region_mut(base).owner = faction;
+    let airfield = world.airfield_node(base).expect("mvp regions all carry an airfield node").id;
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield, 20.0);
+
+    let bogus = TransportNodeId(world.transport_nodes.len() as u32 + 1000);
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(bogus) },
+    );
+    assert_eq!(result, Err(ActionError::InvalidNode));
+}
+
+/// External code review fix (Stage 10 follow-up, P2 - "a value baked in at
+/// order time", CLAUDE.md's 「発令時点の値を焼き込まない」): `apply_move`'s
+/// `Station::Airfield` arm validates the destination once, when the order is
+/// placed; `air_move_required()` (`AIR_MOVE_DAYS`) then leaves the squadron
+/// in transit for real days before `tick_movement` ever revisits it. If the
+/// destination airfield is struck (`Action::StrikeNode`) in the meantime -
+/// exactly the precedent `construction::transport_line_still_owned` already
+/// sets for `Project::TransportLine` - the squadron must not land on the
+/// wreckage: it stays at its last valid station, alive and free to receive
+/// a fresh order, never stranded mid-limbo.
+///
+/// **Confirmed this can fail.** Temporarily reverted `tick_movement`'s
+/// arrival branch to the old, unconditional `unit.station = to;` (no
+/// `destination_still_valid` check). Re-ran: the primary assertion below
+/// failed - `Unit::station` read `Airfield(airfield_dest)`, landed directly
+/// on a node at `Condition::new(0.0)`, instead of staying at
+/// `airfield_old`. Reverted before committing.
+#[test]
+fn stale_air_destination_struck_mid_flight_is_not_landed_on() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let base = RegionId(0);
+    let dest = RegionId(1);
+    world.region_mut(base).owner = faction;
+    world.region_mut(dest).owner = faction;
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(dest).position = [100.0, 0.0];
+
+    let airfield_old = world.airfield_node(base).expect("mvp regions all carry an airfield node").id;
+    let airfield_dest = world.airfield_node(dest).expect("mvp regions all carry an airfield node").id;
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield_old, 20.0);
+
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(airfield_dest) },
+    )
+    .expect("a destination airfield within range, owned by this faction and operational must be accepted at order time");
+    assert!(world.unit(unit_id).movement.is_some(), "a legal redeploy order must start a Movement");
+
+    // Struck mid-flight, simulating an enemy `Action::StrikeNode` landing on
+    // the destination before the squadron gets there.
+    world.transport_nodes[airfield_dest.index()].condition =
+        Condition::new(0.0).expect("0.0 is a valid Condition");
+    assert!(!world.transport_node(airfield_dest).operational(), "sanity: the destination must actually be wrecked");
+
+    // AIR_MOVE_DAYS is 1.0 and a full-supply squadron makes a full step of
+    // 1.0 per tick, so this single tick both completes the flight's
+    // progress and is exactly where the stale-destination check must fire.
+    military::tick_movement(&mut world);
+
+    assert_eq!(
+        world.unit(unit_id).station,
+        Station::Airfield(airfield_old),
+        "a squadron must never land on a destination struck mid-flight - it must stay at its last valid station"
+    );
+    assert!(
+        world.unit(unit_id).movement.is_none(),
+        "the cancelled flight must not leave the unit stuck mid-transit either - that would be a state with no recovery path"
+    );
+    assert!(world.unit(unit_id).alive, "cancelling a stale arrival must not destroy the unit");
+
+    // Recovery path: the squadron is not stranded - a fresh order is still
+    // accepted from wherever it actually ended up.
+    let third = RegionId(2);
+    world.region_mut(third).owner = faction;
+    world.region_mut(third).position = [50.0, 0.0];
+    let airfield_third = world.airfield_node(third).expect("mvp regions all carry an airfield node").id;
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(airfield_third) },
+    )
+    .expect("the squadron must still be able to receive fresh orders after a cancelled arrival - never a dead end");
+}
+
+/// The same staleness, but the destination's *region* changes hands instead
+/// of the node itself being struck - an enemy invasion capturing the
+/// airfield's region mid-flight is exactly as disqualifying as a direct
+/// strike (`apply_move`'s own arm rejects a foreign destination outright at
+/// order time; arrival must honor the identical rule).
+///
+/// **Confirmed this can fail.** Same revert as `stale_air_destination_
+/// struck_mid_flight_is_not_landed_on` (dropped the `destination_still_
+/// valid` check in `tick_movement`). Re-ran: the squadron's `Station` read
+/// `Airfield(airfield_dest)` even though `dest`'s region was now owned by
+/// `rival`, not `faction` - the squadron landed straight into enemy hands.
+/// Reverted before committing.
+#[test]
+fn stale_air_destination_captured_mid_flight_is_not_landed_on() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let faction = FactionId(0);
+    let rival = FactionId(1);
+    let base = RegionId(0);
+    let dest = RegionId(1);
+    world.region_mut(base).owner = faction;
+    world.region_mut(dest).owner = faction;
+    world.region_mut(base).position = [0.0, 0.0];
+    world.region_mut(dest).position = [100.0, 0.0];
+
+    let airfield_old = world.airfield_node(base).expect("mvp regions all carry an airfield node").id;
+    let airfield_dest = world.airfield_node(dest).expect("mvp regions all carry an airfield node").id;
+    let unit_id = push_full_strength_air_unit(&mut world, faction, airfield_old, 20.0);
+
+    action::apply_action(
+        &mut world,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(airfield_dest) },
+    )
+    .expect("a destination airfield within range, owned by this faction and operational must be accepted at order time");
+
+    // Captured mid-flight: an invasion flips the destination region's
+    // ownership before the squadron arrives.
+    world.region_mut(dest).owner = rival;
+
+    military::tick_movement(&mut world);
+
+    assert_eq!(
+        world.unit(unit_id).station,
+        Station::Airfield(airfield_old),
+        "a squadron must never land in territory captured by the enemy mid-flight - it must stay at its last valid station"
+    );
+    assert!(world.unit(unit_id).movement.is_none(), "the cancelled flight must not leave the unit stuck mid-transit");
+    assert!(world.unit(unit_id).alive, "cancelling a stale arrival must not destroy the unit");
 }

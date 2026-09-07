@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    AIR_UNIT_MACHINERY_COST, ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CIVILIAN_ENERGY_DEMAND_PER_POP,
-    CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT,
+    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL,
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT,
     FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_PER_PORT, MACHINERY_INPUT_STEEL,
     MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
     STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
@@ -1206,6 +1206,32 @@ impl HeuristicAgent {
         disband_excess_naval(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         air_recruit(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
         disband_excess_air(self.faction, self.chronic_insolvency_ticks, obs, &mut actions);
+
+        // `codex review` (P2): every `disband_excess*` call above may have
+        // just queued a `DisbandUnit` for a unit that a move-issuing routine
+        // below (`air_redeploy`, `offensive`, `naval_ops`, `advance_interior`)
+        // would otherwise also pick - each reads the same pre-tick
+        // `Observation` `disband_excess*` did, with no way to see that a
+        // sibling function already spent this unit's only order this tick.
+        // Actions apply in the order they were pushed
+        // (`sim::Simulation::apply`), so `DisbandUnit` lands first and the
+        // `MoveUnit` that follows it is rejected outright as
+        // `ActionError::UnitDead` - a rejection an RL/API caller sees for an
+        // order the AI never should have issued in the first place, not a
+        // conflict the simulation needs to arbitrate. Collecting every unit
+        // already marked for disbanding once, here, and having every later
+        // move-issuing routine skip it, is cheaper and clearer than either
+        // reordering four call sites relative to three or teaching each one
+        // to re-scan `actions` itself.
+        let disbanding: BTreeSet<UnitId> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::DisbandUnit { unit } => Some(*unit),
+                _ => None,
+            })
+            .collect();
+
+        air_redeploy(self.faction, obs, &disbanding, &mut actions);
         build(self.faction, obs, &mut actions);
         transport_repair_ai(self.faction, obs, &mut actions);
 
@@ -1244,18 +1270,25 @@ impl HeuristicAgent {
         };
 
         if allow_offense {
-            offensive(self.faction, caution, obs, avoid, primary_target, &mut actions);
+            offensive(self.faction, caution, obs, avoid, primary_target, &disbanding, &mut actions);
             transport_interdict_ai(self.faction, obs, &mut actions);
             air_strike_ai(self.faction, obs, &mut actions);
         }
-        naval_ops(self.faction, caution, obs, allow_offense, &mut actions);
+        naval_ops(self.faction, caution, obs, allow_offense, &disbanding, &mut actions);
 
+        // `disbanding` is folded in here too, not just `MoveUnit` sources -
+        // `advance_interior`'s own eligibility filter is exactly "does this
+        // unit already have an order/movement this tick", and a unit
+        // already marked for `DisbandUnit` above needs the same exclusion
+        // for the same `codex review` (P2) reason `air_redeploy`/`offensive`/
+        // `naval_ops` were given `disbanding` directly for.
         let already_moved: BTreeSet<UnitId> = actions
             .iter()
             .filter_map(|a| match a {
                 Action::MoveUnit { unit, .. } => Some(*unit),
                 _ => None,
             })
+            .chain(disbanding.iter().copied())
             .collect();
         advance_interior(self.faction, obs, &already_moved, &mut actions);
 
@@ -1875,13 +1908,25 @@ fn safe_own_regions(faction: FactionId, obs: &Observation) -> Vec<RegionId> {
 
 /// The best own, uncontested port region to operate a navy out of - highest
 /// `port` value, ties broken toward the lowest region id - or `None` if the
-/// faction holds no safe port at all. Shared by `naval_recruit` (where to
-/// build) and `home_zone` (where an idle fleet with nothing else to do
-/// returns to).
+/// faction holds no safe, working port at all. Shared by `naval_recruit`
+/// (where to build) and `home_zone` (where an idle fleet with nothing else
+/// to do returns to).
+///
+/// Audit fix (Stage 10 follow-up, same survey that found `air_redeploy`'s
+/// reachability gap): filters on `World::port_node_operational`, not merely
+/// `Region::port > 0.0`, mirroring the fix `own_port_capacity` already
+/// carries (its own "Stage 10C codex review P2" doc) for the identical
+/// shape - a region keeps its static `port` capacity number even after
+/// `Action::StrikeNode` wrecks the port node itself, so checking capacity
+/// alone let this pick a struck port. `naval_recruit` then emitted
+/// `Action::RecruitUnit { domain: Sea, .. }` there, which `action::
+/// apply_recruit`'s `Domain::Sea` arm rejects with `ActionError::NoPort` -
+/// the same "AI reissues a rejected order" shape `air_redeploy` had, just
+/// for the navy's recruit path instead of a squadron's move.
 fn best_own_port_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
     safe_own_regions(faction, obs)
         .into_iter()
-        .filter(|&r| obs.world.region(r).port > 0.0)
+        .filter(|&r| obs.world.port_node_operational(r))
         .fold(None, |best: Option<(RegionId, f32)>, r| {
             let port = obs.world.region(r).port;
             match best {
@@ -2034,13 +2079,18 @@ fn disband_excess_naval(faction: FactionId, chronic_insolvency_ticks: u32, obs: 
 /// front_regions`) - basing a fresh squadron there actually contests the
 /// airspace over the fighting (`air::tick_air_superiority`'s own
 /// `AIR_OPERATING_RADIUS_KM` reach), rather than sitting uselessly out of
-/// range in the interior. `Stage 10A`/`10C` both note no shipped scenario
-/// deploys a `Domain::Air` unit or gives movement to one once recruited
-/// (`action::apply_move`'s doc: a `Station::Airfield` destination is never a
-/// legal `MoveUnit` target), so *where* this AI recruits is the only lever
-/// it has over which airspace its own air power actually projects over -
-/// there is no later "reposition the squadron" order to correct a bad
-/// initial choice.
+/// range in the interior. Also `air_redeploy`'s own pick of where an
+/// out-of-reach squadron should relocate to - the two functions share one
+/// notion of "the best airfield right now" rather than each inventing its
+/// own (recruiting at a good field and later abandoning it for a worse one
+/// under a different rule would be incoherent).
+///
+/// Stage 10 follow-up: this used to be the *only* lever the AI had over
+/// which airspace its own air power projects over, because `Domain::Air`
+/// `MoveUnit` support did not exist yet - a squadron recruited here was
+/// stuck here for its whole life, however far the front later moved.
+/// `air_redeploy` below closes that gap; this function keeps its job
+/// (choosing where a *fresh* squadron is raised) unchanged.
 ///
 /// Falls back to the lowest-id eligible region (`safe_own_regions`' own
 /// ascending order) when there is no front to measure against (not at war,
@@ -2180,6 +2230,161 @@ fn disband_excess_air(faction: FactionId, chronic_insolvency_ticks: u32, obs: &O
     }
 }
 
+/// Stage 10 follow-up AI (docs/phase10-spec.md "Stage 10D" itself only asks
+/// for "recruit squadrons when it makes sense" - this is the AI half of the
+/// gap this stage closes: `Domain::Air` `MoveUnit` support is now real
+/// (`action::apply_move`'s `Station::Airfield` arm), so a squadron the front
+/// has since moved past is no longer permanently stuck at wherever
+/// `best_own_airfield_region` happened to place it at recruitment time.
+///
+/// **The rule, deliberately the narrowest one that closes the gap.** A
+/// squadron redeploys only when its *current* airfield reaches none of
+/// `Observation::front_regions` at all (every one of them lies beyond
+/// `AIR_OPERATING_RADIUS_KM`) *and* some other own, operational field that
+/// the squadron can actually *reach in this one order* - itself within
+/// `AIR_OPERATING_RADIUS_KM` of the current field, exactly the bound
+/// `action::apply_move`'s own `Station::Airfield` arm enforces - narrows the
+/// distance to the front. Unlike `air_recruit`'s placement choice, this is
+/// deliberately **not** `best_own_airfield_region` (the single field closest
+/// to the front out of every own field anywhere on the map): that field can
+/// be many radii away, and ordering a squadron directly at it is exactly the
+/// half of the original defect where `apply_move` rejects the order as
+/// `ActionError::NotAdjacent` and the AI reissues the identical rejected
+/// order every tick forever. Restricting the candidate set to fields within
+/// one hop guarantees every `MoveUnit` this function emits is one
+/// `apply_move` will accept.
+///
+/// A squadron more than one radius from the front does not teleport there
+/// in a single order - it hops, one order at a time: each tick it picks the
+/// reachable field that is closest to the front, moves there, and (once
+/// that order lands, `Unit::movement` clear again) the *next* tick re-runs
+/// the same rule from its new, closer position. A squadron that still
+/// reaches the front - however marginally - is left exactly where it is;
+/// this is not a continuous "always hug the single closest point to the
+/// front" policy, which would have every squadron re-plan its base the
+/// moment the front's nearest point shifts by a metre. Because the rule
+/// only fires once a squadron has gone fully out of range, and moving it
+/// puts it back in range of the same front by construction, it cannot fire
+/// again against the same squadron until the front has drifted a full
+/// radius further still - the oscillation `disband_excess_air`'s own doc
+/// warns against for a different resource has no foothold here.
+///
+/// A squadron with no reachable field that improves on its own distance to
+/// the front (an isolated field, or one already at the closest reachable
+/// point) issues nothing and simply stays put - repeating a rejected order
+/// every tick would be strictly worse than doing nothing, and there is no
+/// multi-hop path search here to fall back to (`docs/conventions.md` §1:
+/// no unrequested new mechanism; a squadron this stranded is future work,
+/// not silently patched over).
+///
+/// Skips a squadron already mid-flight (`Unit::movement.is_some()`):
+/// reissuing `MoveUnit` against one every tick would restart `Movement::
+/// progress` from zero forever (`action::apply_move` always builds a fresh
+/// `Movement`), the same "a repeated call must not silently cost more than
+/// one order's worth" shape every other per-unit AI function in this file
+/// already respects for its own action.
+///
+/// Issues nothing while not at war (`front_regions` empty) - there is no
+/// front to chase, so relocating would only churn Machinery-funded
+/// squadrons around the map for no strategic reason.
+///
+/// `disbanding` (`codex review` P2): units `decide_for_llm` already queued
+/// a `DisbandUnit` for, earlier in this same tick's batch
+/// (`disband_excess_air`, run on the same pre-tick `Observation` this
+/// function reads). Actions apply in the order they were pushed, so
+/// `DisbandUnit` would land first and a `MoveUnit` for the same unit right
+/// behind it would be rejected outright as `ActionError::UnitDead` - never
+/// issue that second, contradictory order in the first place.
+fn air_redeploy(faction: FactionId, obs: &Observation, disbanding: &BTreeSet<UnitId>, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    // `codex review` (P2): `Observation::front_regions` is purely
+    // geographic - it returns every own region bordering someone else's,
+    // war or peace. Without this gate a faction at peace shuffles its
+    // squadrons toward quiet borders forever, burning organization in
+    // transit for nothing. `air_strike_ai` already gates on being at war;
+    // redeployment is the same judgement, one step earlier.
+    let at_war = (0..world.factions.len())
+        .any(|f| world.diplomacy.is_at_war(faction, FactionId(f as u32)));
+    if !at_war {
+        return;
+    }
+    let front: Vec<RegionId> = obs
+        .front_regions()
+        .into_iter()
+        .filter(|&r| {
+            world
+                .neighbors(r)
+                .any(|n| world.diplomacy.is_at_war(faction, world.region(n).owner))
+        })
+        .collect();
+    if front.is_empty() {
+        return;
+    }
+    let radius_sq = AIR_OPERATING_RADIUS_KM * AIR_OPERATING_RADIUS_KM;
+    let dist_sq_to_front = |pos: [f32; 2]| -> f32 {
+        front
+            .iter()
+            .map(|&fr| {
+                let fp = world.region(fr).position;
+                let (dx, dy) = (pos[0] - fp[0], pos[1] - fp[1]);
+                dx * dx + dy * dy
+            })
+            .fold(f32::INFINITY, f32::min)
+    };
+
+    let mut units = obs.own_units();
+    units.sort_by_key(|u| u.0);
+    for unit_id in units {
+        if disbanding.contains(&unit_id) {
+            continue;
+        }
+        let unit = world.unit(unit_id);
+        if unit.movement.is_some() {
+            continue;
+        }
+        let Some(node) = unit.station.airfield() else { continue };
+        let base_pos = world.region(world.transport_node(node).region).position;
+        let own_dist_sq = dist_sq_to_front(base_pos);
+        if own_dist_sq <= radius_sq {
+            continue;
+        }
+
+        // Only a field reachable in this one order, and only if it is a
+        // genuine improvement over staying put - `best_own_airfield_region`
+        // is not used here precisely because it ignores reachability (see
+        // this function's own doc).
+        let target_region = safe_own_regions(faction, obs)
+            .into_iter()
+            .filter(|&r| r != world.transport_node(node).region)
+            .filter(|&r| world.airfield_node_operational(r))
+            .filter(|&r| {
+                let p = world.region(r).position;
+                let (dx, dy) = (p[0] - base_pos[0], p[1] - base_pos[1]);
+                dx * dx + dy * dy <= radius_sq
+            })
+            .fold(None, |best: Option<(RegionId, f32)>, r| {
+                let dist_sq = dist_sq_to_front(world.region(r).position);
+                match best {
+                    Some((_, best_dist)) if best_dist <= dist_sq => best,
+                    _ => Some((r, dist_sq)),
+                }
+            })
+            .filter(|&(_, dist_sq)| dist_sq < own_dist_sq)
+            .map(|(r, _)| r);
+        let Some(target_region) = target_region else { continue };
+        // Must be an *operational* node, not merely the region's first
+        // (`codex review`, P2): the region filter above accepts a region
+        // whose second airfield is intact, and taking `airfield_node`'s
+        // lowest-id one there emits a move `apply_move` rejects with
+        // `NoAirfield` every tick.
+        let Some(target_node) = world.operational_airfield_node(target_region) else { continue };
+        if target_node.id == node {
+            continue;
+        }
+        actions.push(Action::MoveUnit { unit: unit_id, to: Station::Airfield(target_node.id) });
+    }
+}
+
 /// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, points
 /// 2-4): moves idle fleets, grouped by their current zone, toward whichever
 /// of three priorities applies -
@@ -2197,11 +2402,17 @@ fn disband_excess_air(faction: FactionId, chronic_insolvency_ticks: u32, obs: &O
 /// `Consolidate` means "don't start fights", not "don't defend". When
 /// `false`, `enemy_port_zones` is left empty so `blockade_target` below
 /// never finds anything to propose.
+/// `disbanding` (`codex review` P2, same shape as `air_redeploy`'s own
+/// parameter of the same name): fleets `disband_excess_naval` already
+/// queued a `DisbandUnit` for earlier in this tick's batch must not also get
+/// a `MoveUnit` here - the second order would be rejected as
+/// `ActionError::UnitDead` once the first is applied.
 fn naval_ops(
     faction: FactionId,
     caution: f32,
     obs: &Observation,
     allow_offense: bool,
+    disbanding: &BTreeSet<UnitId>,
     actions: &mut Vec<Action>,
 ) {
     let own_port_zones = port_zones(faction, obs, true);
@@ -2209,6 +2420,9 @@ fn naval_ops(
 
     let mut idle_by_zone: BTreeMap<SeaZoneId, Vec<UnitId>> = BTreeMap::new();
     for unit_id in obs.own_units() {
+        if disbanding.contains(&unit_id) {
+            continue;
+        }
         let unit = obs.world.unit(unit_id);
         if unit.movement.is_some() {
             continue;
@@ -2640,12 +2854,20 @@ fn safest_high_infra_region(faction: FactionId, obs: &Observation) -> Option<Reg
 /// `World` - only compared against a target region's own (always-valid)
 /// `owner` - so an out-of-range or otherwise invalid `FactionId` in either
 /// is harmless here by construction (see `llm.rs`'s module doc).
+///
+/// `disbanding` (`codex review` P2, same shape as `air_redeploy`'s own
+/// parameter of the same name): units `disband_excess` already queued a
+/// `DisbandUnit` for earlier in this tick's batch are excluded from
+/// `present` below - they will not be here once that order applies, and
+/// ordering one to attack besides would be rejected as
+/// `ActionError::UnitDead` once `DisbandUnit` lands first.
 fn offensive(
     faction: FactionId,
     caution: f32,
     obs: &Observation,
     avoid: &[FactionId],
     primary_target: Option<FactionId>,
+    disbanding: &BTreeSet<UnitId>,
     actions: &mut Vec<Action>,
 ) {
     let mut front = obs.front_regions();
@@ -2693,7 +2915,7 @@ fn offensive(
         let mut present: Vec<UnitId> = obs
             .world
             .units_in(region)
-            .filter(|u| u.owner == faction)
+            .filter(|u| u.owner == faction && !disbanding.contains(&u.id))
             .map(|u| u.id)
             .collect();
         present.sort_by_key(|u| u.0);

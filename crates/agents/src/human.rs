@@ -361,7 +361,11 @@ mod tests {
             .find(|&r| match current_station {
                 Station::Region(cur) => cur != r && sim.world.link_between(cur, r).is_none(),
                 Station::Sea(_) => true, // a fleet ordered onto land is always rejected, regardless of which region.
-                Station::Airfield(_) => true, // an air unit ordered onto land is always rejected too (Stage 10A: no `Domain::Air` `MoveUnit` support at all).
+                // An air unit ordered onto a plain land `Station::Region` is always rejected too - `apply_move`'s
+                // `Station::Airfield` arm (Stage 10 follow-up: `Domain::Air` `MoveUnit` support is real now) only
+                // ever accepts another `Station::Airfield` destination, the same way a fleet's own arm only ever
+                // accepts `Station::Sea`, so a `Station::Region` target stays illegal for a squadron regardless.
+                Station::Airfield(_) => true,
             })
             .expect("the embedded scenario has at least one non-adjacent region");
 

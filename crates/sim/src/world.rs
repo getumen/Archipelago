@@ -1090,6 +1090,21 @@ impl World {
     /// `codex review` P2 finding: a region may declare several airfields,
     /// `logistics::build_transport_graph` gates each independently, so
     /// "can this region fly" must ask all of them rather than the first.
+    /// The first **operational** `Airfield` node of `region`, if any.
+    ///
+    /// `codex review` (P2): asking `airfield_node_operational` whether a
+    /// region can host a squadron and then taking `airfield_node`'s
+    /// lowest-id node is two different questions. A region whose first
+    /// airfield is wrecked and whose second is intact passes the first and
+    /// fails the second, so the caller emitted an order `apply_move`
+    /// rejected every tick. Callers that need *a node to use* must ask for
+    /// one that works, not for the first one that exists.
+    pub fn operational_airfield_node(&self, region: RegionId) -> Option<&TransportNode> {
+        self.transport_nodes
+            .iter()
+            .find(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Airfield && n.operational())
+    }
+
     pub fn airfield_node_operational(&self, region: RegionId) -> bool {
         self.transport_nodes
             .iter()

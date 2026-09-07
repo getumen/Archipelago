@@ -3,8 +3,8 @@
 use archipelago_sim::action::{self, Action};
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_COST_MACHINERY_PER_GOOD, UNIT_EQUIPMENT,
-    UNIT_MANPOWER, UNIT_ORG,
+    AIR_OPERATING_RADIUS_KM, FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_COST_MACHINERY_PER_GOOD,
+    UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
 };
 use archipelago_sim::diplomacy::{Stance, Treaty};
 use archipelago_sim::focus::{self, NationalFocus};
@@ -1229,4 +1229,267 @@ fn air_floor_is_not_shed_while_the_navy_still_stands() {
         }
         ref other => panic!("expected a DisbandUnit, got {other:?}"),
     }
+}
+
+/// Stage 10 follow-up AI: `air_redeploy` must reposition a squadron whose
+/// current airfield reaches no front region at all, toward a better own
+/// airfield that does - the AI half of the gap this stage closes now that
+/// `Domain::Air` `MoveUnit` support is real (`action::apply_move`'s
+/// `Station::Airfield` arm). Before this, `best_own_airfield_region`'s own
+/// doc noted recruitment placement was the *only* lever the AI had over
+/// which airspace its air power projected over, because there was no way to
+/// reposition a squadron once the front moved past it.
+///
+/// This pins the **outcome**, not the emission: `air_redeploy`'s first shape
+/// emitted a `MoveUnit` toward whichever own airfield was closest to the
+/// front *anywhere on the map*, with no check that the squadron could
+/// actually reach it in one order. That action was real, but
+/// `action::apply_move`'s `Station::Airfield` arm rejects anything past
+/// `AIR_OPERATING_RADIUS_KM` as `ActionError::NotAdjacent` - so a test that
+/// only asserted an action was generated (the P1 this replaces) stayed green
+/// while the squadron never actually moved, the same shape
+/// docs/conventions.md §2 and CLAUDE.md's "検証についての教訓" already
+/// record for two other regression guards. This one instead runs the
+/// action through the real `action::apply_action` and `sim::Simulation`
+/// path and asserts the squadron's `Station` actually changes.
+///
+/// mvp's faction 0 (touhou_rengou) owns four regions
+/// (hokkaido/kita_tohoku/minami_tohoku/kanto); only kanto borders foreign
+/// territory (chuo_domei's shinetsu_hokuriku/tokai), so it is faction 0's
+/// sole front region. Positions are hand-set (the same convention `air_
+/// superiority_derives_from_both_sides_strength_by_ratio_and_is_order_
+/// independent` and `heuristic_agent_strikes_an_enemy_node_once_it_has_air_
+/// power` already use), laid out on one line through the front so reach -
+/// not mvp's own incidental map layout - is what this measures:
+///
+/// - kanto (front) at distance `0`
+/// - kita_tohoku (reachable stepping stone) at `0.9 * AIR_OPERATING_RADIUS_KM`
+///   from kanto - within one hop of kanto, and, critically, also within one
+///   hop of hokkaido below, so it is a legal intermediate stop
+/// - hokkaido (stranded) at `1.8 * AIR_OPERATING_RADIUS_KM` from kanto -
+///   beyond one hop of kanto directly, but exactly `0.9 * AIR_OPERATING_
+///   RADIUS_KM` (one hop) from kita_tohoku
+/// - minami_tohoku pushed far off this line so it never competes as a
+///   candidate
+///
+/// A squadron at hokkaido therefore cannot legally jump straight to kanto -
+/// only to kita_tohoku. The old, reachability-blind rule picked kanto
+/// anyway (distance `0` beats kita_tohoku's `0.9`); this test asserts the
+/// squadron ends up at kita_tohoku, which only a reachability-aware rule
+/// can produce.
+///
+/// Confirmed this fails without the fix: temporarily reverted
+/// `air_redeploy`'s target selection to plain `best_own_airfield_region`
+/// (ignoring reachability, as it read before this fix) and re-ran - `sim.
+/// apply` returned `ActionError::NotAdjacent` for the emitted `MoveUnit`
+/// (toward kanto, `1.8 * AIR_OPERATING_RADIUS_KM` away), and the squadron's
+/// `Station` never left hokkaido even after stepping the simulation
+/// forward, failing the final assertion. Reverted before committing.
+#[test]
+fn heuristic_agent_redeploys_a_stranded_squadron_toward_the_front() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let front_base = RegionId(3); // kanto - faction 0's only front region
+    let stepping_stone = RegionId(1); // kita_tohoku - one hop from both ends
+    let stranded_base = RegionId(0); // hokkaido - not a front region
+    let out_of_the_way = RegionId(2); // minami_tohoku - kept clear of the line
+
+    world.region_mut(front_base).position = [0.0, 0.0];
+    world.region_mut(stepping_stone).position = [AIR_OPERATING_RADIUS_KM * 0.9, 0.0];
+    world.region_mut(stranded_base).position = [AIR_OPERATING_RADIUS_KM * 1.8, 0.0];
+    world.region_mut(out_of_the_way).position = [0.0, AIR_OPERATING_RADIUS_KM * 100.0];
+
+    // The stepping stone gets a *second* airfield, and its first is wrecked.
+    // `codex review` (P2): the region filter accepts a region as long as any
+    // of its airfields works, but taking the region's lowest-id node there
+    // hands back the wrecked one and `apply_move` rejects the order every
+    // tick. This shape is the actual destination the AI must find.
+    let wrecked_first = world.airfield_node(stepping_stone).expect("mvp regions all carry an airfield node").id;
+    let stepping_stone_airfield = archipelago_sim::ids::TransportNodeId(world.transport_nodes.len() as u32);
+    world.transport_nodes.push(archipelago_sim::transport::TransportNode {
+        id: stepping_stone_airfield,
+        name: "kita_tohoku spare airfield".to_string(),
+        kind: archipelago_sim::transport::TransportNodeKind::Airfield,
+        region: stepping_stone,
+        condition: archipelago_sim::transport::Condition::FULL,
+    });
+    world.transport_nodes[wrecked_first.index()].condition =
+        archipelago_sim::transport::Condition::new(0.0).expect("0.0 is a valid condition");
+    let stranded_airfield = world.airfield_node(stranded_base).expect("mvp regions all carry an airfield node").id;
+
+    // Give faction 0 a squadron stuck at hokkaido by moving an existing unit
+    // of its own onto that airfield - `Station::domain()` derives purely
+    // from the station variant, the same trick `heuristic_agent_strikes_an_
+    // enemy_node_once_it_has_air_power` uses to avoid hand-building a fresh
+    // `Unit`.
+    let unit_id = UnitId(0);
+    assert_eq!(world.unit(unit_id).owner, faction, "scenario::build_world assigns unit 0 to faction 0");
+    world.unit_mut(unit_id).station = Station::Airfield(stranded_airfield);
+    world.unit_mut(unit_id).movement = None;
+
+    {
+        let obs = Observation { faction, world: &world };
+        assert_eq!(
+            obs.front_regions(),
+            vec![front_base],
+            "test setup: faction 0's own map only puts kanto on the front"
+        );
+    }
+
+    let mut sim = archipelago_sim::sim::Simulation::with_world(world, 1);
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &sim.world };
+    let actions = agent.decide(&obs);
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::MoveUnit { unit, to: Station::Airfield(node) }
+                if *unit == unit_id && *node == stepping_stone_airfield
+        )),
+        "expected the stranded squadron to redeploy toward kita_tohoku, the only reachable stepping stone: {actions:?}"
+    );
+
+    let errors = sim.apply(faction, &actions);
+    assert!(errors.is_empty(), "the AI must never emit an action the simulator rejects: {errors:?}");
+
+    // `AIR_MOVE_DAYS` (1.0) at the slowest possible daily step (0.5, at zero
+    // supply) still arrives within a handful of days - `military::
+    // tick_movement`'s own per-day progress.
+    for _ in 0..10 {
+        if sim.world.unit(unit_id).station == Station::Airfield(stepping_stone_airfield) {
+            break;
+        }
+        sim.step();
+    }
+    assert_eq!(
+        sim.world.unit(unit_id).station,
+        Station::Airfield(stepping_stone_airfield),
+        "the stranded squadron must actually arrive at kita_tohoku, not merely be ordered there"
+    );
+}
+
+/// `codex review` (P2): during insolvency, `disband_excess_air` can pick a
+/// squadron for `DisbandUnit` in the very same tick `air_redeploy` would
+/// otherwise pick that same squadron for a `MoveUnit` - both read the same
+/// pre-tick `Observation`, with no way for either to see what the other
+/// decided. Actions apply in the order `decide_for_llm` pushed them
+/// (`sim::Simulation::apply`), so the `MoveUnit` that used to follow would
+/// be rejected outright as `ActionError::UnitDead` once the `DisbandUnit`
+/// ahead of it landed - a rejection an API/RL caller would see for an order
+/// the AI should never have issued at all.
+///
+/// Reuses the exact stranded-squadron geometry `heuristic_agent_redeploys_
+/// a_stranded_squadron_toward_the_front` already established: kanto (front,
+/// `x=0`) is faction 0's only front region once its land and navy are gone
+/// too, kita_tohoku (`x = 0.9 * AIR_OPERATING_RADIUS_KM`) is a legal
+/// one-hop stepping stone, and hokkaido (`x = 1.8 * AIR_OPERATING_RADIUS_KM`)
+/// is out of the front's reach directly - the shape that makes `air_
+/// redeploy` want to move the squadron based there at all. A single
+/// squadron at hokkaido, with land and navy both wiped out and a chronic
+/// Munitions drought, is simultaneously `disband_excess_air`'s only
+/// disband candidate and `air_redeploy`'s only redeploy candidate - the
+/// exact overlap the fix must close.
+///
+/// **Confirmed this can fail.** Temporarily dropped the `if disbanding.
+/// contains(&unit_id) { continue; }` guard from `air_redeploy`. Re-ran:
+/// `actions` after both calls held both a `DisbandUnit` and a `MoveUnit`
+/// for the same unit id, the first assertion below failed, and feeding
+/// that exact two-action list through `action::apply_action` in order (the
+/// counterfactual block below) reproduced the reported symptom directly -
+/// `Ok(())` for the disband, then `Err(ActionError::UnitDead)` for the
+/// move right behind it. Reverted before committing.
+#[test]
+fn heuristic_agent_never_moves_a_unit_it_is_also_disbanding() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let front_base = RegionId(3); // kanto - faction 0's only front region
+    let stepping_stone = RegionId(1); // kita_tohoku - one hop from both ends
+    let stranded_base = RegionId(0); // hokkaido - not a front region
+    let out_of_the_way = RegionId(2); // minami_tohoku - kept clear of the line
+
+    world.region_mut(front_base).position = [0.0, 0.0];
+    world.region_mut(stepping_stone).position = [AIR_OPERATING_RADIUS_KM * 0.9, 0.0];
+    world.region_mut(stranded_base).position = [AIR_OPERATING_RADIUS_KM * 1.8, 0.0];
+    world.region_mut(out_of_the_way).position = [0.0, AIR_OPERATING_RADIUS_KM * 100.0];
+
+    // Land and navy both gone - `disband_excess_air`'s chronic branch only
+    // reaches air once neither tier above it can absorb the cut any more
+    // (its own doc).
+    for unit in world.units.iter_mut().filter(|u| u.owner == faction) {
+        unit.alive = false;
+    }
+
+    let stranded_airfield = world.airfield_node(stranded_base).expect("mvp regions all carry an airfield node").id;
+    let unit_id = UnitId(world.units.len() as u32);
+    world.units.push(Unit {
+        id: unit_id,
+        owner: faction,
+        name: "Test Squadron".to_string(),
+        station: Station::Airfield(stranded_airfield),
+        movement: None,
+        manpower: UNIT_MANPOWER,
+        equipment: UNIT_EQUIPMENT,
+        organization: UNIT_ORG,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Airfield(stranded_airfield),
+        experience: 0.0,
+        alive: true,
+    });
+
+    let obs = Observation { faction, world: &world };
+    assert_eq!(obs.front_regions(), vec![front_base], "test setup: faction 0's own map only puts kanto on the front");
+
+    // A chronic Munitions drought well past `CHRONIC_INSOLVENCY_TICKS_FOR_
+    // FLOOR_TRIM` (15) - passed directly, the same way `air_floor_is_not_
+    // shed_while_the_navy_still_stands` drives `disband_excess_air`'s
+    // chronic branch without replaying dozens of in-game days.
+    let mut actions = Vec::new();
+    crate::disband_excess_air(faction, 20, &obs, &mut actions);
+    assert_eq!(actions.len(), 1, "test setup: the lone stranded squadron must be the one chronic-insolvency candidate: {actions:?}");
+    assert!(
+        matches!(actions[0], Action::DisbandUnit { unit } if unit == unit_id),
+        "test setup: the disbanded unit must be the stranded squadron: {actions:?}"
+    );
+
+    let disbanding: std::collections::BTreeSet<UnitId> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::DisbandUnit { unit } => Some(*unit),
+            _ => None,
+        })
+        .collect();
+
+    crate::air_redeploy(faction, &obs, &disbanding, &mut actions);
+    assert_eq!(
+        actions.len(),
+        1,
+        "a unit already selected for disbanding must never also receive a MoveUnit in the same batch: {actions:?}"
+    );
+
+    // Counterfactual: reproduce the reported symptom directly - the
+    // pre-fix action list (a `DisbandUnit` followed by a `MoveUnit` for the
+    // same unit) really does get the second order rejected as `UnitDead`
+    // once applied in order, which is exactly why the exclusion above
+    // matters and is not merely cosmetic.
+    let stepping_stone_airfield =
+        world.airfield_node(stepping_stone).expect("mvp regions all carry an airfield node").id;
+    let mut counterfactual = world.clone();
+    action::apply_action(&mut counterfactual, faction, Action::DisbandUnit { unit: unit_id })
+        .expect("disbanding an uncontested unit must succeed");
+    let result = action::apply_action(
+        &mut counterfactual,
+        faction,
+        Action::MoveUnit { unit: unit_id, to: Station::Airfield(stepping_stone_airfield) },
+    );
+    assert_eq!(
+        result,
+        Err(action::ActionError::UnitDead),
+        "sanity: a MoveUnit for an already-disbanded unit is exactly the rejection this fix prevents the AI from ever issuing"
+    );
 }

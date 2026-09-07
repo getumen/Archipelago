@@ -2,7 +2,7 @@
 //! systems that resolve what happens to them each tick.
 
 use crate::balance::{
-    ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
+    AIR_MOVE_DAYS, ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
     CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE, DEVASTATION_PER_COMBAT_DAMAGE,
     EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, FLEET_MOVE_DAYS,
     FOCUS_DEFENSIVE_HOME_DEFENSE_MULT, FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT,
@@ -140,6 +140,20 @@ pub fn fleet_move_required(hostile: bool) -> f32 {
     FLEET_MOVE_DAYS * if hostile { 1.5 } else { 1.0 }
 }
 
+/// Days for a squadron to redeploy between two of its own airfields -
+/// `move_required`/`fleet_move_required`'s air-domain sibling
+/// (`balance::AIR_MOVE_DAYS`'s own doc explains why it is flat rather than
+/// distance-scaled). No `hostile` parameter, unlike either sibling: a land
+/// move can invade unfriendly territory and a fleet can sail into contested
+/// water, but `action::apply_move`'s own `Station::Airfield` arm only ever
+/// accepts a destination airfield that is this faction's own, operational
+/// field (`ActionError::RegionNotOwned`/`ActionError::NoAirfield` otherwise)
+/// - there is no "hostile destination" case for a redeploying squadron to
+/// slow down for.
+pub fn air_move_required() -> f32 {
+    AIR_MOVE_DAYS
+}
+
 fn is_pinned(world: &World, unit: &Unit) -> bool {
     match unit.station {
         Station::Region(r) => world.has_enemy_units(r, unit.owner),
@@ -199,13 +213,66 @@ pub fn tick_movement(world: &mut World) {
     for update in updates {
         let unit = world.unit_mut(update.id);
         unit.organization = (unit.organization - ORG_MARCH_DRAIN).max(0.0);
-        if update.arrived {
-            let to = unit.movement.unwrap().to;
-            unit.station = to;
-            unit.movement = None;
-        } else {
+        if !update.arrived {
             unit.movement.as_mut().unwrap().progress = update.new_progress;
+            continue;
         }
+        let to = unit.movement.unwrap().to;
+        let owner = unit.owner;
+
+        // External code review fix (Stage 10 follow-up, P2) - the same
+        // precedent `construction::transport_line_still_owned` already sets
+        // for `Project::TransportLine` (that function's own doc, and
+        // CLAUDE.md's 「発令時点の値を焼き込まない」): `action::apply_move`'s
+        // `Station::Airfield` arm validates the destination is this
+        // faction's own, operational airfield only once, when the order is
+        // placed - `air_move_required()` (`AIR_MOVE_DAYS`) then leaves the
+        // squadron in transit for real days before this arrival runs. If
+        // the field was struck (`Action::StrikeNode`) or its region
+        // captured in the meantime, landing there unconditionally would put
+        // the squadron on rubble or in enemy hands, neither of which
+        // `apply_move` would ever have accepted as an order in the first
+        // place. Re-checked here, at completion, against the *current*
+        // world - never trusted from order time.
+        //
+        // Land and sea carry no equivalent invariant to revalidate: unlike
+        // an air redeploy (whose only legal destination is this faction's
+        // own, safe field - there is no mechanism for a squadron to fight
+        // its way onto a foreign or contested one), a land `MoveUnit` is
+        // routinely ordered into hostile-owned territory (`move_required`'s
+        // `hostile` multiplier merely slows it down - that is how an
+        // invasion happens) and a fleet into contested water. Arriving to
+        // find the destination's ownership or control has since changed -
+        // in either direction - is exactly the kind of thing a moving
+        // battlefield is expected to do to a unit already committed to
+        // reaching it, not a violated precondition; `tick_combat`/
+        // `tick_occupation` resolve whatever the unit finds there on
+        // arrival, the same as they would have if the change had happened
+        // the tick before the order was even issued.
+        let destination_still_valid = match to {
+            Station::Airfield(node) => world.transport_nodes.get(node.index()).is_some_and(|n| {
+                n.kind == crate::transport::TransportNodeKind::Airfield
+                    && n.operational()
+                    && world.region(n.region).owner == owner
+            }),
+            Station::Region(_) | Station::Sea(_) => true,
+        };
+
+        let unit = world.unit_mut(update.id);
+        if destination_still_valid {
+            unit.station = to;
+        }
+        // Cancelled, not completed, when the destination has gone stale:
+        // `unit.station` is left untouched (it was never written above),
+        // so the squadron simply stays exactly where it already was -
+        // alive, based, and free to be redeployed (`agents::air_redeploy`)
+        // or held next tick against the *current* map. The travel time
+        // already spent is forfeit and not refunded, the same
+        // "cancel outright, free the slot for a fresh, re-validated order"
+        // recovery path `construction::tick_construction` gives a
+        // `TransportLine` project whose other endpoint changed hands
+        // mid-repair - never a state with no way out.
+        unit.movement = None;
     }
 }
 

@@ -3,9 +3,10 @@
 
 use crate::air;
 use crate::balance::{
-    AIR_UNIT_MACHINERY_COST, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT,
-    FOCUS_SWITCH_DAYS, IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_TEXT_MAX_CHARS,
-    NODE_STRIKE_DAMAGE, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
+    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
+    FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS, IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE,
+    NL_PROPOSAL_TEXT_MAX_CHARS, NODE_STRIKE_DAMAGE, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
+    UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
@@ -13,7 +14,7 @@ use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use crate::logistics;
-use crate::military::{fleet_move_required, move_required, Movement, Unit};
+use crate::military::{air_move_required, fleet_move_required, move_required, Movement, Unit};
 use crate::naval;
 use crate::transport::{Condition, TransportNodeKind};
 use crate::world::{Domain, Station, World};
@@ -26,9 +27,13 @@ use crate::world::{Domain, Station, World};
 #[derive(Clone, PartialEq, Debug)]
 pub enum Action {
     /// A land unit's `to` must be `Station::Region`; a fleet's must be
-    /// `Station::Sea` — `apply_move` validates the destination matches the
-    /// moving unit's own domain and rejects it otherwise
-    /// (`ActionError::NotAdjacent`).
+    /// `Station::Sea`; a squadron's must be `Station::Airfield` —
+    /// `apply_move` validates the destination matches the moving unit's own
+    /// domain and rejects it otherwise (`ActionError::NotAdjacent`). Stage
+    /// 10 follow-up: unlike land/sea, a squadron's destination airfield must
+    /// also be this faction's own, operational, and within
+    /// `balance::AIR_OPERATING_RADIUS_KM` of its current field - see
+    /// `apply_move`'s own `Station::Airfield` arm for the full account.
     MoveUnit { unit: UnitId, to: Station },
     HoldUnit { unit: UnitId },
     /// Stands a unit down, reversing `RecruitUnit`: the unit is removed
@@ -336,7 +341,12 @@ pub enum ActionError {
     NoPort,
     /// Stage 10A: `Action::RecruitUnit { domain: Domain::Air, .. }` against
     /// a region with no `transport::TransportNodeKind::Airfield` node - the
-    /// air-domain sibling of `NoPort`.
+    /// air-domain sibling of `NoPort`. Stage 10 follow-up: `apply_move`'s
+    /// own `Station::Airfield` arm reuses this for a redeploy order naming a
+    /// `TransportNodeId` that isn't genuinely an `Airfield`-kind node, or
+    /// names one that is currently wrecked (`transport::TransportNode::
+    /// operational` false) - the same "no usable airfield" fact, not a
+    /// second error for what is the same experience from either action.
     NoAirfield,
     /// Stage 9D: `Action::InterdictLine`/`Action::Build`'s
     /// `Project::TransportLine` named a `TransportLineId` past the end of
@@ -353,6 +363,8 @@ pub enum ActionError {
     LineNotHostile,
     /// Stage 10C: `Action::StrikeNode` named a `TransportNodeId` past the
     /// end of `World::transport_nodes` - `InvalidLine`'s node-level twin.
+    /// Stage 10 follow-up: `Action::MoveUnit`'s own `Station::Airfield` arm
+    /// reuses this for the identical out-of-bounds case on its `to` target.
     InvalidNode,
     /// Stage 10C: `Action::StrikeNode` named a node whose `kind` isn't
     /// `Airfield` or `Port` (design.md §8's own "物流拠点") - a `Depot`/
@@ -464,9 +476,85 @@ fn apply_move(
             let hostile = enemy_control > world.sea_zone(to_z).control[faction.index()];
             (fleet_move_required(hostile), None)
         }
-        // A land unit can never be ordered into a sea zone, nor a fleet
-        // into a region — `fleet_cannot_enter_land` and its converse are
-        // exactly this branch.
+        // Stage 10 follow-up (docs/phase10-spec.md "1. 基地": a squadron's
+        // location is a `Station::Airfield`, so its own move is airfield-to-
+        // airfield, not region/sea-zone adjacency): a squadron flies, so
+        // "adjacent" means geographic reach, not a graph edge — reuses the
+        // exact `AIR_OPERATING_RADIUS_KM` reach `air::tick_air_superiority`
+        // already gives a *stationary* squadron's committed power, rather
+        // than inventing a second, unmeasured "ferry range" constant (see
+        // `balance::AIR_MOVE_DAYS`'s own doc for why). A squadron that could
+        // never contest the sky over its own destination in the first place
+        // has no business being told it can fly there.
+        //
+        // Ownership, not adjacency, is what stands in for "friendly
+        // territory" here: unlike a land unit (which can be ordered into a
+        // hostile-owned region — that is how an invasion happens — with
+        // `move_required`'s `hostile` multiplier slowing it down) or a fleet
+        // (which can enter contested water), no mechanism in this crate lets
+        // a squadron fight its way onto a foreign airfield. `apply_recruit`'s
+        // own `Domain::Air` arm already requires a fresh squadron's home
+        // field to be this faction's own operational airfield
+        // (`ActionError::NoAirfield`); a redeploying squadron is held to the
+        // identical requirement, reusing `ActionError::RegionNotOwned` (the
+        // same "not this faction's to use" fact `apply_build`/`apply_recruit`
+        // already spend that error on) for a destination owned by someone
+        // else, and `ActionError::NoAirfield` for a destination that either
+        // isn't genuinely an `Airfield`-kind node or is currently wrecked
+        // (`transport::TransportNode::operational`) — "no usable airfield
+        // there" is the same fact `apply_recruit`'s own doc already reads
+        // "no airfield" and "the airfield is rubble" as, not two different
+        // errors for what a recruiting or redeploying faction experiences as
+        // one and the same thing: nowhere to land right now.
+        //
+        // No live in-transit factor to sample (unlike a `Strait` link's
+        // `strait_zone`, this arm's `strait_zone` output is always `None`):
+        // a strait is a shared chokepoint with its own persistent
+        // `SeaZoneId` that `tick_movement` re-reads every tick a crossing is
+        // under way. A flight between two airfields has no such standing
+        // entity in this data model to re-read — `Region::air_superiority`
+        // is defined over *regions*, not over the line between two
+        // airfields, and inventing a flight-path-vs-region intersection test
+        // to throttle a redeployment mid-flight would be exactly the kind of
+        // unrequested new mechanism docs/conventions.md §1 requires asking
+        // about before building, for an interception mechanic Phase 10 never
+        // specified in the first place (10C's own interdiction is about
+        // *stationary* squadrons projecting power over regions, never about
+        // catching another squadron en route). The origin's own contested-
+        // ness is still covered — the shared `pinned` check above already
+        // refuses to let a squadron leave an airfield under enemy ground
+        // contact, the same as it does for every other domain.
+        (Station::Airfield(from_node), Station::Airfield(to_node)) => {
+            // `codex review` (P2): a move to the field the squadron already
+            // sits on passes every check below - operational, owned, zero
+            // kilometres - and would start a one-day `Movement` to nowhere.
+            // Repeating the order keeps the squadron perpetually in transit,
+            // bleeding organization in `tick_movement` and never being
+            // anywhere, which is precisely the sort of loop an optimiser is
+            // expected to find (docs/mvp-spec.md §5's own premise). Land and
+            // sea get this for free: a region is never adjacent to itself,
+            // nor a sea zone to itself.
+            if from_node == to_node {
+                return Err(ActionError::NotAdjacent);
+            }
+            let dest = world.transport_nodes.get(to_node.index()).ok_or(ActionError::InvalidNode)?;
+            if dest.kind != TransportNodeKind::Airfield || !dest.operational() {
+                return Err(ActionError::NoAirfield);
+            }
+            if world.region(dest.region).owner != faction {
+                return Err(ActionError::RegionNotOwned);
+            }
+            let from_pos = world.region(world.transport_node(from_node).region).position;
+            let to_pos = world.region(dest.region).position;
+            if air::geographic_distance(from_pos, to_pos) > AIR_OPERATING_RADIUS_KM {
+                return Err(ActionError::NotAdjacent);
+            }
+            (air_move_required(), None)
+        }
+        // A land unit can never be ordered into a sea zone or an airfield,
+        // nor a fleet into a region or an airfield, nor a squadron into a
+        // region or a sea zone — `fleet_cannot_enter_land` and its
+        // converse(s) are exactly this branch.
         _ => return Err(ActionError::NotAdjacent),
     };
 

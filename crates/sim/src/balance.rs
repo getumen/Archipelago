@@ -236,6 +236,32 @@ pub const AIR_UNIT_MACHINERY_COST: f32 = 20.0;
 /// this constant - is Stage 10E's job, not this one's.
 pub const AIR_OPERATING_RADIUS_KM: f32 = 300.0;
 
+/// Days for a squadron to redeploy from one of its own airfields to
+/// another, once `action::apply_move`'s own range check has already
+/// confirmed the destination lies within `AIR_OPERATING_RADIUS_KM`
+/// (docs/phase10-spec.md never specifies a ferry-range constant of its own,
+/// leaving the choice to the implementation - see `apply_move`'s own doc for
+/// why redeployment reuses that same radius rather than introducing a
+/// second, unmeasured "ferry range" figure).
+///
+/// Flat, not scaled by the exact distance covered within that radius -
+/// `fleet_move_required`'s own shape one domain further, not a new one:
+/// `FLEET_MOVE_DAYS` (4.0) is a single flat cost for crossing into an
+/// adjacent sea zone regardless of that zone's actual size, because a ship's
+/// travel time is dominated by loading, forming up and making port, not the
+/// open-water leg itself; a redeploying squadron's time is dominated by the
+/// mirror image - takeoff, the flight itself, and settling into the new
+/// field's ground service and supply chain - and unlike a ship, the flight
+/// leg is the part that's fast: a few hundred kilometres, this constant's
+/// own range ceiling, is on the order of an hour in the air. Set well below
+/// every existing `LinkKind::travel_days()` figure (`Rail` 2.0 through `Sea`
+/// 6.0) and below `FLEET_MOVE_DAYS` itself, for exactly that reason - an
+/// aircraft is not a slower ship. A first, disclosed placeholder in
+/// `AIR_UNIT_MACHINERY_COST`'s own sense (no shipped scenario exercised
+/// `Domain::Air` movement before this stage, so there is nothing measured to
+/// fit this to yet); a real balance pass is future work, not this stage's.
+pub const AIR_MOVE_DAYS: f32 = 1.0;
+
 pub const SUPPLY_NEED_PER_MANPOWER: f32 = 1.0;
 pub const COMBAT_SUPPLY_MULT: f32 = 2.5;
 

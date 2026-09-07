@@ -306,7 +306,15 @@ fn node_air_power(world: &World) -> Vec<Vec<f32>> {
 /// and every position `crate::sim` ever sees already went through whatever
 /// projection produced it (`tools/hexmap/hexgrid.py`'s equirectangular
 /// approximation, for `scenarios/japan_hex.json`) before reaching this crate.
-fn geographic_distance(a: [f32; 2], b: [f32; 2]) -> f32 {
+///
+/// Stage 10 follow-up: `action::apply_move`'s own `Station::Airfield` arm
+/// reuses this exact function to gate how far a squadron may redeploy in one
+/// order, against the same `AIR_OPERATING_RADIUS_KM` ceiling this module
+/// already reaches for combat power over a region - not a second,
+/// independently-invented notion of "how far can this squadron go" (see
+/// `balance::AIR_MOVE_DAYS`'s own doc for why ferry range and combat radius
+/// share one constant rather than two).
+pub(crate) fn geographic_distance(a: [f32; 2], b: [f32; 2]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
     (dx * dx + dy * dy).sqrt()
