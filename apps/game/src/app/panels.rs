@@ -1780,6 +1780,30 @@ mod tests {
         id
     }
 
+    /// The enemy-owned region nearest `from` (by straight-line
+    /// `world::Region::position` distance) - used by the strike-panel tests
+    /// below to pick a genuinely in-`AIR_OPERATING_RADIUS_KM`-range hostile
+    /// target under `mvp.json`'s real-kilometre-scale layout
+    /// (`tools/rescale_positions.py`, docs/phase10-spec.md gap report),
+    /// rather than assuming any particular named region (e.g. a capital)
+    /// still qualifies. Never duplicates `air::geographic_distance` itself
+    /// (that stays `pub(crate)` to `archipelago-sim`) - just enough of the
+    /// same straight-line formula to rank candidates in a test.
+    fn nearest_enemy_region(world: &SimWorld, own: FactionId, from: [f32; 2]) -> archipelago_sim::ids::RegionId {
+        fn distance2(a: [f32; 2], b: [f32; 2]) -> f32 {
+            let dx = a[0] - b[0];
+            let dy = a[1] - b[1];
+            dx * dx + dy * dy
+        }
+        world
+            .regions
+            .iter()
+            .filter(|r| r.owner != own)
+            .min_by(|a, b| distance2(a.position, from).total_cmp(&distance2(b.position, from)))
+            .map(|r| r.id)
+            .expect("mvp has at least one region not owned by faction 0")
+    }
+
     fn run<M>(world: &mut World, system: impl IntoSystem<(), (), M>) {
         let mut system = IntoSystem::into_system(system);
         system.initialize(world);
@@ -1985,10 +2009,14 @@ mod tests {
     /// **Needs a reachable squadron** (`codex review` P1,
     /// `ActionError::NoAircraftInRange`): `player_sim`'s default world has
     /// no air units at all, so this test builds its own `sim_world` and
-    /// gives faction 0 one at its own capital's airfield first - mvp's
-    /// 関東 and 近畿 (faction 1's own capital, the target here) sit about
-    /// 190km apart, comfortably inside `air::AIR_OPERATING_RADIUS_KM`'s
-    /// 300km, so no relocation is needed the way the sim-crate tests use.
+    /// gives faction 0 one at its own capital's airfield first, then
+    /// targets the nearest enemy-owned region (`nearest_enemy_region`)
+    /// rather than assuming faction 1's own capital is close enough - since
+    /// `mvp.json` was rescaled onto a real kilometre plane
+    /// (`tools/rescale_positions.py`, docs/phase10-spec.md gap report),
+    /// mvp's 関東/近畿 capitals are now over 400km apart, well outside
+    /// `air::AIR_OPERATING_RADIUS_KM`'s 300km, even though a genuinely
+    /// nearby enemy region (信越・北陸, ~200km) still exists.
     #[test]
     fn strike_panel_click_enqueues_strike_node_against_a_hostile_airfield() {
         let mut world = World::new();
@@ -1996,7 +2024,7 @@ mod tests {
         let own_capital = sim_world.faction(FactionId(0)).capital;
         let own_airfield = sim_world.airfield_node(own_capital).expect("every mvp region has an airfield node").id;
         push_air_unit(&mut sim_world, FactionId(0), own_airfield);
-        let foreign = sim_world.faction(FactionId(1)).capital;
+        let foreign = nearest_enemy_region(&sim_world, FactionId(0), sim_world.region(own_capital).position);
         let node = sim_world.airfield_node(foreign).expect("every mvp region has an airfield node").id;
         let condition_before = sim_world.transport_node(node).condition.get();
         let sim = SimRes(SimDriver::new_with_player(sim_world, 1, Some(FactionId(0)), None));
@@ -2039,7 +2067,7 @@ mod tests {
         let own_capital = sim_world.faction(FactionId(0)).capital;
         let own_airfield = sim_world.airfield_node(own_capital).expect("every mvp region has an airfield node").id;
         push_air_unit(&mut sim_world, FactionId(0), own_airfield);
-        let foreign = sim_world.faction(FactionId(1)).capital;
+        let foreign = nearest_enemy_region(&sim_world, FactionId(0), sim_world.region(own_capital).position);
         let wrecked = sim_world.airfield_node(foreign).expect("every mvp region has an airfield node").id;
         let intact = archipelago_sim::ids::TransportNodeId(sim_world.transport_nodes.len() as u32);
         sim_world.transport_nodes.push(archipelago_sim::transport::TransportNode {

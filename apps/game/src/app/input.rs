@@ -1025,6 +1025,17 @@ mod tests {
 
     use super::super::map_mode::MapMode;
 
+    /// Squared Euclidean distance between two `world::Region::position`s -
+    /// only used by tests to pick a genuinely nearby region under
+    /// `mvp.json`'s real-kilometre-scale layout (`tools/rescale_positions
+    /// .py`), never to duplicate `air::geographic_distance` itself (that
+    /// stays `pub(crate)` to `archipelago-sim`).
+    fn distance2(a: [f32; 2], b: [f32; 2]) -> f32 {
+        let dx = a[0] - b[0];
+        let dy = a[1] - b[1];
+        dx * dx + dy * dy
+    }
+
     /// Builds every resource `keyboard_input` reads, in the same shape
     /// `app::run`'s own startup resources use - the full system, not a
     /// smaller helper, since `M` is bound directly inside `keyboard_input`
@@ -1166,10 +1177,16 @@ mod tests {
     /// a selected air unit - `apply_move`'s `Station::Airfield` arm only
     /// ever accepts another `Station::Airfield` (this module's own doc on
     /// `MoveUnit`), so a `Station::Region` target would always be rejected
-    /// regardless of range or ownership. Every mvp region owned by faction 0
-    /// is within `AIR_OPERATING_RADIUS_KM` of every other (checked directly
-    /// here via `last_human_action_errors` being empty after the tick, not
-    /// assumed), so this also proves a legal redeploy actually lands.
+    /// regardless of range or ownership.
+    ///
+    /// Since `mvp.json` was rescaled onto a real kilometre plane
+    /// (`tools/rescale_positions.py`, docs/phase10-spec.md gap report),
+    /// faction 0's own regions are no longer all mutually within
+    /// `AIR_OPERATING_RADIUS_KM` of each other the way they were on the old
+    /// schematic layout, so this deliberately picks the *nearest* other
+    /// owned region rather than assuming every one of them qualifies - the
+    /// legal-redeploy claim below is still checked directly via
+    /// `last_human_action_errors` being empty after the tick, never assumed.
     ///
     /// Confirmed this can actually fail: temporarily reverted
     /// `issue_move_orders` to unconditionally use `to` (the pre-Stage-10-
@@ -1194,13 +1211,15 @@ mod tests {
             .expect("the RecruitUnit(Air) applied above must have created a living squadron")
             .id;
 
+        let capital_position = sim.0.world().region(capital).position;
         let destination_region = sim
             .0
             .world()
             .regions
             .iter()
+            .filter(|r| r.id != capital && r.owner == FactionId(0))
+            .min_by(|a, b| distance2(a.position, capital_position).total_cmp(&distance2(b.position, capital_position)))
             .map(|r| r.id)
-            .find(|&r| r != capital && sim.0.world().region(r).owner == FactionId(0))
             .expect("faction 0 owns more than one region in mvp");
         let destination_node = sim.0.world().airfield_node(destination_region).expect("every mvp region has an airfield node").id;
 

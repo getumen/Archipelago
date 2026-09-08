@@ -459,16 +459,24 @@ fn parse_capacity(v: &Value, path: &str) -> Result<[f32; GOOD_COUNT], ScenarioEr
 ///
 /// **Since Stage 10B this is no longer a rendering-only field.**
 /// `air::tick_air_superiority` measures an airfield's reach against it in
-/// kilometres (`balance::AIR_OPERATING_RADIUS_KM`), so a scenario that
-/// places `Domain::Air` units needs coordinates on a real physical scale.
-/// `scenarios/japan_hex.json` has them (`tools/hexmap/build_scenario.py`
-/// divides metres by 1000); `mvp.json` and `japan47.json` carry an unscaled
-/// schematic layout, which is harmless only for as long as neither deploys
-/// an air unit. `Region::position`'s own doc records the reversal of Phase
-/// 7A's 「座標はシミュレーションに一切影響しない」 invariant in full. The
-/// schema deliberately does not try to guess or validate a scale here -
-/// there is nothing in the data to check it against, and inventing one
-/// would be the kind of silent default docs/conventions.md §3 forbids.
+/// kilometres (`balance::AIR_OPERATING_RADIUS_KM`), so every scenario needs
+/// coordinates on a real physical scale - not only one that happens to
+/// place `Domain::Air` units in its own file, since this repo's heuristic
+/// AI recruits them at runtime in every scenario regardless. All three
+/// shipped scenarios now have them: `scenarios/japan_hex.json` always did
+/// (`tools/hexmap/build_scenario.py` divides metres by 1000); `mvp.json`
+/// and `japan47.json` used to carry an unscaled schematic layout, measured
+/// and fixed by rescaling them onto the same projection
+/// (`tools/rescale_positions.py`, run once and committed - see its own doc
+/// for the derivation). `Region::position`'s own doc records the reversal
+/// of Phase 7A's 「座標はシミュレーションに一切影響しない」 invariant, and
+/// the measured before/after effect of the rescale, in full. The schema
+/// deliberately does not try to guess or validate a scale here - there is
+/// nothing in the data to check it against, and inventing one would be the
+/// kind of silent default docs/conventions.md §3 forbids; getting a
+/// scenario file's own coordinates onto the right scale is the scenario
+/// author's job, done once for the two shipped schematic maps by the tool
+/// above.
 fn parse_position(v: &Value, path: &str) -> Result<[f32; 2], ScenarioError> {
     let value = require_object_field(v, path, "position")?;
     let arr = value.as_array().ok_or_else(|| schema_err(format!("`{path}.position` must be an array of 2 numbers")))?;

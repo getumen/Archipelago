@@ -223,12 +223,19 @@ fn interdict_line_action_round_trips_through_the_http_codec() {
 /// `action_codec.rs` in isolation - `StrikeNode` landed in Stage 10C but this
 /// was never exercised end to end through `POST /action` before. Two things
 /// in one test since both share the same fixture: `RecruitUnit { domain:
-/// air }` at faction 0's own `hokkaido` airfield (region 0, node 20 -
+/// air }` at faction 0's own `kanto` airfield (region 3, node 23 -
 /// `scenarios/mvp.json`'s transport node list), and `StrikeNode` against
 /// faction 1's `shinetsu_hokuriku` airfield (node 24) - the same enemy
 /// region `interdict_line_action_round_trips_through_the_http_codec` above
 /// already established is a valid hostile target under mvp's unconditional
 /// starting war.
+///
+/// Recruits at `kanto`, not `hokkaido` (region 0) as this test originally
+/// did: since `mvp.json` was rescaled onto a real kilometre plane
+/// (`tools/rescale_positions.py`, docs/phase10-spec.md gap report),
+/// hokkaido and shinetsu_hokuriku are now ~795km apart, well outside
+/// `air::AIR_OPERATING_RADIUS_KM`'s 300km - kanto and shinetsu_hokuriku, at
+/// ~207km, are the nearest genuinely in-range same-fixture pair.
 #[test]
 fn air_actions_round_trip_through_the_http_codec() {
     let handle = start(Duration::from_secs(3600), Duration::from_secs(3600));
@@ -236,7 +243,7 @@ fn air_actions_round_trip_through_the_http_codec() {
     let session_id = reset_body.get("session_id").and_then(Value::as_str).unwrap().to_string();
 
     let recruit_body = format!(
-        r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"recruit_unit","region":0,"domain":"air"}}]}}"#
+        r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"recruit_unit","region":3,"domain":"air"}}]}}"#
     );
     let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&recruit_body)));
     assert_eq!(status, 200);

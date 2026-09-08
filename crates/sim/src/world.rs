@@ -366,13 +366,26 @@ pub struct Region {
     /// `transport::TransportNodeKind::Airfield` node's own region's
     /// `position` to decide whether that airfield's committed air power
     /// reaches this region at all (`balance::AIR_OPERATING_RADIUS_KM`).
-    /// Only `scenarios/japan_hex.json`'s coordinates carry a real physical
-    /// scale (kilometres - `tools/hexmap/build_scenario.py`'s own
-    /// `x_m / 1000.0`); `mvp.json`/`japan47.json`'s are an unscaled
-    /// schematic layout with no physical unit at all - but no shipped
-    /// scenario places a `Domain::Air` unit yet
-    /// (`AIR_OPERATING_RADIUS_KM`'s own doc makes the same disclosure), so
-    /// nothing currently exercises that mismatch.
+    ///
+    /// All three shipped scenarios now carry that coordinate on the same
+    /// real kilometre scale. `scenarios/japan_hex.json` always did
+    /// (`tools/hexmap/build_scenario.py`'s own `x_m / 1000.0`);
+    /// `mvp.json`/`japan47.json` used to be an unscaled schematic layout
+    /// with no physical unit at all, which was harmless only as long as no
+    /// scenario placed a `Domain::Air` unit - a gap this repo's own AI does
+    /// close at runtime (`agents::` recruits `Domain::Air` units in every
+    /// scenario, none pre-placed at load time), so the mismatch was real
+    /// and measured, not theoretical: at the old scale, 68%/75% of mvp/
+    /// japan47's own regions sat inside one `AIR_OPERATING_RADIUS_KM`
+    /// radius of any given region on average, against `japan_hex`'s own
+    /// 25% - air superiority there was close to global reach no matter
+    /// what the constant said. Fixed by rescaling `mvp.json`/`japan47.json`
+    /// themselves (`tools/rescale_positions.py`, run once and committed -
+    /// its own doc has the full derivation and citation for every
+    /// prefecture-to-region grouping) onto the exact same projection
+    /// `tools/hexmap/hexgrid.py` already uses for `japan_hex`, rather than
+    /// by touching this constant to paper over the mismatch. Post-rescale
+    /// the same three figures are 30%/34%/25%.
     pub position: [f32; 2],
     /// Stage 10B (docs/phase10-spec.md "2. 制空権"): each faction's current
     /// share of the contested airspace over this region, recomputed every

@@ -4,8 +4,8 @@
       "id": "hokkaido",
       "name": "北海道",
       "position": [
-        614.0,
-        -37.6
+        1034.98,
+        897.24
       ],
       "terrain": "plain",
       "population": 520.0,
@@ -31,8 +31,8 @@
       "id": "aomori",
       "name": "青森県",
       "position": [
-        589.6,
-        -127.2
+        979.36,
+        647.88
       ],
       "terrain": "hill",
       "population": 120.0,
@@ -66,8 +66,8 @@
       "id": "iwate",
       "name": "岩手県",
       "position": [
-        606.0,
-        -172
+        1016.75,
+        523.2
       ],
       "terrain": "hill",
       "population": 118.0,
@@ -100,8 +100,8 @@
       "id": "akita",
       "name": "秋田県",
       "position": [
-        564.0,
-        -171.2
+        921.0,
+        525.43
       ],
       "terrain": "hill",
       "population": 93.0,
@@ -134,8 +134,8 @@
       "id": "miyagi",
       "name": "宮城県",
       "position": [
-        601.8,
-        -228.4
+        991.21,
+        364.02
       ],
       "terrain": "plain",
       "population": 230.0,
@@ -168,8 +168,8 @@
       "id": "yamagata",
       "name": "山形県",
       "position": [
-        566.1,
-        -223.9
+        944.71,
+        360.68
       ],
       "terrain": "hill",
       "population": 105.0,
@@ -206,8 +206,8 @@
       "id": "fukushima",
       "name": "福島県",
       "position": [
-        580.1,
-        -257.1
+        954.74,
+        306.13
       ],
       "terrain": "hill",
       "population": 180.0,
@@ -252,8 +252,8 @@
       "id": "ibaraki",
       "name": "茨城県",
       "position": [
-        587.7,
-        -298.4
+        952.91,
+        149.17
       ],
       "terrain": "plain",
       "population": 285.0,
@@ -290,8 +290,8 @@
       "id": "tochigi",
       "name": "栃木県",
       "position": [
-        554.2,
-        -282.2
+        900.94,
+        174.77
       ],
       "terrain": "plain",
       "population": 190.0,
@@ -328,8 +328,8 @@
       "id": "gunma",
       "name": "群馬県",
       "position": [
-        523.6,
-        -301.7
+        826.16,
+        154.73
       ],
       "terrain": "plain",
       "population": 190.0,
@@ -370,8 +370,8 @@
       "id": "saitama",
       "name": "埼玉県",
       "position": [
-        556.7,
-        -320
+        879.96,
+        95.74
       ],
       "terrain": "plain",
       "population": 735.0,
@@ -416,8 +416,8 @@
       "id": "chiba",
       "name": "千葉県",
       "position": [
-        591.8,
-        -336.5
+        922.82,
+        67.91
       ],
       "terrain": "plain",
       "population": 628.0,
@@ -450,8 +450,8 @@
       "id": "tokyo",
       "name": "東京都",
       "position": [
-        520.3,
-        -344.1
+        883.61,
+        76.81
       ],
       "terrain": "urban",
       "population": 1400.0,
@@ -488,8 +488,8 @@
       "id": "kanagawa",
       "name": "神奈川県",
       "position": [
-        561.4,
-        -362.7
+        879.05,
+        50.09
       ],
       "terrain": "urban",
       "population": 923.0,
@@ -522,8 +522,8 @@
       "id": "niigata",
       "name": "新潟県",
       "position": [
-        520.8,
-        -244
+        822.52,
+        322.83
       ],
       "terrain": "plain",
       "population": 215.0,
@@ -564,8 +564,8 @@
       "id": "toyama",
       "name": "富山県",
       "position": [
-        454.0,
-        -294.1
+        657.47,
+        189.24
       ],
       "terrain": "hill",
       "population": 102.0,
@@ -602,8 +602,8 @@
       "id": "ishikawa",
       "name": "石川県",
       "position": [
-        419.2,
-        -284.8
+        604.58,
+        177.0
       ],
       "terrain": "hill",
       "population": 111.0,
@@ -636,8 +636,8 @@
       "id": "fukui",
       "name": "福井県",
       "position": [
-        398.7,
-        -314.4
+        567.19,
+        119.11
       ],
       "terrain": "plain",
       "population": 75.0,
@@ -674,8 +674,8 @@
       "id": "yamanashi",
       "name": "山梨県",
       "position": [
-        482.8,
-        -325.5
+        781.48,
+        73.47
       ],
       "terrain": "mountain",
       "population": 80.0,
@@ -716,8 +716,8 @@
       "id": "nagano",
       "name": "長野県",
       "position": [
-        489.6,
-        -289.9
+        745.92,
+        183.68
       ],
       "terrain": "mountain",
       "population": 202.0,
@@ -762,8 +762,8 @@
       "id": "gifu",
       "name": "岐阜県",
       "position": [
-        433.5,
-        -323.6
+        612.78,
+        43.41
       ],
       "terrain": "mountain",
       "population": 195.0,
@@ -812,8 +812,8 @@
       "id": "shizuoka",
       "name": "静岡県",
       "position": [
-        489.3,
-        -372.3
+        764.16,
+        -2.23
       ],
       "terrain": "plain",
       "population": 360.0,
@@ -850,8 +850,8 @@
       "id": "aichi",
       "name": "愛知県",
       "position": [
-        456.0,
-        -354.1
+        630.11,
+        20.04
       ],
       "terrain": "urban",
       "population": 750.0,
@@ -884,8 +884,8 @@
       "id": "mie",
       "name": "三重県",
       "position": [
-        427.6,
-        -379.3
+        593.63,
+        -30.06
       ],
       "terrain": "plain",
       "population": 172.0,
@@ -926,8 +926,8 @@
       "id": "shiga",
       "name": "滋賀県",
       "position": [
-        408.2,
-        -349.1
+        535.27,
+        0.0
       ],
       "terrain": "plain",
       "population": 141.0,
@@ -964,8 +964,8 @@
       "id": "kyoto",
       "name": "京都府",
       "position": [
-        373.4,
-        -339.9
+        525.24,
+        2.23
       ],
       "terrain": "urban",
       "population": 254.0,
@@ -1006,8 +1006,8 @@
       "id": "osaka",
       "name": "大阪府",
       "position": [
-        382.4,
-        -378
+        501.53,
+        -34.51
       ],
       "terrain": "urban",
       "population": 878.0,
@@ -1044,8 +1044,8 @@
       "id": "hyogo",
       "name": "兵庫県",
       "position": [
-        346.1,
-        -363.8
+        472.35,
+        -34.51
       ],
       "terrain": "urban",
       "population": 540.0,
@@ -1087,8 +1087,8 @@
       "id": "nara",
       "name": "奈良県",
       "position": [
-        406.5,
-        -408.4
+        531.63,
+        -34.51
       ],
       "terrain": "hill",
       "population": 130.0,
@@ -1125,8 +1125,8 @@
       "id": "wakayama",
       "name": "和歌山県",
       "position": [
-        371.2,
-        -415.1
+        471.44,
+        -85.72
       ],
       "terrain": "hill",
       "population": 90.0,
@@ -1159,8 +1159,8 @@
       "id": "tottori",
       "name": "鳥取県",
       "position": [
-        332.3,
-        -330.2
+        386.64,
+        55.66
       ],
       "terrain": "hill",
       "population": 55.0,
@@ -1193,8 +1193,8 @@
       "id": "shimane",
       "name": "島根県",
       "position": [
-        279.7,
-        -339.8
+        278.12,
+        52.32
       ],
       "terrain": "hill",
       "population": 65.0,
@@ -1227,8 +1227,8 @@
       "id": "okayama",
       "name": "岡山県",
       "position": [
-        310.3,
-        -358.7
+        358.37,
+        -37.85
       ],
       "terrain": "plain",
       "population": 186.0,
@@ -1266,8 +1266,8 @@
       "id": "hiroshima",
       "name": "広島県",
       "position": [
-        255.7,
-        -378.5
+        224.32,
+        -66.79
       ],
       "terrain": "hill",
       "population": 278.0,
@@ -1305,8 +1305,8 @@
       "id": "yamaguchi",
       "name": "山口県",
       "position": [
-        221.3,
-        -391.5
+        134.05,
+        -90.17
       ],
       "terrain": "hill",
       "population": 132.0,
@@ -1339,8 +1339,8 @@
       "id": "tokushima",
       "name": "徳島県",
       "position": [
-        338.9,
-        -399.3
+        415.82,
+        -103.53
       ],
       "terrain": "hill",
       "population": 70.0,
@@ -1378,8 +1378,8 @@
       "id": "kagawa",
       "name": "香川県",
       "position": [
-        303.3,
-        -394
+        368.4,
+        -73.47
       ],
       "terrain": "hill",
       "population": 93.0,
@@ -1413,8 +1413,8 @@
       "id": "ehime",
       "name": "愛媛県",
       "position": [
-        271.5,
-        -410.9
+        252.59,
+        -129.13
       ],
       "terrain": "hill",
       "population": 130.0,
@@ -1452,8 +1452,8 @@
       "id": "kochi",
       "name": "高知県",
       "position": [
-        302.5,
-        -429.9
+        321.89,
+        -160.3
       ],
       "terrain": "hill",
       "population": 68.0,
@@ -1482,8 +1482,8 @@
       "id": "fukuoka",
       "name": "福岡県",
       "position": [
-        187.5,
-        -403.7
+        38.3,
+        -154.73
       ],
       "terrain": "urban",
       "population": 510.0,
@@ -1520,8 +1520,8 @@
       "id": "saga",
       "name": "佐賀県",
       "position": [
-        161.6,
-        -428.7
+        27.36,
+        -194.81
       ],
       "terrain": "hill",
       "population": 80.0,
@@ -1550,8 +1550,8 @@
       "id": "nagasaki",
       "name": "長崎県",
       "position": [
-        150.3,
-        -462.9
+        -11.85,
+        -250.47
       ],
       "terrain": "hill",
       "population": 128.0,
@@ -1576,8 +1576,8 @@
       "id": "kumamoto",
       "name": "熊本県",
       "position": [
-        191.3,
-        -449.6
+        67.48,
+        -246.02
       ],
       "terrain": "plain",
       "population": 171.0,
@@ -1614,8 +1614,8 @@
       "id": "oita",
       "name": "大分県",
       "position": [
-        224.4,
-        -430.4
+        146.81,
+        -195.92
       ],
       "terrain": "plain",
       "population": 111.0,
@@ -1648,8 +1648,8 @@
       "id": "miyazaki",
       "name": "宮崎県",
       "position": [
-        216.8,
-        -483.6
+        129.49,
+        -343.98
       ],
       "terrain": "plain",
       "population": 105.0,
@@ -1682,8 +1682,8 @@
       "id": "kagoshima",
       "name": "鹿児島県",
       "position": [
-        182.4,
-        -497.6
+        51.07,
+        -382.94
       ],
       "terrain": "hill",
       "population": 155.0,
@@ -1717,8 +1717,8 @@
       "id": "okinawa",
       "name": "沖縄県",
       "position": [
-        67.2,
-        -711.6
+        -211.56,
+        -978.5
       ],
       "terrain": "hill",
       "population": 146.0,

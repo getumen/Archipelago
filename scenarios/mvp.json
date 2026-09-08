@@ -3,7 +3,7 @@
     {
       "id": "hokkaido",
       "name": "北海道",
-      "position": [620, -40],
+      "position": [1034.98, 897.24],
       "terrain": "plain",
       "population": 510.0,
       "capacity": { "food": 12.0, "energy": 2.0, "steel": 0.5, "machinery": 0.3, "munitions": 0.2, "arms": 0.0 },
@@ -16,7 +16,7 @@
     {
       "id": "kita_tohoku",
       "name": "北東北",
-      "position": [600, -140],
+      "position": [972.37, 565.51],
       "terrain": "hill",
       "population": 330.0,
       "capacity": { "food": 9.0, "energy": 1.5, "steel": 0.5, "machinery": 0.3, "munitions": 0.2, "arms": 0.0 },
@@ -30,7 +30,7 @@
     {
       "id": "minami_tohoku",
       "name": "南東北",
-      "position": [580, -230],
+      "position": [963.55, 343.61],
       "terrain": "hill",
       "population": 550.0,
       "capacity": { "food": 8.0, "energy": 2.5, "steel": 1.5, "machinery": 0.8, "munitions": 0.5, "arms": 0.2 },
@@ -44,7 +44,7 @@
     {
       "id": "kanto",
       "name": "関東",
-      "position": [560, -320],
+      "position": [892.21, 109.89],
       "terrain": "urban",
       "population": 4300.0,
       "capacity": { "food": 3.0, "energy": 4.0, "steel": 3.5, "machinery": 6.5, "munitions": 3.0, "arms": 3.0 },
@@ -59,7 +59,7 @@
     {
       "id": "shinetsu_hokuriku",
       "name": "信越・北陸",
-      "position": [440, -260],
+      "position": [696.52, 177.56],
       "terrain": "mountain",
       "population": 480.0,
       "capacity": { "food": 6.0, "energy": 3.0, "steel": 1.0, "machinery": 0.7, "munitions": 0.3, "arms": 0.0 },
@@ -74,7 +74,7 @@
     {
       "id": "tokai",
       "name": "東海",
-      "position": [480, -350],
+      "position": [650.17, 7.79],
       "terrain": "plain",
       "population": 1500.0,
       "capacity": { "food": 4.0, "energy": 2.0, "steel": 3.0, "machinery": 7.0, "munitions": 2.0, "arms": 2.0 },
@@ -89,7 +89,7 @@
     {
       "id": "kinki",
       "name": "近畿",
-      "position": [380, -380],
+      "position": [506.25, -31.17],
       "terrain": "urban",
       "population": 2200.0,
       "capacity": { "food": 2.0, "energy": 2.5, "steel": 3.5, "machinery": 4.5, "munitions": 2.0, "arms": 1.5 },
@@ -105,7 +105,7 @@
     {
       "id": "chugoku",
       "name": "中国",
-      "position": [220, -380],
+      "position": [276.3, -17.37],
       "terrain": "hill",
       "population": 740.0,
       "capacity": { "food": 3.5, "energy": 2.0, "steel": 2.5, "machinery": 1.0, "munitions": 0.5, "arms": 0.0 },
@@ -120,7 +120,7 @@
     {
       "id": "shikoku",
       "name": "四国",
-      "position": [300, -440],
+      "position": [339.68, -116.61],
       "terrain": "hill",
       "population": 370.0,
       "capacity": { "food": 4.0, "energy": 0.8, "steel": 0.5, "machinery": 0.4, "munitions": 0.3, "arms": 0.0 },
@@ -134,7 +134,7 @@
     {
       "id": "kyushu",
       "name": "九州",
-      "position": [100, -440],
+      "position": [29.64, -343.42],
       "terrain": "plain",
       "population": 1300.0,
       "capacity": { "food": 7.0, "energy": 2.5, "steel": 2.0, "machinery": 1.5, "munitions": 1.5, "arms": 0.5 },

@@ -226,14 +226,20 @@ pub const AIR_UNIT_MACHINERY_COST: f32 = 20.0;
 /// radius (roughly 300-500km for many 20th-century designs, before drop
 /// tanks or air-to-air refuelling) - the aircraft class actually contesting
 /// airspace over a single region, as distinct from a long-range bomber's
-/// much greater reach. `scenarios/mvp.json`/`japan47.json`'s own `position`
-/// fields are an unscaled schematic layout with no physical unit at all
-/// (`world::Region::position`'s own doc), so this constant is honestly
-/// meaningless there - but no shipped scenario places a `Domain::Air` unit
-/// yet (`AIR_UNIT_MACHINERY_COST`'s own doc discloses the same gap), so
-/// nothing currently exercises that mismatch. A real balance pass - which
-/// may mean rescaling the two schematic maps' own coordinates rather than
-/// this constant - is Stage 10E's job, not this one's.
+/// much greater reach.
+///
+/// `scenarios/mvp.json`/`japan47.json`'s `position` fields used to be an
+/// unscaled schematic layout with no physical unit at all, which made this
+/// constant meaningless there - measured (docs/phase10-spec.md gap report):
+/// at the old scale, 68%/75% of mvp/japan47's own regions sat inside one
+/// 300km radius of any given region on average, against `japan_hex`'s own
+/// 25%, i.e. air superiority there was close to global reach regardless of
+/// this constant's value. Fixed by rescaling both maps' own coordinates
+/// (`tools/rescale_positions.py`, run once and committed) onto the same
+/// real kilometre plane `japan_hex` already used, rather than by tuning
+/// this constant to paper over the mismatch - see that script's own doc
+/// for the derivation and `world::Region::position`'s doc for the full
+/// history. Post-rescale the same three figures are 30%/34%/25%.
 pub const AIR_OPERATING_RADIUS_KM: f32 = 300.0;
 
 /// Days for a squadron to redeploy from one of its own airfields to
