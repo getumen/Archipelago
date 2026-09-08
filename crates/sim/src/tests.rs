@@ -7810,6 +7810,149 @@ fn interdict_line_validates_target_and_damages_condition() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `ActionError::NoForceInRange` (last known gap in this crate's action
+// contract, the same shape `StrikeNode`'s own `NoAircraftInRange` closed):
+// `apply_interdict_line` must refuse a faction with no land, naval, or air
+// force able to reach either of the target line's own two endpoint regions,
+// and must accept it the moment any one domain qualifies.
+// ---------------------------------------------------------------------------
+
+/// A faction with genuinely no force anywhere near the target - not merely
+/// "far away" but literally nothing on the board that could plausibly cut
+/// this line - must be refused, and the line's `Condition` left untouched.
+///
+/// Confirmed this can fail: temporarily replaced the reach check in
+/// `apply_interdict_line` with `if false { ... }` (never rejects) and
+/// re-ran - this test's own `assert_eq!` failed with `Ok(())` where
+/// `Err(ActionError::NoForceInRange)` was expected, and the line's
+/// `Condition` dropped by `LINE_INTERDICTION_DAMAGE` exactly as it would for
+/// a legitimate attacker. Reverted before committing.
+#[test]
+fn interdict_line_rejected_with_no_force_anywhere_near_either_endpoint() {
+    let text = scenario_with_enemy_owned_line();
+    let mut world = scenario::load_str(&text).expect("scenario_with_enemy_owned_line must be valid");
+    let f1 = FactionId(0); // owns a, b
+
+    // `scenario::Scenario::build_world` auto-places f1's starting units at
+    // its capital (a) and every owned neighbor (b) - and b directly borders
+    // c, one of the target line's own endpoints, which is exactly why
+    // `interdict_line_validates_target_and_damages_condition` above already
+    // succeeds without any extra setup. To isolate "no force can reach" as
+    // its own condition, every f1 unit is relocated to a, whose only
+    // neighbor is b - neither a nor its own neighbor borders c or d, so
+    // land reach genuinely fails; this scenario declares no sea zones and
+    // no airfields at all, so naval/air reach can never apply here either.
+    let region_a = RegionId(0);
+    for unit in world.units.iter_mut().filter(|u| u.owner == f1) {
+        unit.station = Station::Region(region_a);
+    }
+
+    fn find_line(world: &World, ra_name: &str, rb_name: &str) -> TransportLineId {
+        let region_named =
+            |name: &str| -> RegionId { RegionId(["a", "b", "c", "d"].iter().position(|n| *n == name).unwrap() as u32) };
+        let (ra, rb) = (region_named(ra_name), region_named(rb_name));
+        let idx = world
+            .transport_lines
+            .iter()
+            .position(|l| {
+                let (na, nb) = (world.transport_node(l.from).region, world.transport_node(l.to).region);
+                (na == ra && nb == rb) || (na == rb && nb == ra)
+            })
+            .unwrap_or_else(|| panic!("no line between {ra_name} and {rb_name}"));
+        TransportLineId(idx as u32)
+    }
+
+    let enemy_line = find_line(&world, "c", "d");
+    let before = world.transport_line(enemy_line).condition.get();
+    assert_eq!(
+        action::apply_action(&mut world, f1, Action::InterdictLine { line: enemy_line }),
+        Err(ActionError::NoForceInRange),
+        "a faction with no force anywhere near either endpoint must be refused"
+    );
+    assert_eq!(
+        world.transport_line(enemy_line).condition.get(),
+        before,
+        "a rejected InterdictLine must never touch the line's Condition"
+    );
+
+    // Restoring a single land unit to b - adjacent to c, one of the line's
+    // own endpoints - must make the exact same order succeed, proving the
+    // rejection above was specifically about reach, not e.g. hostility.
+    let region_b = RegionId(1);
+    world.units[0].station = Station::Region(region_b);
+    action::apply_action(&mut world, f1, Action::InterdictLine { line: enemy_line })
+        .expect("a land unit adjacent to the target line's own endpoint must satisfy the reach requirement");
+}
+
+/// The land leg of `action::any_force_reaches` in isolation, on
+/// `scenarios/mvp.json`: a faction with *only* a naval unit in a sea zone
+/// touching the target region - no land unit anywhere, no air unit at all -
+/// must still be able to interdict a line inside that region. Naval forces
+/// remain a legitimate means of interdiction (docs/phase10-spec.md "3.
+/// 阻止": "地上部隊からも使える現状を壊さないこと" applies symmetrically to
+/// the sea), not merely something `StrikeNode`'s air-only gate would allow.
+///
+/// Confirmed this can fail: temporarily dropped the `sea`/naval leg from
+/// `any_force_reaches` (kept only `land` and the air check) and re-ran -
+/// this test's own `.expect(...)` panicked with `Err(NoForceInRange)`.
+/// Reverted before committing.
+#[test]
+fn interdict_line_naval_reach_is_sufficient_with_no_land_or_air_force() {
+    let mut world = scenario::build_world();
+    world.units.clear(); // isolate the domain under test - see this test's own doc.
+    let attacker = FactionId(0); // 東方連合, at war with faction 1 by mvp's unconditional starting war
+    let target_region = RegionId(4); // 信越・北陸, faction 1's own territory; transport_lines[4] sits entirely inside it
+    let touching_zone = world.zones_touching(target_region)[0];
+
+    let fleet_id = UnitId(world.units.len() as u32);
+    world.units.push(military::Unit {
+        id: fleet_id,
+        owner: attacker,
+        name: "Test Fleet".to_string(),
+        station: Station::Sea(touching_zone),
+        movement: None,
+        manpower: UNIT_MANPOWER,
+        equipment: UNIT_EQUIPMENT,
+        organization: UNIT_ORG,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Sea(touching_zone),
+        experience: 0.0,
+        alive: true,
+    });
+
+    let line = TransportLineId(4);
+    assert_eq!(world.transport_node(world.transport_line(line).from).region, target_region);
+    action::apply_action(&mut world, attacker, Action::InterdictLine { line })
+        .expect("a fleet in a sea zone touching the target region must satisfy the reach requirement on its own");
+}
+
+/// The air leg of `action::any_force_reaches`: a faction with *only* an air
+/// unit able to reach the target region - no land unit anywhere, no naval
+/// unit at all - must still be able to interdict a line inside it, reusing
+/// `air::units_reaching` exactly as `apply_strike_node` does.
+///
+/// Confirmed this can fail: temporarily dropped the air leg (`!air::
+/// units_reaching(...).is_empty()`) from `any_force_reaches` and re-ran -
+/// this test's own `.expect(...)` panicked with `Err(NoForceInRange)`.
+/// Reverted before committing.
+#[test]
+fn interdict_line_air_reach_is_sufficient_with_no_land_or_naval_force() {
+    let mut world = scenario::build_world();
+    world.units.clear(); // isolate the domain under test - see this test's own doc.
+    let attacker = FactionId(0);
+    let target_region = RegionId(4);
+    push_attacker_air_unit_within_reach(&mut world, attacker, target_region);
+
+    let line = TransportLineId(4);
+    assert_eq!(world.transport_node(world.transport_line(line).from).region, target_region);
+    action::apply_action(&mut world, attacker, Action::InterdictLine { line })
+        .expect("an air unit able to reach the target region must satisfy the reach requirement on its own");
+}
+
 /// `Action::Build`'s `Project::TransportLine` (docs/phase9-spec.md "4. 行動":
 /// "`Build` の `Project` に輸送網に対するものを追加する"): rejected when the
 /// hosting region isn't actually one of the line's own two endpoints, or
@@ -9959,6 +10102,46 @@ fn a_sortie_that_grounds_its_target_still_pays_for_the_defence_it_faced() {
 /// guard makes the order return `Ok(())` and leaves `movement` as
 /// `Some(..)` with `required` equal to `AIR_MOVE_DAYS`, tripping both
 /// assertions. Restored, and it passes.
+/// Every line touching a region must be reachable through the client's
+/// interdiction panel (`codex review`, P2 - the panel's own row pool was
+/// smaller than the densest region, so lines past it could not be targeted
+/// at all, and there is no scrolling to fall back on).
+///
+/// This lives in `crates/sim` rather than the client because the number it
+/// guards is a property of the **scenario data**: the client sizes its pool
+/// to cover the shipped maps, so a future scenario that declares a denser
+/// region has to be noticed here.
+///
+/// **Confirmed this test can fail.** Lowering the bound to 7 trips it with
+/// `japan47`'s and `japan_hex`'s own 8, which is exactly the shape of the
+/// defect (a pool smaller than the data).
+#[test]
+fn no_region_touches_more_transport_lines_than_the_client_can_list() {
+    /// Mirrors `apps/game/src/app/panels.rs`'s `MAX_INTERDICT_ROWS`.
+    const CLIENT_INTERDICT_ROWS: usize = 8;
+
+    for path in ["../../scenarios/mvp.json", "../../scenarios/japan47.json", "../../scenarios/japan_hex.json"] {
+        let text = std::fs::read_to_string(path).expect("shipped scenario must be readable");
+        let world = scenario::load_str(&text).expect("shipped scenario must be valid");
+
+        let mut touching = vec![0usize; world.regions.len()];
+        for line in &world.transport_lines {
+            let ra = world.transport_node(line.from).region;
+            let rb = world.transport_node(line.to).region;
+            touching[ra.index()] += 1;
+            if rb != ra {
+                touching[rb.index()] += 1;
+            }
+        }
+        let worst = touching.iter().copied().max().unwrap_or(0);
+        assert!(
+            worst <= CLIENT_INTERDICT_ROWS,
+            "{path}: a region touches {worst} transport lines but the client can only list \
+             {CLIENT_INTERDICT_ROWS} of them, so the rest could never be interdicted through the UI"
+        );
+    }
+}
+
 #[test]
 fn an_air_unit_cannot_be_ordered_to_its_own_airfield() {
     let mut world = scenario::build_world();

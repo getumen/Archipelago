@@ -2700,6 +2700,15 @@ fn transport_interdict_ai(faction: FactionId, obs: &Observation, actions: &mut V
             owner_a == owner_b
                 && owner_a != faction
                 && world.diplomacy.is_at_war(faction, owner_a)
+                // Reachability is part of *choosing*, not a filter applied
+                // afterwards (`codex review`, P1 - the same shape
+                // `air_redeploy` was fixed for). Picking the highest-capacity
+                // hostile line without asking whether anything can get at it
+                // made `apply_interdict_line` reject the order every tick
+                // while other, reachable lines went untouched. Same
+                // predicate the action itself enforces, never a second one.
+                && (archipelago_sim::action::any_force_reaches(world, ra, faction)
+                    || archipelago_sim::action::any_force_reaches(world, rb, faction))
                 && line.condition.get() > TRANSPORT_INTERDICT_MIN_CONDITION
         })
         .fold(None, |best: Option<&archipelago_sim::transport::TransportLine>, line| {

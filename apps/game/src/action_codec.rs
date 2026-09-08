@@ -358,6 +358,7 @@ pub fn action_error_ja(e: ActionError) -> &'static str {
         ActionError::NodeNotStrikeable => "飛行場・港以外は攻撃対象にできない",
         ActionError::NodeNotHostile => "交戦中の敵の拠点ではない",
         ActionError::NoAircraftInRange => "目標に到達できる航空部隊がない",
+        ActionError::NoForceInRange => "目標に到達できる部隊がない",
     }
 }
 

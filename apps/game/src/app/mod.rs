@@ -264,23 +264,22 @@ pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
         | Action::BreakTreaty { .. }
         | Action::ProposeInNaturalLanguage { .. }
         | Action::RespondToNaturalLanguageProposal { .. } => RejectionTarget::Diplomacy,
-        // Stage 9D (docs/phase9-spec.md "4. 行動"): no panel in this client
-        // issues `InterdictLine` yet (this task's client scope is the
-        // `MapMode::Supply` line rendering, not a new interactive order) -
-        // bucketed with the other broad, no-specific-panel strategic orders
-        // (`SetNationalFocus`'s own bucket) rather than inventing a
-        // `RejectionTarget` variant nothing can route to yet.
         // Stage 10 follow-up: `panels::StrikePanelRoot` now issues
         // `StrikeNode` (pre-validated the same "disabled, with a reason" way
         // `RegionActionKind` already is - `panels::StrikeKind::reason`
         // mirrors `action::apply_strike_node`'s own preconditions one for
         // one), so a genuine rejection here is a same-tick race rather than
-        // the everyday case. Left in this same `Policy` bucket regardless -
-        // exactly like `MoveUnit`/`DisbandUnit` already sit under `Unit`
-        // with no dedicated per-panel display of their own (`ui::
-        // update_player_panel`'s always-on "全パネル" list is what actually
-        // surfaces either) - rather than inventing a `RejectionTarget`
-        // variant whose only job would be to duplicate that same list.
+        // the everyday case. `panels::InterdictPanelRoot` now issues
+        // `InterdictLine` the identical way (`panels::interdict_reason`
+        // mirrors `action::apply_interdict_line`'s own preconditions,
+        // `ActionError::NoForceInRange` included - the last known gap this
+        // action's contract had). Both left in this same `Policy` bucket
+        // regardless - exactly like `MoveUnit`/`DisbandUnit` already sit
+        // under `Unit` with no dedicated per-panel display of their own
+        // (`ui::update_player_panel`'s always-on "全パネル" list is what
+        // actually surfaces either) - rather than inventing a
+        // `RejectionTarget` variant whose only job would be to duplicate
+        // that same list.
         Action::InterdictLine { .. } | Action::StrikeNode { .. } => RejectionTarget::Policy,
     }
 }
@@ -646,6 +645,7 @@ pub fn run(
         .insert_resource(NlCompose::default())
         .insert_resource(panels::PointerOverUi::default())
         .insert_resource(panels::UnitPanelSlots::default())
+        .insert_resource(panels::InterdictPanelSlots::default())
         .insert_resource(NewspaperState { period_start: start_day, open: debug_open_newspaper, ..Default::default() })
         .add_systems(Startup, setup::setup)
         .add_systems(
@@ -735,6 +735,7 @@ pub fn run(
                 panels::sync_map_mode_button,
                 panels::sync_region_action_buttons,
                 panels::sync_strike_panel,
+                panels::sync_interdict_panel,
                 panels::sync_unit_panel,
                 panels::sync_policy_panel,
                 panels::sync_diplomacy_panel,
@@ -759,6 +760,10 @@ pub fn run(
         // `advance_simulation` ticks, exactly like every click handler in
         // that chain - without growing the tuple at all.
         .add_systems(Update, panels::handle_strike_clicks.before(sim_control::advance_simulation))
+        // Same standalone-call reasoning as `handle_strike_clicks` right
+        // above (tuple-arity ceiling, not a real ordering difference) - a
+        // click here just needs to land before `advance_simulation` ticks.
+        .add_systems(Update, panels::handle_interdict_clicks.before(sim_control::advance_simulation))
         // `--debug-select-units` (`screenshot::ScreenshotConfig::select_units`'s
         // own doc): must see this frame's post-tick roster (`.after(...)`)
         // and land before `panels::sync_unit_panel` reads `SelectedUnits`

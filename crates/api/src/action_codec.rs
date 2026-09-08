@@ -498,6 +498,7 @@ pub fn action_error_key(e: ActionError) -> &'static str {
         ActionError::NodeNotStrikeable => "node_not_strikeable",
         ActionError::NodeNotHostile => "node_not_hostile",
         ActionError::NoAircraftInRange => "no_aircraft_in_range",
+        ActionError::NoForceInRange => "no_force_in_range",
     }
 }
 

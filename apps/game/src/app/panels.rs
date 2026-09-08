@@ -58,14 +58,14 @@
 
 use bevy::prelude::*;
 
-use archipelago_sim::action::{Action, ActionError};
+use archipelago_sim::action::{self, Action, ActionError};
 use archipelago_sim::air;
 use archipelago_sim::balance::{AIR_UNIT_MACHINERY_COST, ATTRITION_SUPPLY_THRESHOLD, UNIT_EQUIPMENT, UNIT_MANPOWER};
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
-use archipelago_sim::ids::{FactionId, RegionId, TransportNodeId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
 use super::chrome;
@@ -674,6 +674,235 @@ pub(super) fn handle_strike_clicks(
         }
         let Some(node) = kind.node(sim.0.world(), region_id) else { continue };
         sim.0.push_human_action(Action::StrikeNode { node });
+    }
+}
+
+// ---------------------------------------------------------------------
+// Interdict panel: the transport network's own order (docs/phase9-spec.md
+// "4. 行動" / docs/phase10-spec.md "3. 阻止" - `Action::InterdictLine`
+// against a hostile transport line), the same "disabled, with a reason"
+// pattern the strike panel above uses. Unlike the strike panel (a fixed
+// two-kind choice per region: its airfield, its port), a region can touch
+// any number of transport lines, so this borrows `UnitPanelRoot`'s own
+// fixed-size row-pool shape instead of `StrikePanelRoot`'s fixed two
+// buttons - `MAX_INTERDICT_ROWS` rows, with an overflow count past that.
+// ---------------------------------------------------------------------
+
+/// Enough rows that every line touching a region is actually reachable
+/// through this panel, **measured from the shipped scenarios** rather than
+/// picked: the busiest region touches 6 lines in `mvp.json` and 8 in both
+/// `japan47.json` and `japan_hex.json` (counted over each scenario's own
+/// `transport.lines`). At 4 (`codex review`, P2) the panel silently made
+/// every line past the fourth impossible for a player to interdict at all -
+/// there is no scrolling or paging here, so an overflow count is not an
+/// alternate route to them, it is a dead end.
+///
+/// The overflow line stays as a guard for a future scenario that declares a
+/// denser region than anything shipped today; it should not be reachable
+/// with the current data.
+const MAX_INTERDICT_ROWS: usize = 8;
+
+#[derive(Component)]
+pub(super) struct InterdictPanelRoot;
+
+#[derive(Component)]
+pub(super) struct InterdictRowContainer(usize);
+
+#[derive(Component)]
+pub(super) struct InterdictRowText(usize);
+
+#[derive(Component, Clone, Copy)]
+pub(super) struct InterdictButton(usize);
+
+#[derive(Component)]
+pub(super) struct InterdictReason(usize);
+
+#[derive(Component)]
+pub(super) struct InterdictOverflowText;
+
+/// Which line (if any) each pool row currently shows - the same purpose
+/// `UnitPanelSlots` serves for the unit panel: written by
+/// `sync_interdict_panel`, read by `handle_interdict_clicks` so a click on
+/// slot N's button resolves to the *current* frame's line at that slot,
+/// not whatever line happened to occupy it when the click was queued.
+#[derive(Resource, Default)]
+pub(super) struct InterdictPanelSlots(pub [Option<u32>; MAX_INTERDICT_ROWS]);
+
+/// Every transport line touching `region` at either endpoint that is owned
+/// entirely by one faction other than `faction` - the "single owner, not
+/// this faction's own" half of `apply_interdict_line`'s own precondition,
+/// mirrored here so the panel only ever lists lines that could plausibly be
+/// legal targets. Deliberately *not* filtered by war state or reach -
+/// `interdict_reason` below answers those, the same split `StrikeKind::
+/// node`/`StrikeKind::reason` already keep between "does a candidate exist"
+/// and "is it currently usable". Ascending `TransportLineId` order
+/// (`World::transport_lines`'s own storage order, never a `HashMap`), so
+/// the row list is a pure, deterministic function of world state.
+fn lines_touching(world: &SimWorld, faction: FactionId, region: RegionId) -> Vec<TransportLineId> {
+    world
+        .transport_lines
+        .iter()
+        .filter(|line| {
+            let region_a = world.transport_node(line.from).region;
+            let region_b = world.transport_node(line.to).region;
+            if region_a != region && region_b != region {
+                return false;
+            }
+            let owner_a = world.region(region_a).owner;
+            let owner_b = world.region(region_b).owner;
+            owner_a == owner_b && owner_a != faction
+        })
+        .map(|line| line.id)
+        .collect()
+}
+
+/// Mirrors `action::apply_interdict_line`'s own preconditions one for one -
+/// same rationale as `StrikeKind::reason`'s own doc, including reach:
+/// reuses `action::any_force_reaches` verbatim, the exact function
+/// `apply_interdict_line` itself now calls, rather than a second,
+/// independently-invented client-side notion of "close enough" per domain.
+fn interdict_reason(world: &SimWorld, faction: FactionId, line: TransportLineId) -> Option<&'static str> {
+    let Some(existing) = world.transport_lines.get(line.index()) else {
+        return Some(action_error_ja(ActionError::InvalidLine));
+    };
+    let region_a = world.transport_node(existing.from).region;
+    let region_b = world.transport_node(existing.to).region;
+    let owner_a = world.region(region_a).owner;
+    let owner_b = world.region(region_b).owner;
+    if owner_a != owner_b || owner_a == faction || !world.diplomacy.is_at_war(faction, owner_a) {
+        return Some(action_error_ja(ActionError::LineNotHostile));
+    }
+    if !action::any_force_reaches(world, region_a, faction) && !action::any_force_reaches(world, region_b, faction) {
+        return Some(action_error_ja(ActionError::NoForceInRange));
+    }
+    None
+}
+
+pub(super) fn spawn_interdict_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
+    parent
+        .spawn((
+            chrome::framed(Node {
+                display: Display::None,
+                width: Val::Px(RIGHT_COLUMN_WIDTH),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(3.0),
+                ..default()
+            }),
+            chrome::panel_background(),
+            chrome::panel_border(),
+            Visibility::Hidden,
+            InterdictPanelRoot,
+        ))
+        .with_children(|panel| {
+            panel.spawn(chrome::panel_title("-- 輸送路線を遮断 --", font));
+            for slot in 0..MAX_INTERDICT_ROWS {
+                panel.spawn((column_node(), Visibility::Hidden, InterdictRowContainer(slot))).with_children(|row| {
+                    row.spawn((Text::new(String::new()), text_font(11.0, font), TextColor(TEXT_ENABLED), InterdictRowText(slot)));
+                    row.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), InterdictButton(slot))).with_children(|b| {
+                        b.spawn((Text::new("遮断"), text_font(11.0, font), TextColor(TEXT_ENABLED)));
+                    });
+                    row.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(TEXT_REASON), InterdictReason(slot)));
+                });
+            }
+            panel.spawn((Text::new(String::new()), text_font(11.0, font), TextColor(Color::srgb(0.7, 0.72, 0.75)), InterdictOverflowText));
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sync_interdict_panel(
+    sim: Res<SimRes>,
+    player: Res<PlayerFaction>,
+    selected: Res<SelectedRegion>,
+    diplomacy: Res<DiplomacyPanel>,
+    policy: Res<PolicyPanel>,
+    mut slots: ResMut<InterdictPanelSlots>,
+    mut root: Query<(&mut Visibility, &mut Node), With<InterdictPanelRoot>>,
+    mut row_containers: Query<(&InterdictRowContainer, &mut Visibility), Without<InterdictPanelRoot>>,
+    mut row_texts: Query<(&InterdictRowText, &mut Text), (Without<InterdictReason>, Without<InterdictOverflowText>)>,
+    mut buttons: Query<(&InterdictButton, &mut BackgroundColor)>,
+    mut reasons: Query<(&InterdictReason, &mut Text), Without<InterdictRowText>>,
+    mut overflow: Query<&mut Text, (With<InterdictOverflowText>, Without<InterdictRowText>, Without<InterdictReason>)>,
+) {
+    let Ok((mut visibility, mut node)) = root.single_mut() else { return };
+    let showing = player.0.is_some() && selected.0.is_some() && !diplomacy.open && !policy.0;
+    chrome::set_panel_shown(&mut visibility, &mut node, showing);
+    if !showing {
+        *slots = InterdictPanelSlots::default();
+        return;
+    }
+    let Some(player_faction) = player.0 else { return };
+    let Some(region_id) = selected.0 else { return };
+    let world = sim.0.world();
+
+    let lines = lines_touching(world, player_faction, region_id);
+    let mut new_slots = [None; MAX_INTERDICT_ROWS];
+    for slot in 0..MAX_INTERDICT_ROWS {
+        new_slots[slot] = lines.get(slot).map(|l| l.0);
+    }
+    slots.0 = new_slots;
+
+    for slot in 0..MAX_INTERDICT_ROWS {
+        let line = slots.0[slot].map(TransportLineId);
+        for (container, mut vis) in &mut row_containers {
+            if container.0 == slot {
+                *vis = if line.is_some() { Visibility::Visible } else { Visibility::Hidden };
+            }
+        }
+        let reason = line.and_then(|l| interdict_reason(world, player_faction, l));
+        let row_line = line
+            .and_then(|l| world.transport_lines.get(l.index()))
+            .map(|l| {
+                let other_region = if world.transport_node(l.from).region == region_id {
+                    world.transport_node(l.to).region
+                } else {
+                    world.transport_node(l.from).region
+                };
+                format!("路線 #{} ({:.0}%) - {}", l.id.0, l.condition.get() * 100.0, world.region(other_region).name)
+            })
+            .unwrap_or_default();
+        for (row, mut text) in &mut row_texts {
+            if row.0 == slot {
+                text.0 = row_line.clone();
+            }
+        }
+        for (btn, mut bg) in &mut buttons {
+            if btn.0 == slot {
+                bg.0 = button_bg(reason.is_none() && line.is_some(), false);
+            }
+        }
+        for (r, mut text) in &mut reasons {
+            if r.0 == slot {
+                text.0 = reason.unwrap_or("").to_string();
+            }
+        }
+    }
+
+    if let Ok(mut text) = overflow.single_mut() {
+        text.0 = if lines.len() > MAX_INTERDICT_ROWS {
+            format!("ほか {} 路線", lines.len() - MAX_INTERDICT_ROWS)
+        } else {
+            String::new()
+        };
+    }
+}
+
+pub(super) fn handle_interdict_clicks(
+    mut sim: ResMut<SimRes>,
+    player: Res<PlayerFaction>,
+    slots: Res<InterdictPanelSlots>,
+    query: Query<(&Interaction, &InterdictButton), Changed<Interaction>>,
+) {
+    let Some(player_faction) = player.0 else { return };
+    for (interaction, btn) in &query {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Some(line_id) = slots.0[btn.0] else { continue };
+        let line = TransportLineId(line_id);
+        if interdict_reason(sim.0.world(), player_faction, line).is_some() {
+            continue;
+        }
+        sim.0.push_human_action(Action::InterdictLine { line });
     }
 }
 
@@ -2171,6 +2400,99 @@ mod tests {
             "a strike click with no reachable aircraft must never be queued, but got {:?}",
             sim.0.last_human_actions()
         );
+    }
+
+    /// The interdict panel's own "disabled, with a reason" hole
+    /// (`ActionError::NoForceInRange`, the shape this task closed one action
+    /// later than `StrikeNode`'s own `NoAircraftInRange`): `player_sim`'s
+    /// default `mvp.json` world starts faction 0 with land units only at its
+    /// own capital (関東, region 3) and its owned neighbors - none of which
+    /// border 九州 (region 9) or its only neighbor (中国, region 7), so
+    /// mvp's transport line 9 (entirely inside 九州, faction 2's own
+    /// territory) is genuinely out of reach for every domain: no land unit
+    /// anywhere near it, and `player_sim` places no naval or air units at
+    /// all (Stage 2D/10A - both are synthesized only when a test adds them).
+    ///
+    /// Confirmed this fails without the fix: temporarily removed the
+    /// `action::any_force_reaches` check from `interdict_reason`. Re-ran:
+    /// `interdict_reason` came back `None` (the button reads as enabled) and
+    /// the click actually queued an `InterdictLine` action, both assertions
+    /// below tripping. Restored, and it passes.
+    #[test]
+    fn interdict_panel_button_is_disabled_with_reason_when_no_force_can_reach() {
+        let sim = player_sim();
+        let player_faction = FactionId(0);
+        let far_region = archipelago_sim::ids::RegionId(9); // 九州, faction 2's own
+        let line = TransportLineId(9); // entirely inside 九州 - see this test's own doc
+        assert_eq!(
+            sim.0.world().transport_node(sim.0.world().transport_line(line).from).region,
+            far_region,
+            "test setup: mvp transport line 9 must sit inside region 9"
+        );
+        assert!(
+            sim.0.world().units.iter().all(|u| u.owner != player_faction || u.station.domain() != Domain::Land
+                || !matches!(u.station, Station::Region(r) if r == far_region || r == archipelago_sim::ids::RegionId(7))),
+            "sanity: this test relies on player_sim placing no player-owned unit in or adjacent to region 9"
+        );
+
+        assert_eq!(
+            interdict_reason(sim.0.world(), player_faction, line),
+            Some(action_error_ja(ActionError::NoForceInRange)),
+            "with no force of any domain able to reach either endpoint, the button must be disabled with exactly this reason"
+        );
+
+        let mut world = World::new();
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(player_faction)));
+        let mut slots = InterdictPanelSlots::default();
+        slots.0[0] = Some(line.0);
+        world.insert_resource(slots);
+        world.spawn((Interaction::Pressed, InterdictButton(0)));
+
+        run(&mut world, handle_interdict_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert!(
+            sim.0.last_human_actions().is_empty(),
+            "an interdict click with no reachable force must never be queued, but got {:?}",
+            sim.0.last_human_actions()
+        );
+    }
+
+    /// The positive control for the test above: a line whose own endpoint
+    /// region directly borders the player's territory (mvp region 4, 信越・
+    /// 北陸, adjacent to faction 0's own capital region 3 - `action::
+    /// any_force_reaches`'s land leg) must read enabled and actually enqueue
+    /// `Action::InterdictLine`, using nothing but `player_sim`'s unmodified
+    /// starting land units - proving the panel's "reachable" path works, not
+    /// only its "unreachable" one.
+    #[test]
+    fn interdict_panel_click_enqueues_interdict_line_against_a_reachable_hostile_line() {
+        let sim = player_sim();
+        let player_faction = FactionId(0);
+        let line = TransportLineId(4); // entirely inside 信越・北陸, faction 1's own, bordering faction 0's capital
+        let region = sim.0.world().transport_node(sim.0.world().transport_line(line).from).region;
+        assert_eq!(sim.0.world().region(region).owner, FactionId(1), "test setup: line 4 must be faction 1's own");
+        assert_eq!(interdict_reason(sim.0.world(), player_faction, line), None, "line 4 must read as a legal, reachable target with player_sim's unmodified starting units");
+        let condition_before = sim.0.world().transport_line(line).condition.get();
+
+        let mut world = World::new();
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(player_faction)));
+        let mut slots = InterdictPanelSlots::default();
+        slots.0[0] = Some(line.0);
+        world.insert_resource(slots);
+        world.spawn((Interaction::Pressed, InterdictButton(0)));
+
+        run(&mut world, handle_interdict_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(sim.0.last_human_actions(), &[Action::InterdictLine { line }], "the click must have queued exactly one InterdictLine against the reachable hostile line");
+        assert!(sim.0.last_human_action_errors().is_empty(), "a legal, reachable InterdictLine must not be rejected: {:?}", sim.0.last_human_action_errors());
+        let condition_after = sim.0.world().transport_line(line).condition.get();
+        assert!(condition_after < condition_before, "the interdicted line's own condition must actually drop: before {condition_before}, after {condition_after}");
     }
 
     /// Regression guard for the unit panel's per-slot Hold/Reinforce buttons

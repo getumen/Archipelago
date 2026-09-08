@@ -117,6 +117,22 @@ pub enum Action {
     /// repair counterpart lives on `Build`'s own `Project::TransportLine`
     /// instead, since restoring a route is funded, gradual infrastructure
     /// work, not a one-shot strike.
+    ///
+    /// **The attacker still needs some force nearby** (the same shape of
+    /// hole `StrikeNode`'s own `NoAircraftInRange` closed, one action
+    /// earlier: `codex review` P1 there, this crate's own follow-up here).
+    /// No locality requirement on the acting faction's *own territory* is
+    /// not the same as no requirement at all - `apply_interdict_line` also
+    /// asks whether `faction` has *any* force, of *any* domain, actually
+    /// able to reach one of the line's own two endpoint regions, and
+    /// rejects the strike outright (`ActionError::NoForceInRange`) if not.
+    /// Before this, a faction with zero units anywhere on the map could
+    /// degrade any hostile transport line anywhere on the map for free.
+    /// Unlike `StrikeNode`, this is deliberately not an air-only gate:
+    /// docs/phase10-spec.md "3. 阻止" says outright that ground forces must
+    /// stay able to use this action too ("地上部隊からも使える現状を壊さない
+    /// こと") - see `apply_interdict_line`'s own doc for exactly what "reach"
+    /// means per domain.
     InterdictLine { line: TransportLineId },
     /// Stage 10C (docs/phase10-spec.md "3. 阻止": "飛行場ノードと港ノードを叩
     /// けること"): a deliberate strike against one `transport::TransportNode`
@@ -402,6 +418,16 @@ pub enum ActionError {
     /// `air::air_superiority_factor`/`air::apply_strike_losses` already
     /// build on.
     NoAircraftInRange,
+    /// Stage 9 follow-up (last known gap in this crate's action contract,
+    /// the same shape `NoAircraftInRange` closed for `StrikeNode`):
+    /// `Action::InterdictLine` from a faction with no force - land, naval,
+    /// *or* air - able to reach either of the target line's own two
+    /// endpoint regions at all. Reuses `action::any_force_reaches` (which
+    /// itself reuses `air::units_reaching` for its air leg) rather than a
+    /// second, independently-invented notion of "close enough" per domain -
+    /// see that function's own doc for exactly what "reach" means for land
+    /// and sea.
+    NoForceInRange,
 }
 
 pub fn apply_action(
@@ -1370,31 +1396,100 @@ fn apply_propose_nl(
 /// currently at war with — a line straddling two different owners (a
 /// contested front) or already fully this faction's own is rejected, the
 /// same way `apply_declare_war`/`apply_break_treaty` reject a target that
-/// isn't in the state their action assumes. No locality requirement (no
-/// need for `faction` to already hold a region near either endpoint):
-/// docs/phase9-spec.md's whole case for this layer is that a *route*, not
-/// merely a region, is a legitimate strategic target in its own right, so
-/// this is deliberately as unconstrained by geography as `ProposeTreaty`
-/// already is by it.
+/// isn't in the state their action assumes. No locality requirement on
+/// `faction`'s own *territory* (no need to already hold a region near
+/// either endpoint): docs/phase9-spec.md's whole case for this layer is
+/// that a *route*, not merely a region, is a legitimate strategic target in
+/// its own right, so this is deliberately as unconstrained by ownership as
+/// `ProposeTreaty` already is by it.
+///
+/// **But `faction` still needs a force that can actually get there**
+/// (`any_force_reaches` below - the same hole `StrikeNode`'s own
+/// `NoAircraftInRange` closed, applied here one action later). Before this,
+/// a faction with no army, no navy, and no air force anywhere on the map
+/// could still degrade any hostile transport line anywhere on the map, for
+/// free, every tick - the AI never does this (`agents::
+/// transport_interdict_ai` only ever fires from a faction that already has
+/// units somewhere), which is exactly why the hole went unnoticed: nothing
+/// in this crate's own tests ever exercised a faction with literally zero
+/// forces.
 fn apply_interdict_line(
     world: &mut World,
     faction: FactionId,
     line: TransportLineId,
 ) -> Result<(), ActionError> {
     let existing = world.transport_lines.get(line.index()).ok_or(ActionError::InvalidLine)?;
-    let owner_a = world.region(world.transport_node(existing.from).region).owner;
-    let owner_b = world.region(world.transport_node(existing.to).region).owner;
+    let region_a = world.transport_node(existing.from).region;
+    let region_b = world.transport_node(existing.to).region;
+    let owner_a = world.region(region_a).owner;
+    let owner_b = world.region(region_b).owner;
     if owner_a != owner_b || owner_a == faction {
         return Err(ActionError::LineNotHostile);
     }
     if !world.diplomacy.is_at_war(faction, owner_a) {
         return Err(ActionError::LineNotHostile);
     }
+    if !any_force_reaches(world, region_a, faction) && !any_force_reaches(world, region_b, faction) {
+        return Err(ActionError::NoForceInRange);
+    }
 
     let next = (existing.condition.get() - LINE_INTERDICTION_DAMAGE).max(0.0);
     world.transport_lines[line.index()].condition =
         Condition::new(next).expect("clamped into 0.0..=1.0 above");
     Ok(())
+}
+
+/// Whether `faction` has *any* force - land, naval, or air - currently able
+/// to reach `region` at all. Backs `Action::InterdictLine`'s
+/// `ActionError::NoForceInRange` (see that function's own doc for why this
+/// exists) and is reused verbatim by `apps/game`'s interdict panel so the
+/// client can show the exact same "disabled, with a reason" judgment the
+/// action itself enforces, rather than a second, independently-invented
+/// notion of "close enough" (the same discipline `StrikeKind::reason`
+/// already follows for `air::units_reaching`).
+///
+/// Interdiction predates air power and remains legitimate for ground and
+/// naval forces (docs/phase10-spec.md "3. 阻止": "既存の `Action::
+/// InterdictLine` は Phase 9 で入っている。航空がこの行動の主な担い手になる
+/// 形が自然だが、地上部隊からも使える現状を壊さないこと"), so this is not a
+/// single "operating radius" the way `air::units_reaching` alone is - each
+/// domain gets the reach rule that actually matches how it would sabotage a
+/// route:
+///
+/// - **Land** (`World::units_in`/`World::neighbors`): an alive land unit
+///   standing in `region` itself (already raiding or occupying it), or in a
+///   region adjacent to it across the movement-layer link graph - the same
+///   graph a raiding party would actually cross on foot. Not the transport
+///   network's own graph (`crate::transport`, Phase 9's whole point is that
+///   the two layers differ) - a saboteur travels on land, not on the
+///   capacity-constrained rail line they're about to cut.
+/// - **Sea** (`World::zones_touching`/`World::fleets_in`): an alive fleet
+///   currently in a sea zone touching `region`'s own coastline - the exact
+///   zone lookup `naval::sea_line_factor` already uses to find which water
+///   a `TransportLineKind::Sea` line crosses, not a second, differently-
+///   shaped "how close is this fleet" question.
+/// - **Air** (`air::units_reaching`): reused verbatim, the same
+///   `AIR_OPERATING_RADIUS_KM` reach test `apply_strike_node`'s own
+///   `NoAircraftInRange` and `air_superiority_factor` are already built on.
+///
+/// `region` alone, not both of a line's endpoints together: `faction` only
+/// needs to threaten *one* end of the route to plausibly cut it (a raiding
+/// party doesn't need forces at both ends of the rail line it's sabotaging)
+/// - `apply_interdict_line` calls this once per endpoint and accepts either.
+pub fn any_force_reaches(world: &World, region: RegionId, faction: FactionId) -> bool {
+    let land = world.units_in(region).any(|u| u.owner == faction)
+        || world.neighbors(region).any(|n| world.units_in(n).any(|u| u.owner == faction));
+    if land {
+        return true;
+    }
+    let sea = world
+        .zones_touching(region)
+        .into_iter()
+        .any(|z| world.fleets_in(z).any(|u| u.owner == faction));
+    if sea {
+        return true;
+    }
+    !air::units_reaching(world, region, faction).is_empty()
 }
 
 /// `Action::StrikeNode` (docs/phase10-spec.md "3. 阻止": "飛行場と港への攻撃")
