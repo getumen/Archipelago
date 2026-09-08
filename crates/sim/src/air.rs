@@ -501,21 +501,6 @@ pub fn air_superiority_factor(world: &World, region: RegionId, faction: FactionI
     (1.0 - world.hostile_air_superiority_max(region, faction)).clamp(0.0, 1.0)
 }
 
-/// Every alive air unit `faction` owns whose own airfield can currently
-/// project power onto `region` - `node_air_power`'s own per-node reach test
-/// (`transport::TransportNode::operational`, `geographic_distance` within
-/// `AIR_OPERATING_RADIUS_KM`), resolved for one `(region, faction)` pair
-/// instead of accumulated into that function's whole node-indexed table.
-/// This is exactly the reach `tick_air_superiority` already grants when it
-/// lets these same units' `combat_power()` count toward `region`'s own
-/// `air_superiority` - not a second, independently-invented notion of
-/// "can this squadron reach the target".
-///
-/// Ascending `UnitId` order (`World::units`'s own storage order, never a
-/// `HashMap`) - `apply_strike_losses` below folds over this in a fixed
-/// order, so the loss distribution never depends on iteration order
-/// (CLAUDE.md's own record of a bitwise-inequivalent reassociation flipping
-/// an AI decision 300 days later).
 /// Every region whose air picture a strike by `faction` against `region` can
 /// change: the target itself, plus the home region of every airfield the
 /// attacker flies this sortie from (those squadrons take losses, so the power
@@ -537,7 +522,32 @@ pub fn strike_origin_regions(world: &World, region: RegionId, faction: FactionId
     out
 }
 
-fn units_reaching(world: &World, region: RegionId, faction: FactionId) -> Vec<UnitId> {
+/// Every alive air unit `faction` owns whose own airfield can currently
+/// project power onto `region` - `node_air_power`'s own per-node reach test
+/// (`transport::TransportNode::operational`, `geographic_distance` within
+/// `AIR_OPERATING_RADIUS_KM`), resolved for one `(region, faction)` pair
+/// instead of accumulated into that function's whole node-indexed table.
+/// This is exactly the reach `tick_air_superiority` already grants when it
+/// lets these same units' `combat_power()` count toward `region`'s own
+/// `air_superiority` - not a second, independently-invented notion of
+/// "can this squadron reach the target".
+///
+/// Ascending `UnitId` order (`World::units`'s own storage order, never a
+/// `HashMap`) - `apply_strike_losses` below folds over this in a fixed
+/// order, so the loss distribution never depends on iteration order
+/// (CLAUDE.md's own record of a bitwise-inequivalent reassociation flipping
+/// an AI decision 300 days later).
+///
+/// `pub`, not `pub(crate)` (codex review P1): `action::apply_strike_node`
+/// reuses this exact function - not a second, independently-written reach
+/// test - to reject a strike from a faction with no air unit able to reach
+/// the target at all (`ActionError::NoAircraftInRange`), and the game
+/// client's `panels::StrikeKind::reason` reuses it a second time, from a
+/// different crate, to grey out the same button for the same reason before
+/// the click ever reaches `apply_strike_node`. CLAUDE.md's own warning -
+/// "two lookups answering the same question differently" - is exactly what
+/// having three call sites share one function instead avoids.
+pub fn units_reaching(world: &World, region: RegionId, faction: FactionId) -> Vec<UnitId> {
     let target_pos = world.region(region).position;
     let mut out = Vec::new();
     for unit in &world.units {

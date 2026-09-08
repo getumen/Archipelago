@@ -270,8 +270,17 @@ pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
         // bucketed with the other broad, no-specific-panel strategic orders
         // (`SetNationalFocus`'s own bucket) rather than inventing a
         // `RejectionTarget` variant nothing can route to yet.
-        // Stage 10C: `StrikeNode` is in the same position - no panel issues
-        // it yet either, same bucket for the same reason.
+        // Stage 10 follow-up: `panels::StrikePanelRoot` now issues
+        // `StrikeNode` (pre-validated the same "disabled, with a reason" way
+        // `RegionActionKind` already is - `panels::StrikeKind::reason`
+        // mirrors `action::apply_strike_node`'s own preconditions one for
+        // one), so a genuine rejection here is a same-tick race rather than
+        // the everyday case. Left in this same `Policy` bucket regardless -
+        // exactly like `MoveUnit`/`DisbandUnit` already sit under `Unit`
+        // with no dedicated per-panel display of their own (`ui::
+        // update_player_panel`'s always-on "全パネル" list is what actually
+        // surfaces either) - rather than inventing a `RejectionTarget`
+        // variant whose only job would be to duplicate that same list.
         Action::InterdictLine { .. } | Action::StrikeNode { .. } => RejectionTarget::Policy,
     }
 }
@@ -588,17 +597,6 @@ pub fn run(
         None
     };
     let debug_select_region = screenshot.as_ref().and_then(|c| c.select_region);
-    // `--debug-select-units` (`ScreenshotConfig::select_units`'s own doc):
-    // every living unit the `--play`ed faction owns, computed from `world`
-    // here for the same reason `debug_diplomacy_target` is - `world` moves
-    // into `SimDriver::new_with_player` right below.
-    let debug_selected_units: BTreeSet<u32> = if screenshot.as_ref().is_some_and(|c| c.select_units) {
-        player_faction
-            .map(|p| world.units.iter().filter(|u| u.alive && u.owner == p).map(|u| u.id.0).collect())
-            .unwrap_or_default()
-    } else {
-        BTreeSet::new()
-    };
     let mut sim_driver = SimDriver::new_with_player(world, seed, player_faction, replay_days);
     // `--delegate-military` (`PlayConfig::delegate_military`'s own doc):
     // one `SimDriver::delegate_military()` call at startup hands the entire
@@ -638,7 +636,7 @@ pub fn run(
         .insert_resource(RegionRadii(region_radii))
         .insert_resource(SeaZoneCenters(sea_centers))
         .insert_resource(PlayerFaction(player_faction))
-        .insert_resource(SelectedUnits(debug_selected_units))
+        .insert_resource(SelectedUnits::default())
         .insert_resource(MenuRegion::default())
         .insert_resource(DiplomacyPanel { open: debug_open_diplomacy, target: debug_diplomacy_target })
         .insert_resource(PolicyPanel(debug_open_policy))
@@ -736,6 +734,7 @@ pub fn run(
                 panels::sync_speed_buttons,
                 panels::sync_map_mode_button,
                 panels::sync_region_action_buttons,
+                panels::sync_strike_panel,
                 panels::sync_unit_panel,
                 panels::sync_policy_panel,
                 panels::sync_diplomacy_panel,
@@ -750,7 +749,26 @@ pub fn run(
         // Independent of every chain above (reads only keyboard/time, writes
         // only the right column's own `ScrollPosition`) - `panels::
         // spawn_right_column`'s own doc has the overflow policy this serves.
-        .add_systems(Update, panels::handle_right_column_scroll);
+        .add_systems(Update, panels::handle_right_column_scroll)
+        // A standalone call rather than folded into the first 21-system
+        // `.chain()` above (already at, and best not pushed past, this
+        // crate's own empirically-found tuple-arity ceiling - see the
+        // second `sync_*` block's own doc for how that ceiling was found).
+        // `.before(...)` alone gets this the one ordering guarantee it
+        // actually needs - a click must enqueue its `Action` before
+        // `advance_simulation` ticks, exactly like every click handler in
+        // that chain - without growing the tuple at all.
+        .add_systems(Update, panels::handle_strike_clicks.before(sim_control::advance_simulation))
+        // `--debug-select-units` (`screenshot::ScreenshotConfig::select_units`'s
+        // own doc): must see this frame's post-tick roster (`.after(...)`)
+        // and land before `panels::sync_unit_panel` reads `SelectedUnits`
+        // for the same frame's UI (`.before(...)`) - a separate call rather
+        // than grown into either chained block above for the identical
+        // tuple-arity reason `handle_strike_clicks` already is.
+        .add_systems(
+            Update,
+            screenshot::sync_debug_selected_units.after(sim_control::advance_simulation).before(panels::sync_unit_panel),
+        );
 
     if let Some(path) = record_path {
         app.insert_resource(RecordConfig { path, days: Vec::new() });

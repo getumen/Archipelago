@@ -1099,6 +1099,16 @@ impl World {
     /// fails the second, so the caller emitted an order `apply_move`
     /// rejected every tick. Callers that need *a node to use* must ask for
     /// one that works, not for the first one that exists.
+    /// The first **operational** `Port` node of `region`, if any -
+    /// `operational_airfield_node`'s port twin, and there for the same
+    /// reason: a caller that needs *a node to use or to hit* must ask for
+    /// one that still works, not for the first one that exists.
+    pub fn operational_port_node(&self, region: RegionId) -> Option<&TransportNode> {
+        self.transport_nodes
+            .iter()
+            .find(|n| n.region == region && n.kind == crate::transport::TransportNodeKind::Port && n.operational())
+    }
+
     pub fn operational_airfield_node(&self, region: RegionId) -> Option<&TransportNode> {
         self.transport_nodes
             .iter()

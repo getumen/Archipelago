@@ -125,13 +125,28 @@ pub enum Action {
     /// against an `Airfield` or `Port` node (design.md §8's own "物流拠点";
     /// a `Depot`/`Junction` target is rejected - `ActionError::
     /// NodeNotStrikeable`) in a region this faction is currently at war with
-    /// (`ActionError::NodeNotHostile`). Deliberately no locality requirement,
-    /// the same as `InterdictLine`'s own doc: this is the one action stage
-    /// 10C gives air power to demonstrate design.md §8's "敵は領土そのもの
-    /// ではなく、物流拠点を攻撃することも可能" without requiring this crate to
-    /// model an actual air-to-ground strike mission - air becomes this
-    /// action's (and `InterdictLine`'s) principal user from 10D's AI onward,
-    /// never its only legal one.
+    /// (`ActionError::NodeNotHostile`). Deliberately no locality requirement
+    /// on the *target* - the striking faction's own territory need not
+    /// border it, the same as `InterdictLine`'s own doc: this is the one
+    /// action stage 10C gives air power to demonstrate design.md §8's "敵は
+    /// 領土そのものではなく、物流拠点を攻撃することも可能" without requiring
+    /// this crate to model an actual air-to-ground strike mission - air
+    /// becomes this action's (and `InterdictLine`'s) principal user from
+    /// 10D's AI onward, never its only legal one.
+    ///
+    /// **The attacker still needs something in the sky** (`codex review`,
+    /// P1). No locality requirement on the target is not the same as no
+    /// requirement at all: `apply_strike_node` also asks `air::
+    /// units_reaching` whether `faction` owns any air unit whose own
+    /// operational airfield lies within `air::AIR_OPERATING_RADIUS_KM` of
+    /// the target region, and rejects the strike outright
+    /// (`ActionError::NoAircraftInRange`) if not. Before this, a faction
+    /// with zero aircraft anywhere on the map could bomb any hostile
+    /// airfield or port at any range for free - `air::air_superiority_
+    /// factor` reads a `0.0` hostile share whenever *nobody* (attacker
+    /// included) has committed power near the target, so the strike still
+    /// landed at full `NODE_STRIKE_DAMAGE` with no risk and no air force to
+    /// pay for it.
     StrikeNode { node: TransportNodeId },
 }
 
@@ -374,6 +389,19 @@ pub enum ActionError {
     /// owned by a faction this one is currently at war with (its own
     /// region, or one at peace) - `LineNotHostile`'s node-level twin.
     NodeNotHostile,
+    /// Stage 10 follow-up (`codex review` P1): `Action::StrikeNode` from a
+    /// faction with no air unit able to reach the target region at all -
+    /// `apply_strike_node` validated the target's hostility but never
+    /// asked whether the attacker had anything in the sky to fly the
+    /// sortie with, which let a faction with zero aircraft bomb any
+    /// hostile airfield/port at any range for free. Reuses `air::
+    /// units_reaching`'s own reach test (an alive air unit based at a
+    /// currently operational airfield, within `air::
+    /// AIR_OPERATING_RADIUS_KM` of the target) rather than inventing a
+    /// second notion of "close enough to strike" - the same function
+    /// `air::air_superiority_factor`/`air::apply_strike_losses` already
+    /// build on.
+    NoAircraftInRange,
 }
 
 pub fn apply_action(
@@ -1405,6 +1433,20 @@ fn apply_interdict_line(
 /// never restricts "物流拠点を攻撃する" to airfield targets, and Phase 10's
 /// air force is this action's principal user (10D's own AI, `air_strike_ai`)
 /// regardless of whether the node struck happens to be a runway or a quay.
+///
+/// **The attacker must actually have something in the sky** (`codex
+/// review`, P1: this validated the target and nothing about the attacker).
+/// `docs/mvp-spec.md` §5 fixes this API's contract on the premise that RL
+/// agents submit invalid and adversarial actions at volume, and a faction
+/// with zero air units anywhere on the map is exactly such an input - with
+/// no hostile air superiority over an undefended target,
+/// `air_superiority_factor` reads `1.0` regardless of whether `faction`
+/// itself has any presence there, so the strike used to land at full
+/// `NODE_STRIKE_DAMAGE` for free. `air::units_reaching` (the same reach
+/// test `strike_origin_regions`/`apply_strike_losses` already use, not a
+/// second one) must return at least one unit before anything else here
+/// runs - checked before `strike_origin_regions` even collects a refresh
+/// list, so a rejected strike touches no state at all.
 fn apply_strike_node(
     world: &mut World,
     faction: FactionId,
@@ -1419,6 +1461,10 @@ fn apply_strike_node(
         return Err(ActionError::NodeNotHostile);
     }
     let region = existing.region;
+
+    if air::units_reaching(world, region, faction).is_empty() {
+        return Err(ActionError::NoAircraftInRange);
+    }
 
     // Collected *before* anything is mutated: the sortie's own bases are
     // part of what this strike changes (`air::strike_origin_regions`), and

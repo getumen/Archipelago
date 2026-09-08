@@ -59,18 +59,19 @@
 use bevy::prelude::*;
 
 use archipelago_sim::action::{Action, ActionError};
-use archipelago_sim::balance::{ATTRITION_SUPPLY_THRESHOLD, UNIT_EQUIPMENT, UNIT_MANPOWER};
+use archipelago_sim::air;
+use archipelago_sim::balance::{AIR_UNIT_MACHINERY_COST, ATTRITION_SUPPLY_THRESHOLD, UNIT_EQUIPMENT, UNIT_MANPOWER};
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
-use archipelago_sim::ids::{FactionId, RegionId, UnitId};
+use archipelago_sim::ids::{FactionId, RegionId, TransportNodeId, UnitId};
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
 use super::chrome;
 use super::input::MENU_ITEMS;
 use super::map_mode::MapModeRes;
-use super::setup::text_font;
+use super::setup::{text_font, RIGHT_COLUMN_WIDTH};
 use super::{
     ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion, SelectedUnits, SimRes,
     SpeedRes,
@@ -269,6 +270,11 @@ pub(super) struct RegionActionPanelRoot;
 pub(super) enum RegionActionKind {
     RecruitLand,
     RecruitSea,
+    /// Stage 10 follow-up (docs/phase10-spec.md "1. 基地"): the region
+    /// panel's own way to raise a squadron - `action::apply_recruit`'s
+    /// `Domain::Air` arm requires an operational `Airfield` node in the
+    /// region, the air-domain sibling of `RecruitSea`'s port requirement.
+    RecruitAir,
     BuildInfra,
     BuildPort,
     BuildCapacity,
@@ -278,9 +284,10 @@ pub(super) enum RegionActionKind {
 
 /// Same order as `input::MENU_ITEMS`/`input::handle_menu_keys`'s digit keys -
 /// `index()` below is the shared key between the two.
-const REGION_ACTION_KINDS: [RegionActionKind; 7] = [
+const REGION_ACTION_KINDS: [RegionActionKind; 8] = [
     RegionActionKind::RecruitLand,
     RegionActionKind::RecruitSea,
+    RegionActionKind::RecruitAir,
     RegionActionKind::BuildInfra,
     RegionActionKind::BuildPort,
     RegionActionKind::BuildCapacity,
@@ -311,6 +318,7 @@ impl RegionActionKind {
         match self {
             RegionActionKind::RecruitLand => Action::RecruitUnit { region, domain: Domain::Land },
             RegionActionKind::RecruitSea => Action::RecruitUnit { region, domain: Domain::Sea },
+            RegionActionKind::RecruitAir => Action::RecruitUnit { region, domain: Domain::Air },
             RegionActionKind::BuildInfra => Action::Build { region, project: Project::Infrastructure },
             RegionActionKind::BuildPort => Action::Build { region, project: Project::Port },
             RegionActionKind::BuildCapacity => Action::Build { region, project: Project::Capacity(active_good) },
@@ -331,12 +339,18 @@ impl RegionActionKind {
             return Some(action_error_ja(ActionError::RegionContested));
         }
         match self {
-            RegionActionKind::RecruitLand => recruit_reason(world, faction),
+            RegionActionKind::RecruitLand => recruit_reason(world, faction, Domain::Land),
             RegionActionKind::RecruitSea => {
                 if region.port <= 0.0 {
                     return Some(action_error_ja(ActionError::NoPort));
                 }
-                recruit_reason(world, faction)
+                recruit_reason(world, faction, Domain::Sea)
+            }
+            RegionActionKind::RecruitAir => {
+                if !world.airfield_node_operational(region_id) {
+                    return Some(action_error_ja(ActionError::NoAirfield));
+                }
+                recruit_reason(world, faction, Domain::Air)
             }
             RegionActionKind::BuildInfra | RegionActionKind::BuildPort | RegionActionKind::BuildCapacity | RegionActionKind::Repair => {
                 if region.construction.is_some() {
@@ -356,13 +370,21 @@ impl RegionActionKind {
     }
 }
 
-fn recruit_reason(world: &SimWorld, faction: FactionId) -> Option<&'static str> {
+fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain) -> Option<&'static str> {
     let f = world.faction(faction);
     if f.manpower < UNIT_MANPOWER {
         return Some(action_error_ja(ActionError::InsufficientManpower));
     }
     if f.stock[Good::Arms.index()] < UNIT_EQUIPMENT {
         return Some(action_error_ja(ActionError::InsufficientEquipment));
+    }
+    // Stage 10 follow-up: `action::apply_recruit`'s `Domain::Air` arm also
+    // spends `Good::Machinery` (`balance::AIR_UNIT_MACHINERY_COST`) - the
+    // airframe-specific cost no other domain pays, mirrored here so a
+    // squadron the sim would reject as `InsufficientMachinery` never shows
+    // as an enabled button in the first place.
+    if domain == Domain::Air && f.stock[Good::Machinery.index()] < AIR_UNIT_MACHINERY_COST {
+        return Some(action_error_ja(ActionError::InsufficientMachinery));
     }
     None
 }
@@ -472,6 +494,186 @@ pub(super) fn handle_region_action_clicks(
             continue;
         }
         sim.0.push_human_action(kind.to_action(region_id, active_good.0));
+    }
+}
+
+// ---------------------------------------------------------------------
+// Strike panel: air power's other order (docs/phase10-spec.md "3. 阻止" -
+// `Action::StrikeNode` against an enemy airfield/port), the same "disabled,
+// with a reason" pattern the region panel above uses. Shown for *any*
+// selected region (own or foreign, at war or not) - `StrikeKind::reason`
+// alone decides whether either button is actually clickable, exactly the
+// way `RegionActionKind::reason` already gates recruit/build against a
+// region the player doesn't own, so a player can select a hostile region and
+// immediately see (and use) whichever strike targets it actually has,
+// without a separate "enter strike mode" step.
+// ---------------------------------------------------------------------
+
+#[derive(Component)]
+pub(super) struct StrikePanelRoot;
+
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StrikeKind {
+    Airfield,
+    Port,
+}
+
+const STRIKE_KINDS: [StrikeKind; 2] = [StrikeKind::Airfield, StrikeKind::Port];
+
+impl StrikeKind {
+    fn label(self) -> &'static str {
+        match self {
+            StrikeKind::Airfield => "飛行場を空爆",
+            StrikeKind::Port => "港湾を空爆",
+        }
+    }
+
+    /// The specific node this kind targets in `region`, if `region` has a
+    /// working one.
+    ///
+    /// **Operational, not merely first** (`codex review`, P2). A region may
+    /// declare several airfields or ports; taking the lowest-id one meant
+    /// that once it was wrecked, every further click hit the same rubble
+    /// while the region's other, intact nodes stayed impossible for a player
+    /// to target at all. This is the fourth place in Phase 10 where "the
+    /// region has one" and "here is one to use" were answered by the same
+    /// lowest-id lookup - `World::operational_airfield_node`/
+    /// `operational_port_node` exist so the two questions stop sharing an
+    /// answer.
+    fn node(self, world: &SimWorld, region: RegionId) -> Option<TransportNodeId> {
+        match self {
+            StrikeKind::Airfield => world.operational_airfield_node(region).map(|n| n.id),
+            StrikeKind::Port => world.operational_port_node(region).map(|n| n.id),
+        }
+    }
+
+    /// Mirrors `action::apply_strike_node`'s own preconditions one for one -
+    /// same rationale as `RegionActionKind::reason`'s own doc. `kind` is
+    /// never `NodeNotStrikeable` here: `node` above only ever names an
+    /// `Airfield`/`Port` node by construction, so that `ActionError` variant
+    /// can never actually apply to a button this panel offers.
+    ///
+    /// **Reach, not just hostility** (`codex review` P1 - closing the hole
+    /// that let a faction with zero aircraft bomb any hostile node for
+    /// free): `apply_strike_node` now also asks `air::units_reaching`
+    /// whether `faction` owns any air unit able to reach `region` at all,
+    /// and rejects with `ActionError::NoAircraftInRange` if not. Gating the
+    /// button on the client side would be treating the symptom - the rule
+    /// lives in the action - but the button still has to *reflect* that
+    /// rule the way it already reflects `NodeNotHostile`/`NoAirfield`/
+    /// `NoPort`, so this reuses the exact same `air::units_reaching` call
+    /// `apply_strike_node` itself makes, not a second, client-side notion
+    /// of "close enough to strike".
+    fn reason(self, world: &SimWorld, faction: FactionId, region: RegionId) -> Option<&'static str> {
+        if self.node(world, region).is_none() {
+            return Some(action_error_ja(match self {
+                StrikeKind::Airfield => ActionError::NoAirfield,
+                StrikeKind::Port => ActionError::NoPort,
+            }));
+        }
+        let owner = world.region(region).owner;
+        if owner == faction || !world.diplomacy.is_at_war(faction, owner) {
+            return Some(action_error_ja(ActionError::NodeNotHostile));
+        }
+        if air::units_reaching(world, region, faction).is_empty() {
+            return Some(action_error_ja(ActionError::NoAircraftInRange));
+        }
+        None
+    }
+}
+
+pub(super) fn spawn_strike_panel(parent: &mut ChildSpawnerCommands<'_>, font: &Handle<Font>) {
+    parent
+        .spawn((
+            chrome::framed(Node {
+                display: Display::None,
+                width: Val::Px(RIGHT_COLUMN_WIDTH),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(3.0),
+                ..default()
+            }),
+            chrome::panel_background(),
+            chrome::panel_border(),
+            Visibility::Hidden,
+            StrikePanelRoot,
+        ))
+        .with_children(|panel| {
+            panel.spawn(chrome::panel_title("-- 空爆（敵の飛行場・港） --", font));
+            for kind in STRIKE_KINDS {
+                panel.spawn(column_node()).with_children(|slot| {
+                    slot.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), kind)).with_children(|b| {
+                        b.spawn((Text::new(kind.label()), text_font(12.0, font), TextColor(TEXT_ENABLED), StrikeLabel(kind)));
+                    });
+                    slot.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(TEXT_REASON), StrikeReason(kind)));
+                });
+            }
+        });
+}
+
+#[derive(Component, Clone, Copy)]
+pub(super) struct StrikeLabel(StrikeKind);
+
+#[derive(Component, Clone, Copy)]
+pub(super) struct StrikeReason(StrikeKind);
+
+pub(super) fn sync_strike_panel(
+    sim: Res<SimRes>,
+    player: Res<PlayerFaction>,
+    selected: Res<SelectedRegion>,
+    diplomacy: Res<DiplomacyPanel>,
+    policy: Res<PolicyPanel>,
+    mut root: Query<(&mut Visibility, &mut Node), With<StrikePanelRoot>>,
+    mut buttons: Query<(&StrikeKind, &mut BackgroundColor)>,
+    mut labels: Query<(&StrikeLabel, &mut TextColor)>,
+    mut reasons: Query<(&StrikeReason, &mut Text)>,
+) {
+    let Ok((mut visibility, mut node)) = root.single_mut() else { return };
+    let showing = player.0.is_some() && selected.0.is_some() && !diplomacy.open && !policy.0;
+    chrome::set_panel_shown(&mut visibility, &mut node, showing);
+    if !showing {
+        return;
+    }
+    let Some(player_faction) = player.0 else { return };
+    let Some(region_id) = selected.0 else { return };
+    let world = sim.0.world();
+
+    for kind in STRIKE_KINDS {
+        let reason = kind.reason(world, player_faction, region_id);
+        for (k, mut bg) in &mut buttons {
+            if *k == kind {
+                bg.0 = button_bg(reason.is_none(), false);
+            }
+        }
+        for (label, mut color) in &mut labels {
+            if label.0 == kind {
+                color.0 = if reason.is_none() { TEXT_ENABLED } else { TEXT_DISABLED };
+            }
+        }
+        for (r, mut text) in &mut reasons {
+            if r.0 == kind {
+                text.0 = reason.unwrap_or("").to_string();
+            }
+        }
+    }
+}
+
+pub(super) fn handle_strike_clicks(
+    mut sim: ResMut<SimRes>,
+    player: Res<PlayerFaction>,
+    selected: Res<SelectedRegion>,
+    query: Query<(&Interaction, &StrikeKind), Changed<Interaction>>,
+) {
+    let Some(player_faction) = player.0 else { return };
+    let Some(region_id) = selected.0 else { return };
+    for (interaction, kind) in &query {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if kind.reason(sim.0.world(), player_faction, region_id).is_some() {
+            continue;
+        }
+        let Some(node) = kind.node(sim.0.world(), region_id) else { continue };
+        sim.0.push_human_action(Action::StrikeNode { node });
     }
 }
 
@@ -672,7 +874,7 @@ pub(super) fn sync_unit_panel(
         let (row_line, reinforce_reason) = match unit {
             Some(u) => (
                 format!(
-                    "#{} {}{}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}",
+                    "#{} {}{}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}{}",
                     u.id.0,
                     u.name,
                     if delegated { " [AI操作中]" } else { "" },
@@ -682,7 +884,32 @@ pub(super) fn sync_unit_panel(
                     u.morale,
                     u.supply,
                     supply_attrition_marker(u.supply),
-                    u.experience
+                    u.experience,
+                    // This task's own ask ("see their squadrons: where they
+                    // are based... whether they are in transit") is scoped
+                    // to `Domain::Air` alone, not generalized to every
+                    // domain's row - `MAX_UNIT_ROWS` rows this tall is a
+                    // real, reproducible collision with the event log panel
+                    // below (`setup::spawn_left_column`'s own doc: no
+                    // `Overflow::scroll_y()`, sized on the assumption every
+                    // row stays two lines). Confirmed by screenshot: 6
+                    // selected land units at this third line's full height
+                    // pushed "...ほか N 隊"/the move hint down into the event
+                    // log's own title text; the same 6 rows at two lines
+                    // each (a land-only selection, this line absent) left
+                    // clear space above it. A land/sea unit's own station
+                    // was never shown here before this task either, so
+                    // omitting it for those two domains costs nothing a
+                    // player relied on - only a squadron's redeploy target
+                    // (an airfield in some *other* region, never obviously
+                    // "where it is" from the map glance a land unit's own
+                    // marker already gives at its own region) actually
+                    // needs a text answer to "where is it based".
+                    if u.station.domain() == Domain::Air {
+                        format!("\n{}", station_label(world, u.station, u.movement.is_some()))
+                    } else {
+                        String::new()
+                    },
                 ),
                 reinforce_disabled_reason(world, player_faction, u.station),
             ),
@@ -744,6 +971,39 @@ fn supply_attrition_marker(supply: f32) -> &'static str {
         "※損耗中"
     } else {
         ""
+    }
+}
+
+/// "Where they are based, and whether they are in transit" (this task's own
+/// ask for squadron visibility) - `sync_unit_panel`'s only caller passes a
+/// `Domain::Air` unit's own `Station::Airfield`, which this reads back as
+/// the region the airfield sits in, exactly the way a player already thinks
+/// about a squadron's base (`docs/phase10-spec.md "1. 基地"`), not as the
+/// underlying `TransportNodeId` - the node id has no meaning to a player,
+/// only to `Action::MoveUnit`'s own `to` field. Written generically over
+/// every `Station` variant regardless (a land/sea unit's own location was
+/// never shown here before this task, and stays that way - seeing this
+/// task's own doc at the call site for why the extra line is `Domain::Air`-
+/// only), rather than restricted to `Station::Airfield` alone, so a future
+/// second caller for another domain costs nothing here.
+fn station_label(world: &SimWorld, station: Station, in_transit: bool) -> String {
+    let base = match station {
+        Station::Region(r) => format!("{}: {}", domain_label(station.domain()), world.region(r).name),
+        Station::Sea(z) => format!("{}: {}", domain_label(station.domain()), world.sea_zone(z).name),
+        Station::Airfield(node) => format!("{}: {}", domain_label(station.domain()), world.region(world.transport_node(node).region).name),
+    };
+    if in_transit {
+        format!("{base}（移動中）")
+    } else {
+        base
+    }
+}
+
+fn domain_label(domain: Domain) -> &'static str {
+    match domain {
+        Domain::Land => "陸軍",
+        Domain::Sea => "艦隊",
+        Domain::Air => "飛行隊",
     }
 }
 
@@ -1473,7 +1733,9 @@ fn current_breakable_treaty(world: &SimWorld, a: FactionId, b: FactionId) -> Tre
 mod tests {
     use super::*;
 
+    use archipelago_sim::balance::UNIT_ORG;
     use archipelago_sim::ids::FactionId;
+    use archipelago_sim::military;
     use archipelago_sim::scenario;
 
     use crate::sim_driver::SimDriver;
@@ -1486,6 +1748,36 @@ mod tests {
     /// advance_simulation` does in the real client.
     fn player_sim() -> SimRes {
         SimRes(SimDriver::new_with_player(scenario::build_world(), 1, Some(FactionId(0)), None))
+    }
+
+    /// A fresh full-strength air unit based at `airfield` - `crates/sim`'s
+    /// own `push_full_strength_air_unit`, one crate over, needed by the
+    /// strike-panel tests below now that `apply_strike_node` refuses a
+    /// strike from a faction with no air unit in reach
+    /// (`ActionError::NoAircraftInRange`, `codex review` P1):
+    /// `scenario::build_world` never places any air unit at start (Stage
+    /// 10A - units are synthesized land-only), so a test that needs one has
+    /// to add it itself.
+    fn push_air_unit(world: &mut SimWorld, faction: FactionId, airfield: TransportNodeId) -> UnitId {
+        let id = UnitId(world.units.len() as u32);
+        world.units.push(military::Unit {
+            id,
+            owner: faction,
+            name: "Test Squadron".to_string(),
+            station: Station::Airfield(airfield),
+            movement: None,
+            manpower: UNIT_MANPOWER,
+            equipment: UNIT_EQUIPMENT,
+            organization: UNIT_ORG,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Airfield(airfield),
+            experience: 0.0,
+            alive: true,
+        });
+        id
     }
 
     fn run<M>(world: &mut World, system: impl IntoSystem<(), (), M>) {
@@ -1632,6 +1924,225 @@ mod tests {
         let mut sim = world.resource_mut::<SimRes>();
         sim.0.tick();
         assert!(sim.0.last_human_actions().is_empty(), "a click on a region the player doesn't own must never be queued, but got {:?}", sim.0.last_human_actions());
+    }
+
+    /// Stage 10 follow-up (this task's own ask: a human player must be able
+    /// to raise a squadron, not just watch the AI fly one): a click on the
+    /// region panel's new `RecruitAir` button, at the player's own capital
+    /// (every mvp region has an operational airfield node - `docs/design.md`
+    /// scenario data), must enqueue `RecruitUnit { domain: Domain::Air }` and
+    /// that action must actually create a living squadron once applied -
+    /// mirrors `region_action_click_enqueues_recruit_for_the_players_own_region`
+    /// exactly, for the one domain that test doesn't cover.
+    ///
+    /// Confirmed this can actually fail: temporarily left `RecruitAir` out of
+    /// `RegionActionKind::to_action`'s match (falling through to a
+    /// compile error is the honest failure mode for an exhaustive match, but
+    /// to get a *runtime* red instead, swapped its arm to build
+    /// `Action::RecruitUnit { region, domain: Domain::Land }`) - the first
+    /// assertion below then failed (got a `Domain::Land` recruit instead of
+    /// `Domain::Air`). Reverted before committing.
+    #[test]
+    fn region_action_click_enqueues_recruit_air_for_the_players_own_region() {
+        let mut world = World::new();
+        let sim = player_sim();
+        let capital = sim.0.world().faction(FactionId(0)).capital;
+        let air_units_before = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0) && u.station.domain() == Domain::Air).count();
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedRegion(Some(capital)));
+        world.insert_resource(ActiveGood::default());
+        world.spawn((Interaction::Pressed, RegionActionKind::RecruitAir));
+
+        run(&mut world, handle_region_action_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::RecruitUnit { region: capital, domain: Domain::Air }],
+            "the click must have queued exactly one RecruitUnit(Air) for the player's capital"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty(), "a legal air recruit order must not be rejected: {:?}", sim.0.last_human_action_errors());
+        let air_units_after = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0) && u.alive && u.station.domain() == Domain::Air).count();
+        assert_eq!(air_units_after, air_units_before + 1, "the recruited squadron must actually exist in the world after the tick");
+    }
+
+    /// The strike panel's own click handler (`handle_strike_clicks`): a
+    /// click on `StrikeKind::Airfield` while an enemy region (mvp starts
+    /// every faction at war with every other - `Diplomacy::new`'s own
+    /// default) is selected must enqueue `Action::StrikeNode` naming that
+    /// region's own airfield node, and the strike must actually land
+    /// (`Simulation::apply` accepts it, and the node's `condition` drops).
+    ///
+    /// Confirmed this can actually fail: temporarily hardcoded
+    /// `handle_strike_clicks` to always resolve `StrikeKind::Port.node(...)`
+    /// regardless of which `kind` was actually clicked - the assertion below
+    /// then failed (`TransportNodeId(13)` expected vs `TransportNodeId(26)`
+    /// actually queued, mvp's kanto airfield/port nodes). Reverted before
+    /// committing.
+    ///
+    /// **Needs a reachable squadron** (`codex review` P1,
+    /// `ActionError::NoAircraftInRange`): `player_sim`'s default world has
+    /// no air units at all, so this test builds its own `sim_world` and
+    /// gives faction 0 one at its own capital's airfield first - mvp's
+    /// 関東 and 近畿 (faction 1's own capital, the target here) sit about
+    /// 190km apart, comfortably inside `air::AIR_OPERATING_RADIUS_KM`'s
+    /// 300km, so no relocation is needed the way the sim-crate tests use.
+    #[test]
+    fn strike_panel_click_enqueues_strike_node_against_a_hostile_airfield() {
+        let mut world = World::new();
+        let mut sim_world = scenario::build_world();
+        let own_capital = sim_world.faction(FactionId(0)).capital;
+        let own_airfield = sim_world.airfield_node(own_capital).expect("every mvp region has an airfield node").id;
+        push_air_unit(&mut sim_world, FactionId(0), own_airfield);
+        let foreign = sim_world.faction(FactionId(1)).capital;
+        let node = sim_world.airfield_node(foreign).expect("every mvp region has an airfield node").id;
+        let condition_before = sim_world.transport_node(node).condition.get();
+        let sim = SimRes(SimDriver::new_with_player(sim_world, 1, Some(FactionId(0)), None));
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedRegion(Some(foreign)));
+        world.spawn((Interaction::Pressed, StrikeKind::Airfield));
+
+        run(&mut world, handle_strike_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(sim.0.last_human_actions(), &[Action::StrikeNode { node }], "the click must have queued exactly one StrikeNode against the enemy capital's airfield");
+        assert!(sim.0.last_human_action_errors().is_empty(), "a legal strike against a hostile airfield must not be rejected: {:?}", sim.0.last_human_action_errors());
+        let condition_after = sim.0.world().transport_node(node).condition.get();
+        assert!(condition_after < condition_before, "the struck airfield's own condition must actually drop: before {condition_before}, after {condition_after}");
+    }
+
+    /// A region with two airfields, its first wrecked, must still be
+    /// strikeable at the second (`codex review`, P2).
+    ///
+    /// `StrikeKind::node` used to return the region's lowest-id node of the
+    /// kind, so once that one was rubble every further click hit the same
+    /// rubble and the region's other, intact field could never be targeted
+    /// at all. This is the fourth appearance in Phase 10 of "does the region
+    /// have one" and "give me one to use" sharing a lowest-id lookup.
+    ///
+    /// **Confirmed this test can fail.** Reverting `StrikeKind::node` to
+    /// `World::airfield_node` makes the click queue a `StrikeNode` against
+    /// the wrecked first node instead of the intact second one, tripping the
+    /// assertion below. Restored, and it passes.
+    #[test]
+    fn strike_panel_targets_an_operational_node_when_the_first_is_wrecked() {
+        let mut world = World::new();
+
+        // Built up on the plain `SimWorld` first: `SimDriver` deliberately
+        // exposes the world read-only, so the second airfield and the first
+        // one's ruin have to exist before the driver is constructed.
+        let mut sim_world = scenario::build_world();
+        let own_capital = sim_world.faction(FactionId(0)).capital;
+        let own_airfield = sim_world.airfield_node(own_capital).expect("every mvp region has an airfield node").id;
+        push_air_unit(&mut sim_world, FactionId(0), own_airfield);
+        let foreign = sim_world.faction(FactionId(1)).capital;
+        let wrecked = sim_world.airfield_node(foreign).expect("every mvp region has an airfield node").id;
+        let intact = archipelago_sim::ids::TransportNodeId(sim_world.transport_nodes.len() as u32);
+        sim_world.transport_nodes.push(archipelago_sim::transport::TransportNode {
+            id: intact,
+            name: "spare airfield".to_string(),
+            kind: archipelago_sim::transport::TransportNodeKind::Airfield,
+            region: foreign,
+            condition: archipelago_sim::transport::Condition::FULL,
+        });
+        sim_world.transport_nodes[wrecked.index()].condition =
+            archipelago_sim::transport::Condition::new(0.0).expect("0.0 is a valid condition");
+        let sim = SimRes(SimDriver::new_with_player(sim_world, 1, Some(FactionId(0)), None));
+
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedRegion(Some(foreign)));
+        world.spawn((Interaction::Pressed, StrikeKind::Airfield));
+
+        run(&mut world, handle_strike_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::StrikeNode { node: intact }],
+            "the click must target the region's still-operational airfield, not the wrecked one a lowest-id lookup returns"
+        );
+    }
+
+    /// The other half of "disabled, with a reason", for strike: a click on
+    /// the player's *own* region (never hostile to itself) must be declined
+    /// by the handler, never queued - `StrikeKind::reason`'s own
+    /// `NodeNotHostile` check is what stops it, not the button's visual
+    /// state alone.
+    ///
+    /// Confirmed this can actually fail: temporarily deleted the
+    /// `if kind.reason(...).is_some() { continue }` guard in
+    /// `handle_strike_clicks` - the assertion below then failed (a
+    /// `StrikeNode` action *was* queued against the player's own capital).
+    /// Reverted before committing.
+    #[test]
+    fn strike_panel_click_on_the_players_own_region_is_not_enqueued() {
+        let mut world = World::new();
+        let sim = player_sim();
+        let capital = sim.0.world().faction(FactionId(0)).capital;
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedRegion(Some(capital)));
+        world.spawn((Interaction::Pressed, StrikeKind::Airfield));
+
+        run(&mut world, handle_strike_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert!(sim.0.last_human_actions().is_empty(), "a strike click on the player's own region must never be queued, but got {:?}", sim.0.last_human_actions());
+    }
+
+    /// The hole this panel closes (`codex review` P1): before `apply_strike_
+    /// node` gated itself on `air::units_reaching`, a faction with zero
+    /// aircraft anywhere could still strike any hostile airfield/port for
+    /// free, and this panel's button offered exactly that with no
+    /// indication anything was wrong. `player_sim`'s default world already
+    /// has no air units at all (Stage 10A never places any at scenario
+    /// start), so - unlike the two tests above, which had to add one - this
+    /// is the *unmodified* default state, proving the button now reflects
+    /// `ActionError::NoAircraftInRange` on its own without any extra setup.
+    ///
+    /// Confirmed this fails without the fix: temporarily removed the
+    /// `air::units_reaching(...).is_empty()` check from `StrikeKind::
+    /// reason`. Re-ran: `reason` came back `None` (the button reads as
+    /// enabled) and the click actually queued a `StrikeNode` action, both
+    /// assertions below tripping. Restored, and it passes.
+    #[test]
+    fn strike_panel_button_is_disabled_with_reason_when_no_aircraft_can_reach() {
+        let sim = player_sim();
+        let player_faction = FactionId(0);
+        let foreign = sim.0.world().faction(FactionId(1)).capital;
+        assert!(
+            sim.0.world().units.iter().all(|u| u.owner != player_faction || u.station.domain() != Domain::Air),
+            "sanity: player_sim's default world has no air units for the player at all"
+        );
+
+        assert_eq!(
+            StrikeKind::Airfield.reason(sim.0.world(), player_faction, foreign),
+            Some(action_error_ja(ActionError::NoAircraftInRange)),
+            "with no reachable aircraft, the button must be disabled with exactly this reason"
+        );
+
+        let mut world = World::new();
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(player_faction)));
+        world.insert_resource(SelectedRegion(Some(foreign)));
+        world.spawn((Interaction::Pressed, StrikeKind::Airfield));
+
+        run(&mut world, handle_strike_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert!(
+            sim.0.last_human_actions().is_empty(),
+            "a strike click with no reachable aircraft must never be queued, but got {:?}",
+            sim.0.last_human_actions()
+        );
     }
 
     /// Regression guard for the unit panel's per-slot Hold/Reinforce buttons

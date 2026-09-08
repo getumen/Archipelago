@@ -592,6 +592,47 @@ mod tests {
         );
     }
 
+    /// Air power's own instance of the fix above (docs/design.md §14: "人間
+    /// も AI と同じ入口から世界に触る" has to hold for every domain, not just
+    /// land/sea): `is_action_delegated` routes purely on `Action::
+    /// target_unit`, with no domain-specific match arm anywhere in this
+    /// module (see this module's own doc, "Whole-layer delegation with
+    /// per-unit carve-outs") - so a whole-military-delegated player's
+    /// squadrons should already be recruited, flown, and struck through
+    /// exactly like a `HeuristicAgent`-controlled faction's, with no code
+    /// path here that singles Domain::Air out as unsupported. This nails
+    /// that down for `RecruitUnit { domain: Domain::Air, .. }` specifically -
+    /// `crate::tests::heuristic_agent_recruits_air_when_it_can_afford_it`
+    /// already proves the wrapped `HeuristicAgent` alone emits this on
+    /// mvp's very first `decide()` call, so one delegated call is enough to
+    /// show it survives `is_action_delegated`'s filter unchanged.
+    ///
+    /// Confirmed this can actually fail: temporarily changed `is_action_
+    /// delegated` to `match action.target_unit() { Some(unit) =>
+    /// self.is_delegated(unit), None => false }` (the old, pre-fix
+    /// "RecruitUnit can never be delegated" shape this module's own doc
+    /// describes under "Whole-layer delegation with per-unit carve-outs") -
+    /// the assertion below then failed, `actions` containing no
+    /// `RecruitUnit` at all despite whole-layer delegation being on.
+    /// Reverted before committing.
+    #[test]
+    fn whole_military_delegation_recruits_air_squadrons() {
+        let world = scenario::build_world();
+        let obs = Observation { faction: FactionId(0), world: &world };
+
+        let mut human = HumanAgent::new(FactionId(0));
+        human.delegate_military();
+        let actions = human.decide(&obs);
+
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::RecruitUnit { domain: archipelago_sim::world::Domain::Air, .. })),
+            "a whole-military-delegated HumanAgent must recruit air squadrons exactly like a HeuristicAgent \
+             faction would on the same tick, but got: {actions:?}"
+        );
+    }
+
     /// The carve-out half of whole-layer delegation: delegating the entire
     /// military, then taking one unit back, must stop the AI from ordering
     /// *that* unit while everything else - including recruitment - stays

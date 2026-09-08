@@ -79,3 +79,83 @@ pub(super) fn advance_simulation(
         log.0.pop_back();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use archipelago_sim::action::{Action, ActionError};
+    use archipelago_sim::ids::FactionId;
+    use archipelago_sim::scenario;
+    use archipelago_sim::world::{Domain, Station};
+
+    use crate::action_codec::action_error_ja;
+    use crate::sim_driver::{SimDriver, Speed};
+
+    fn run<M>(world: &mut World, system: impl IntoSystem<(), (), M>) {
+        let mut system = IntoSystem::into_system(system);
+        system.initialize(world);
+        system.run((), world).unwrap();
+    }
+
+    fn advance_one_tick(world: &mut World) {
+        world.insert_resource(SpeedRes { last_active: Speed::X1, paused: false });
+        world.insert_resource(ScenarioMeta { name: "mvp".to_string(), max_days: 720 });
+        world.insert_resource(EventLog::default());
+        world.insert_resource(LastRejection::default());
+        world.insert_resource(NewspaperState::default());
+        run(world, advance_simulation);
+    }
+
+    /// Stage 10 follow-up (this task's own ask, "a rejected order must tell
+    /// the player why"): a squadron redeployed to a region the player does
+    /// not own must come back through `LastRejection` with `apply_move`'s
+    /// own `Station::Airfield` arm's real reason
+    /// (`ActionError::RegionNotOwned`), not silence - exactly the same
+    /// plumbing (`rejection_target_of`/`action_error_ja`) every other
+    /// domain's illegal order already goes through, now exercised for a
+    /// real `Domain::Air` unit end to end (recruit it, then misorder it).
+    ///
+    /// Confirmed this can actually fail: temporarily cleared `rejection.0`
+    /// unconditionally instead of assigning `sim.0.last_human_action_errors()`'s
+    /// mapped `Vec` (i.e. made `advance_simulation` never populate
+    /// `LastRejection` at all) and re-ran - the last assertion below failed
+    /// (`rejection.0` stayed empty). Reverted before committing.
+    #[test]
+    fn illegal_air_redeploy_surfaces_its_rejection_reason() {
+        let mut world = World::new();
+        let mut sim = SimRes(SimDriver::new_with_player(scenario::build_world(), 1, Some(FactionId(0)), None));
+        let kanto = sim.0.world().faction(FactionId(0)).capital;
+        sim.0.push_human_action(Action::RecruitUnit { region: kanto, domain: Domain::Air });
+        sim.0.tick();
+        assert!(sim.0.last_human_action_errors().is_empty(), "recruiting a squadron at the player's own capital must succeed: {:?}", sim.0.last_human_action_errors());
+        let squadron = sim
+            .0
+            .world()
+            .units
+            .iter()
+            .find(|u| u.owner == FactionId(0) && u.alive && u.station.domain() == Domain::Air)
+            .expect("the RecruitUnit(Air) applied above must have created a living squadron")
+            .id;
+
+        let foreign_capital = sim.0.world().faction(FactionId(1)).capital;
+        let foreign_node = sim.0.world().airfield_node(foreign_capital).expect("every mvp region has an airfield node").id;
+        sim.0.push_human_action(Action::MoveUnit { unit: squadron, to: Station::Airfield(foreign_node) });
+
+        world.insert_resource(sim);
+        advance_one_tick(&mut world);
+
+        let sim = world.resource::<SimRes>();
+        assert_eq!(
+            sim.0.last_human_action_errors(),
+            &[(Action::MoveUnit { unit: squadron, to: Station::Airfield(foreign_node) }, ActionError::RegionNotOwned)],
+            "redeploying a squadron onto another faction's airfield must be rejected as RegionNotOwned"
+        );
+        let rejection = world.resource::<LastRejection>();
+        assert!(
+            rejection.0.iter().any(|r| r.reason == action_error_ja(ActionError::RegionNotOwned)),
+            "the rejection must surface the real reason text to the player, got {:?}",
+            rejection.0.iter().map(|r| r.reason).collect::<Vec<_>>()
+        );
+    }
+}

@@ -707,6 +707,7 @@ fn spawn_right_column(commands: &mut Commands, font: &Handle<Font>, world: &SimW
             ));
 
             super::panels::spawn_region_action_panel(col, font);
+            super::panels::spawn_strike_panel(col, font);
             super::panels::spawn_policy_panel(col, font);
             if let Some(player_faction) = player_faction {
                 super::panels::spawn_diplomacy_panel(col, font, world, player_faction);

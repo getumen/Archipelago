@@ -19,7 +19,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCapture
 use archipelago_sim::good::Good;
 use archipelago_sim::ids::RegionId;
 
-use super::{MainCamera, MapMode, RegionLayout, SimRes};
+use super::{MainCamera, MapMode, PlayerFaction, RegionLayout, SelectedUnits, SimRes};
 
 /// `--screenshot-after <frames>` / `--screenshot-at-day <day>` (`main.rs`'s
 /// own doc): when the automated capture fires.
@@ -81,9 +81,26 @@ pub struct ScreenshotConfig {
     /// region panel (action buttons included) renders in a `--screenshot`
     /// run with nothing to click it open.
     pub select_region: Option<RegionId>,
-    /// `--debug-select-units`: pre-selects every living unit the `--play`ed
-    /// faction owns, so Stage 8B's unit panel renders in a `--screenshot`
-    /// run with nothing to click a unit marker. No effect without `--play`.
+    /// `--debug-select-units`: keeps `SelectedUnits` matching every
+    /// *currently* living unit the `--play`ed faction owns, so Stage 8B's
+    /// unit panel renders in a `--screenshot` run with nothing to click a
+    /// unit marker. No effect without `--play`.
+    ///
+    /// `sync_debug_selected_units` recomputes this every frame from
+    /// `SimRes`'s live world rather than snapshotting it once at startup -
+    /// this task's own finding: a `--screenshot-at-day <D>` run for `D > 0`
+    /// (the only way to screenshot a squadron at all, since none of this
+    /// crate's own scenarios start with one - `docs/phase10-spec.md`'s own
+    /// "シナリオに航空部隊を置くのは 10B 以降でよい") ticks the world well past
+    /// day 0 before the shot fires, and a one-time day-0 snapshot goes stale
+    /// long before then: the day-0 roster may since have died (`--delegate-
+    /// military` fighting a real war) and can, by construction, never have
+    /// contained a unit recruited afterward. Confirmed by screenshot before
+    /// this fix: `--play 関東府 --delegate-military --screenshot-at-day 200
+    /// --debug-select-units` rendered the unit panel's own title with zero
+    /// rows beneath it - every day-0 unit id in the stale selection had
+    /// since died, and the 21 units 関東府 actually owned by day 200
+    /// (squadrons included) were never in it to begin with.
     pub select_units: bool,
     /// `--debug-camera-region <index>`: center the camera on this region
     /// instead of the whole-map fit `camera_fit::fit_camera_to_map` computes
@@ -167,4 +184,30 @@ pub(super) fn maybe_capture_screenshot(
 
 fn exit_after_screenshot(_captured: On<ScreenshotCaptured>, mut exit: MessageWriter<AppExit>) {
     exit.write(AppExit::Success);
+}
+
+/// `--debug-select-units` (`ScreenshotConfig::select_units`'s own doc for
+/// why this recomputes every frame instead of snapshotting once at
+/// startup): sets `SelectedUnits` to every unit the `--play`ed faction
+/// currently owns and has alive, read fresh from `SimRes` each call - a
+/// no-op without `--screenshot`/`--play`/`--debug-select-units`, so a live
+/// (non-`--screenshot`) run is entirely unaffected (`config` is only ever
+/// `Some` under `--screenshot`, matching every other `ScreenshotConfig`-gated
+/// system in this module).
+pub(super) fn sync_debug_selected_units(
+    config: Option<Res<ScreenshotConfig>>,
+    player: Res<PlayerFaction>,
+    sim: Res<SimRes>,
+    mut selected: ResMut<SelectedUnits>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    if !config.select_units {
+        return;
+    }
+    let Some(player_faction) = player.0 else {
+        return;
+    };
+    selected.0 = sim.0.world().units.iter().filter(|u| u.alive && u.owner == player_faction).map(|u| u.id.0).collect();
 }

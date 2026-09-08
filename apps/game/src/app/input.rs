@@ -349,8 +349,16 @@ pub(super) fn keyboard_input(
 /// Menu item order, matching the number keys `handle_menu_keys` reads and
 /// `ui::update_player_panel`'s legend text - kept in exactly one place so
 /// the two can't drift apart.
-pub(super) const MENU_ITEMS: [&str; 7] =
-    ["陸軍を徴募", "艦隊を徴募（要港湾）", "インフラ建設", "港湾建設", "生産設備建設（対象品目）", "修復", "建設中止"];
+pub(super) const MENU_ITEMS: [&str; 8] = [
+    "陸軍を徴募",
+    "艦隊を徴募（要港湾）",
+    "空軍を徴募（要飛行場）",
+    "インフラ建設",
+    "港湾建設",
+    "生産設備建設（対象品目）",
+    "修復",
+    "建設中止",
+];
 
 fn handle_menu_keys(keys: &ButtonInput<KeyCode>, region: RegionId, active_good: archipelago_sim::good::Good, menu: &mut MenuRegion, sim: &mut SimRes) {
     if keys.just_pressed(KeyCode::Escape) {
@@ -362,15 +370,17 @@ fn handle_menu_keys(keys: &ButtonInput<KeyCode>, region: RegionId, active_good: 
     } else if keys.just_pressed(KeyCode::Digit2) {
         Some(Action::RecruitUnit { region, domain: Domain::Sea })
     } else if keys.just_pressed(KeyCode::Digit3) {
-        Some(Action::Build { region, project: Project::Infrastructure })
+        Some(Action::RecruitUnit { region, domain: Domain::Air })
     } else if keys.just_pressed(KeyCode::Digit4) {
-        Some(Action::Build { region, project: Project::Port })
+        Some(Action::Build { region, project: Project::Infrastructure })
     } else if keys.just_pressed(KeyCode::Digit5) {
+        Some(Action::Build { region, project: Project::Port })
+    } else if keys.just_pressed(KeyCode::Digit6) {
         // "生産設備建設（対象品目）" - `G` picks which good's capacity.
         Some(Action::Build { region, project: Project::Capacity(active_good) })
-    } else if keys.just_pressed(KeyCode::Digit6) {
-        Some(Action::Build { region, project: Project::Repair })
     } else if keys.just_pressed(KeyCode::Digit7) {
+        Some(Action::Build { region, project: Project::Repair })
+    } else if keys.just_pressed(KeyCode::Digit8) {
         Some(Action::CancelBuild { region })
     } else {
         None
@@ -831,9 +841,49 @@ pub(super) fn map_click_select(
     selected_sea_zone.0 = None;
 }
 
+/// Resolves each selected unit's own destination `Station` from `to` (the
+/// region/sea-zone actually clicked) and issues `MoveUnit` for it.
+///
+/// For every domain but `Domain::Air` this is `to`, unchanged, exactly as
+/// before this task. A squadron is the one exception: `apply_move`'s own
+/// `Station::Airfield` arm (this module's own doc, `MoveUnit`'s field doc in
+/// `archipelago_sim::action`) only ever accepts another `Station::Airfield`
+/// as `to`, never a bare `Station::Region` - a region click has to be
+/// translated into *which* airfield node in that region before it means
+/// anything to a squadron, the same translation a sea-zone click never
+/// needed (`Station::Sea(zone_id)` already names the exact thing a fleet
+/// moves between). This is not client-side legality pre-filtering (this
+/// module's own doc, "No client-side legality pre-filtering..."): ownership,
+/// operational status and `AIR_OPERATING_RADIUS_KM` reach are still
+/// `apply_move`'s call alone, unvalidated here - `operational_airfield_node`
+/// is tried first only because *that* node is what a working redeploy would
+/// actually name; falling back to `airfield_node` (possibly wrecked) still
+/// lets a rejected order come back with the precise `NoAirfield` reason
+/// instead of a bare `NotAdjacent` for a region that does have a field, just
+/// not a standing one right now. A region with no airfield node at all falls
+/// through to `to` unchanged, which `apply_move`'s catch-all arm rejects
+/// (`ActionError::NotAdjacent`, the same message a land unit ordered onto a
+/// sea zone already gets) - still an honest, visible rejection, not a
+/// silently dropped order.
 fn issue_move_orders(sim: &mut SimRes, selected_units: &SelectedUnits, to: Station) {
-    for &raw_id in &selected_units.0 {
-        sim.0.push_human_action(Action::MoveUnit { unit: archipelago_sim::ids::UnitId(raw_id), to });
+    let world = sim.0.world();
+    let orders: Vec<(u32, Station)> = selected_units
+        .0
+        .iter()
+        .map(|&raw_id| {
+            let station = match (to, world.units.get(raw_id as usize).map(|u| u.station.domain())) {
+                (Station::Region(region_id), Some(Domain::Air)) => world
+                    .operational_airfield_node(region_id)
+                    .or_else(|| world.airfield_node(region_id))
+                    .map(|n| Station::Airfield(n.id))
+                    .unwrap_or(to),
+                _ => to,
+            };
+            (raw_id, station)
+        })
+        .collect();
+    for (raw_id, station) in orders {
+        sim.0.push_human_action(Action::MoveUnit { unit: archipelago_sim::ids::UnitId(raw_id), to: station });
     }
 }
 
@@ -1107,6 +1157,71 @@ mod tests {
         system.run((), &mut world).unwrap();
 
         assert_eq!(world.resource::<NlCompose>().buffer, "h", "a real keystroke after activation must still be collected");
+    }
+
+    /// Stage 10 follow-up (this task's own ask: a player must be able to
+    /// redeploy a squadron the same way a click already redeploys a land
+    /// unit/fleet): `issue_move_orders` must translate a region click into
+    /// *that region's own airfield node*, not a bare `Station::Region`, for
+    /// a selected air unit - `apply_move`'s `Station::Airfield` arm only
+    /// ever accepts another `Station::Airfield` (this module's own doc on
+    /// `MoveUnit`), so a `Station::Region` target would always be rejected
+    /// regardless of range or ownership. Every mvp region owned by faction 0
+    /// is within `AIR_OPERATING_RADIUS_KM` of every other (checked directly
+    /// here via `last_human_action_errors` being empty after the tick, not
+    /// assumed), so this also proves a legal redeploy actually lands.
+    ///
+    /// Confirmed this can actually fail: temporarily reverted
+    /// `issue_move_orders` to unconditionally use `to` (the pre-Stage-10-
+    /// follow-up behaviour) - the first assertion below then failed
+    /// (`MoveUnit { to: Station::Region(_) }` instead of `Station::
+    /// Airfield(_)`), and the tick assertion failed too (`ActionError::
+    /// NotAdjacent`, since `apply_move` never accepts a squadron ordered
+    /// onto a plain region). Reverted before committing.
+    #[test]
+    fn air_unit_region_click_redeploys_to_that_regions_airfield() {
+        let mut sim = SimRes(SimDriver::new_with_player(archipelago_sim::scenario::build_world(), 1, Some(FactionId(0)), None));
+        let capital = sim.0.world().faction(FactionId(0)).capital;
+        sim.0.push_human_action(Action::RecruitUnit { region: capital, domain: Domain::Air });
+        sim.0.tick();
+        assert!(sim.0.last_human_action_errors().is_empty(), "recruiting the squadron used by this test must succeed: {:?}", sim.0.last_human_action_errors());
+        let squadron = sim
+            .0
+            .world()
+            .units
+            .iter()
+            .find(|u| u.owner == FactionId(0) && u.alive && u.station.domain() == Domain::Air)
+            .expect("the RecruitUnit(Air) applied above must have created a living squadron")
+            .id;
+
+        let destination_region = sim
+            .0
+            .world()
+            .regions
+            .iter()
+            .map(|r| r.id)
+            .find(|&r| r != capital && sim.0.world().region(r).owner == FactionId(0))
+            .expect("faction 0 owns more than one region in mvp");
+        let destination_node = sim.0.world().airfield_node(destination_region).expect("every mvp region has an airfield node").id;
+
+        let mut selected = SelectedUnits::default();
+        selected.0.insert(squadron.0);
+        issue_move_orders(&mut sim, &selected, Station::Region(destination_region));
+        sim.0.tick();
+
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::MoveUnit { unit: squadron, to: Station::Airfield(destination_node) }],
+            "a region click with a squadron selected must translate to that region's own airfield node"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty(), "a redeploy to a friendly, in-range, operational airfield must not be rejected: {:?}", sim.0.last_human_action_errors());
+        let unit = sim.0.world().unit(squadron);
+        assert!(
+            unit.station == Station::Airfield(destination_node) || unit.movement.as_ref().is_some_and(|m| m.to == Station::Airfield(destination_node)),
+            "the squadron must have arrived at, or be actively moving to, the destination airfield: station={:?} movement={:?}",
+            unit.station,
+            unit.movement
+        );
     }
 
     /// Spawns the one entity `mouse_pan_zoom`/`keyboard_pan` both query for -

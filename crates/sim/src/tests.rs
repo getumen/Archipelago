@@ -1726,6 +1726,7 @@ fn a_struck_port_stops_importing_and_resumes_once_repaired() {
     assert!(food_stock_before_strike > 0.0, "sanity: that import must have actually credited Food to faction stock: {food_stock_before_strike}");
 
     let port = world.port_node(region).expect("tokai has a Port node").id;
+    push_attacker_air_unit_within_reach(&mut world, attacker, region);
     action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
         .expect("a hostile Port node is a valid StrikeNode target");
     assert!(
@@ -1795,6 +1796,7 @@ fn recruit_fleet_at_a_struck_port_is_rejected_until_repaired() {
     world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
 
     let port = world.port_node(region).expect("tokai has a Port node").id;
+    push_attacker_air_unit_within_reach(&mut world, attacker, region);
     action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
         .expect("a hostile Port node is a valid StrikeNode target");
     assert!(
@@ -9170,6 +9172,23 @@ fn push_full_strength_air_unit(world: &mut World, faction: FactionId, airfield: 
     id
 }
 
+/// The shared setup several `Action::StrikeNode` tests below need now that
+/// `apply_strike_node` refuses a strike from a faction with no air unit
+/// able to reach the target at all (`ActionError::NoAircraftInRange`,
+/// `codex review` P1): bases a fresh full-strength air unit for `attacker`
+/// at one of its own airfields, relocated on top of `target_region`'s own
+/// `position` (distance `0.0`, trivially inside `air::
+/// AIR_OPERATING_RADIUS_KM`) so reach is never what a test using this is
+/// actually measuring - `a_sortie_that_grounds_its_target_still_pays_for_
+/// the_defence_it_faced`'s own hand-written setup, given a name so it
+/// doesn't have to be restated at every call site.
+fn push_attacker_air_unit_within_reach(world: &mut World, attacker: FactionId, target_region: RegionId) -> UnitId {
+    let own_region = world.regions_of(attacker)[0];
+    world.region_mut(own_region).position = world.region(target_region).position;
+    let own_airfield = world.airfield_node(own_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(world, attacker, own_airfield, 10.0)
+}
+
 /// Stage 10B acceptance criterion 1 (docs/phase10-spec.md §6): "制空権が
 /// 両勢力の投入戦力から比率で決まる。順序に依存しない。" Two factions each
 /// base one air unit at their own airfield, both within
@@ -9596,6 +9615,118 @@ fn striking_an_airfield_stops_air_superiority_projection_and_resumes_once_repair
 }
 
 // ---------------------------------------------------------------------
+// codex review (P1): `apply_strike_node` validated the *target* (hostile,
+// Airfield/Port) and nothing about the *attacker*. A faction with zero
+// aircraft anywhere on the map could bomb any hostile airfield or port at
+// any range for free - with no hostile air superiority over an
+// undefended target, `air::air_superiority_factor` reads `1.0` regardless
+// of whether the striking faction itself has any presence there. The
+// three tests below pin down the fix: no aircraft at all is rejected, a
+// squadron that exists but can't reach is rejected the same way, and a
+// squadron that can reach still works exactly as before.
+// ---------------------------------------------------------------------
+
+/// **Confirmed this test can fail.** Temporarily removed the `air::
+/// units_reaching(world, region, faction).is_empty()` guard from
+/// `apply_strike_node`. Re-ran: `result` came back `Ok(())` and
+/// `condition` actually dropped by `NODE_STRIKE_DAMAGE`, both assertions
+/// below tripping - a faction with no air unit anywhere on the map struck
+/// a hostile airfield for free. Restored, and it passes.
+#[test]
+fn a_faction_with_no_aircraft_anywhere_cannot_strike() {
+    let mut world = scenario::build_world();
+    world.units.clear(); // nobody, on either side, owns any unit of any domain.
+
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2);
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    let node = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    let before = world.transport_node(node).condition.get();
+
+    let result = action::apply_action(&mut world, attacker, Action::StrikeNode { node });
+
+    assert_eq!(result, Err(ActionError::NoAircraftInRange), "a faction with no air unit anywhere must not be able to strike");
+    assert_eq!(
+        world.transport_node(node).condition.get(),
+        before,
+        "a rejected strike must not have touched the target node's condition at all"
+    );
+}
+
+/// The squadron exists, but its only airfield is far outside `air::
+/// AIR_OPERATING_RADIUS_KM` of the target - the same rejection as having no
+/// squadron at all, not a free pass just because *a* unit happens to exist
+/// somewhere on the map.
+///
+/// **Confirmed this test can fail.** Same removed guard as the test above.
+/// Re-ran: `result` came back `Ok(())` even though the only squadron on the
+/// map sat roughly 650km away (九州 to 北海道, `air::
+/// AIR_OPERATING_RADIUS_KM` is 300km) - `condition` dropped exactly as if
+/// the squadron had been standing right next to the target. Restored, and
+/// it passes.
+#[test]
+fn a_faction_whose_only_squadron_is_out_of_range_cannot_strike() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let target_region = RegionId(0); // 北海道
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2); // 西方同盟, owns 九州 among others - mvp's own incidental geometry.
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    let own_region = world.regions_of(attacker)[0];
+    let distance = air::geographic_distance(world.region(own_region).position, world.region(target_region).position);
+    assert!(
+        distance > AIR_OPERATING_RADIUS_KM,
+        "sanity: mvp's attacker home region must genuinely sit outside operating radius: distance={distance}"
+    );
+    let own_airfield = world.airfield_node(own_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(&mut world, attacker, own_airfield, 10.0);
+
+    let node = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    let before = world.transport_node(node).condition.get();
+
+    let result = action::apply_action(&mut world, attacker, Action::StrikeNode { node });
+
+    assert_eq!(result, Err(ActionError::NoAircraftInRange), "a squadron that exists but cannot reach the target must not let the strike through");
+    assert_eq!(world.transport_node(node).condition.get(), before, "a rejected strike must not have touched condition");
+}
+
+/// The positive counterpart to the two tests above: once the attacker's
+/// squadron is relocated within reach, the identical strike that was just
+/// rejected now succeeds - confirming the rejection above was really about
+/// reach, not some other unrelated validation failure.
+#[test]
+fn a_faction_with_a_reachable_squadron_can_still_strike() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2);
+    assert_ne!(defender, attacker, "sanity: distinct factions");
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    push_attacker_air_unit_within_reach(&mut world, attacker, target_region);
+
+    let node = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+    let before = world.transport_node(node).condition.get();
+
+    let result = action::apply_action(&mut world, attacker, Action::StrikeNode { node });
+
+    assert_eq!(result, Ok(()), "a faction with a reachable squadron must still be able to strike");
+    assert!(
+        world.transport_node(node).condition.get() < before,
+        "a successful strike must actually damage the target node: before={before}, after={}",
+        world.transport_node(node).condition.get()
+    );
+}
+
+// ---------------------------------------------------------------------
 // Design change: `Action::StrikeNode` used to ignore air superiority
 // entirely - a strike landed at full `NODE_STRIKE_DAMAGE` regardless of
 // who held the sky over the target, and the striking side risked nothing
@@ -9642,6 +9773,12 @@ fn a_strike_achieves_little_or_nothing_against_a_defended_target() {
     let before = world.transport_node(node).condition.get();
     assert_eq!(before, Condition::FULL.get(), "sanity: the node starts undamaged");
 
+    // Attacker still needs a squadron in reach to fly the sortie at all
+    // (`ActionError::NoAircraftInRange`) - independent of the hand-set,
+    // fully-hostile `air_superiority` above, which only decides how much
+    // that sortie accomplishes once it flies.
+    push_attacker_air_unit_within_reach(&mut world, attacker, target_region);
+
     action::apply_action(&mut world, attacker, Action::StrikeNode { node })
         .expect("a hostile Airfield node is a valid StrikeNode target regardless of who holds the air");
     let after = world.transport_node(node).condition.get();
@@ -9660,8 +9797,11 @@ fn a_strike_achieves_little_or_nothing_against_a_defended_target() {
 /// change existed. Reusing `striking_a_port_node_stops_supply_routed_
 /// through_it`'s own scenario shape (isolate the corridor, strike the port)
 /// confirms the design change is additive: every pre-existing StrikeNode
-/// behaviour with no air units anywhere on the map is untouched, only a
-/// defended target now behaves differently.
+/// behaviour with no *defending* air unit anywhere on the map is untouched,
+/// only a defended target now behaves differently. (The attacker's own
+/// squadron below is a separate, later requirement -
+/// `ActionError::NoAircraftInRange`, codex review P1 - not part of what
+/// this test is measuring.)
 ///
 /// **Confirmed this test can fail.** Temporarily forced `air::
 /// air_superiority_factor` to always return `0.0` (as if every target were
@@ -9684,6 +9824,7 @@ fn a_strike_with_air_superiority_still_works() {
 
     let port = world.port_node(RegionId(0)).expect("hokkaido has a Port node").id;
     let before_condition = world.transport_node(port).condition.get();
+    push_attacker_air_unit_within_reach(&mut world, attacker, RegionId(0));
 
     action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
         .expect("a hostile Port node is a valid StrikeNode target");
@@ -10065,6 +10206,7 @@ fn recruit_air_unit_at_a_struck_airfield_is_rejected_until_repaired() {
     world.faction_mut(faction).stock[Good::Arms.index()] = 1000.0;
     world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
 
+    push_attacker_air_unit_within_reach(&mut world, attacker, region);
     action::apply_action(&mut world, attacker, Action::StrikeNode { node: airfield })
         .expect("a hostile Airfield node is a valid StrikeNode target");
     assert!(
@@ -10171,6 +10313,11 @@ fn striking_a_port_node_stops_supply_routed_through_it() {
     );
     assert_eq!(world.transport_node(port).condition.get(), Condition::FULL.get(), "none of the rejected attempts above may have touched condition");
 
+    // Every rejection above fires before the reach check
+    // (`ActionError::NoAircraftInRange`), so none of them needed an
+    // attacker air unit at all; only the strike that must actually succeed
+    // does.
+    let attacker_unit = push_attacker_air_unit_within_reach(&mut world, attacker, RegionId(0));
     action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
         .expect("a hostile Port node is a valid StrikeNode target");
     assert!(
@@ -10185,6 +10332,21 @@ fn striking_a_port_node_stops_supply_routed_through_it() {
         after_strike < before * 0.05,
         "a struck port must stop essentially all supply that used to route through it: before={before}, after_strike={after_strike}"
     );
+
+    // The sortie flies home rather than loitering forever - this test is
+    // isolating whether *passive node repair alone* restores supply, not
+    // whether the attacker's squadron eventually leaves. Left in place, it
+    // would keep hokkaido under hostile `air::air_line_factor` throttling
+    // (Stage 10C: every line kind, not just the severed Sea line
+    // `isolate_hokkaido_port_corridor` already zeroed, now answers to
+    // whichever faction holds the sky) regardless of the port node's own
+    // `condition` - a second, unrelated cause of "no supply" this test
+    // isn't measuring. Disbanding it and refreshing the cache
+    // (`air::tick_air_superiority`, the same recompute a full day's tick
+    // would run) returns `Region::air_superiority` to `NEUTRAL` exactly the
+    // way it would if the squadron had simply flown elsewhere.
+    world.unit_mut(attacker_unit).alive = false;
+    air::tick_air_superiority(&mut world);
 
     // Recovery path: passive repair alone (no further action, no repeated
     // strike) must eventually reopen the node and restore supply through it.
@@ -10208,11 +10370,23 @@ fn striking_a_port_node_stops_supply_routed_through_it() {
 /// Phase 10 was worth doing** (this stage's own brief). design.md §8 states
 /// this in one line - 「敵は領土そのものではなく、物流拠点を攻撃することも
 /// 可能」 - and this is the test that proves the engine actually delivers
-/// it: 西方同盟 (faction 2 - 中国・四国・九州, nowhere near 北海道) strikes
-/// 東方連合's (faction 0) own port and measurably starves the garrison
-/// stationed behind it, while 北海道 remains 東方連合's own, uncontested,
-/// unoccupied territory throughout - no attacker unit, no combat, no
-/// movement anywhere in this test.
+/// it: 西方同盟 (faction 2 - 中国・四国・九州) strikes 東方連合's (faction 0)
+/// own port and measurably starves the garrison stationed behind it, while
+/// 北海道 remains 東方連合's own, uncontested, **unoccupied** territory
+/// throughout - no ground unit, no ground combat, no movement of any kind
+/// anywhere near the target region in this test.
+///
+/// **The attacker's own squadron is not what this test is about**
+/// (`codex review` P1, `ActionError::NoAircraftInRange`: a strike now
+/// requires *some* air unit in reach - see `apply_strike_node`'s own doc).
+/// `push_attacker_air_unit_within_reach` relocates one of 西方同盟's own
+/// airfields on top of 北海道's position purely so reach is not what this
+/// test measures (mvp's real geography puts 九州 roughly 650km from 北海道,
+/// well outside `air::AIR_OPERATING_RADIUS_KM`'s 300km - a genuine sortie
+/// this far would need forward-based air power, a fact this test
+/// deliberately does not model). What the relocated squadron is *not* is a
+/// ground presence: it never lands, never fights, and never occupies
+/// anything - the decisive property below is unchanged.
 ///
 /// **Confirmed this test can fail.** Same injected defect as `striking_a_
 /// port_node_stops_supply_routed_through_it` (`node_operational` hardcoded
@@ -10234,6 +10408,7 @@ fn a_faction_can_cut_enemy_supply_by_striking_a_node_without_occupying_the_regio
     assert!(!world.has_enemy_units(RegionId(0), defender), "sanity: hokkaido starts uncontested");
 
     let port = world.port_node(RegionId(0)).expect("hokkaido has a Port node").id;
+    push_attacker_air_unit_within_reach(&mut world, attacker, RegionId(0));
     action::apply_action(&mut world, attacker, Action::StrikeNode { node: port })
         .expect("a hostile Port node is a valid StrikeNode target - no locality requirement, the same as InterdictLine");
 
