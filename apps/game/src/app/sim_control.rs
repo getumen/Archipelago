@@ -315,6 +315,7 @@ mod tests {
             select_units: false,
             camera_focus_region: None,
             camera_zoom: 1.0,
+            debug_force_blank: false,
         });
 
         run(&mut world, advance_simulation);

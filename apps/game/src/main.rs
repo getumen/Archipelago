@@ -56,7 +56,12 @@ fn print_usage_and_exit(msg: &str) -> ! {
          [--debug-map-mode <political|terrain|population|industry[:<good>]|unrest|supply|air>] \
          [--debug-open-diplomacy] [--debug-open-newspaper] \
          [--debug-open-policy] [--debug-select-region <region index or name>] [--debug-select-units] \
-         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>]\n\
+         [--debug-camera-region <region index or name>] [--debug-camera-zoom <scale>] \
+         [--debug-force-blank-screenshot]\n\
+         \n\
+         --debug-force-blank-screenshot: verification-only, not a real capture option - forces the first \
+         screenshot attempt to fire on frame 1 with no retry budget, reproducing the historical black-frame \
+         defect's precondition on demand so it can be proven to fail loudly instead of writing the blank frame.\n\
          \n\
          --debug-map-mode industry[:<good>]: industry mode shows exactly one commodity's own map; \
          <good> selects which one (food|energy|steel|machinery|munitions|arms), e.g. \
@@ -101,6 +106,12 @@ struct Args {
     debug_select_units: bool,
     debug_camera_region: Option<String>,
     debug_camera_zoom: f32,
+    /// `--debug-force-blank-screenshot` (hidden, verification-only -
+    /// `ScreenshotConfig::debug_force_blank`'s own doc): not a real capture
+    /// option, exists purely so `screenshot_acceptance.rs` can reproduce the
+    /// historical black-frame defect's precondition on demand and prove the
+    /// fix refuses to write it out.
+    debug_force_blank_screenshot: bool,
     /// `--cjk-font <path>`: overrides `apps/game/src/app/fonts.rs`'s
     /// platform-specific search entirely - see that module's own doc.
     cjk_font: Option<String>,
@@ -139,6 +150,7 @@ fn parse_args() -> Args {
     let mut debug_select_units = false;
     let mut debug_camera_region = None;
     let mut debug_camera_zoom = DEFAULT_DEBUG_CAMERA_ZOOM;
+    let mut debug_force_blank_screenshot = false;
     let mut cjk_font = None;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -195,6 +207,7 @@ fn parse_args() -> Args {
                 let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--debug-camera-zoom expects a value"));
                 debug_camera_zoom = v.parse().unwrap_or_else(|_| print_usage_and_exit("--debug-camera-zoom expects a number"));
             }
+            "--debug-force-blank-screenshot" => debug_force_blank_screenshot = true,
             "--cjk-font" => {
                 cjk_font = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--cjk-font expects a path")));
             }
@@ -249,6 +262,7 @@ fn parse_args() -> Args {
         debug_select_units,
         debug_camera_region,
         debug_camera_zoom,
+        debug_force_blank_screenshot,
         cjk_font,
     }
 }
@@ -464,6 +478,7 @@ fn main() {
         select_units: args.debug_select_units,
         camera_focus_region: debug_camera_region,
         camera_zoom: args.debug_camera_zoom,
+        debug_force_blank: args.debug_force_blank_screenshot,
     });
 
     archipelago_game::app::run(world, args.seed, scenario_name, args.days, screenshot, play_config, args.cjk_font);

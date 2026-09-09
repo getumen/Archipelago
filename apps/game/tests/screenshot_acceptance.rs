@@ -44,6 +44,22 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// The three `#[ignore]`d tests below each spawn a real Bevy/wgpu window in
+/// its own subprocess (`run_and_decode`'s own doc). Confirmed by hand: this
+/// machine's GPU/window stack flakes when three of them run concurrently
+/// (`cargo test -- --ignored`'s default parallelism runs every ignored test
+/// as a thread in this same binary) - one run failed to write its PNG at
+/// all, a second crashed with SIGSEGV - while the exact same three, one at a
+/// time (`--test-threads=1`), pass cleanly every time. `Command::new` still
+/// spawns a genuinely separate OS process for each window, so a plain
+/// in-process `Mutex` shared across all three test *functions* is enough to
+/// serialize them without requiring `--test-threads=1` to be remembered by
+/// hand at every call site (including `CLAUDE.md`'s own documented `cargo
+/// test -p archipelago-game --test scenario_acceptance -- --ignored`-style
+/// invocations, none of which pass it).
+static GUI_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Runs `archipelago-game --scenario scenarios/japan_hex.json --seed 2
 /// --screenshot <tmp> <extra_args>` (via `CARGO_BIN_EXE_archipelago-game`,
@@ -111,6 +127,7 @@ fn diff_fraction(a: &image::RgbImage, b: &image::RgbImage) -> f32 {
 #[test]
 #[ignore = "spawns a real Bevy/wgpu window; needs a working X11 DISPLAY"]
 fn screenshot_at_small_day_is_not_black() {
+    let _guard = GUI_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let img = run_and_decode("archipelago_screenshot_acceptance_day5.png", &["--screenshot-at-day".to_string(), "5".to_string()]);
     let total = img.pixels().count();
     let non_black = img.pixels().filter(|p| p.0 != [0, 0, 0]).count();
@@ -173,6 +190,7 @@ fn screenshot_at_small_day_is_not_black() {
 #[test]
 #[ignore = "spawns a real Bevy/wgpu window; needs a working X11 DISPLAY"]
 fn screenshot_at_day_captures_that_day_not_a_later_one() {
+    let _guard = GUI_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Must be at or past the render-warmup floor - see this test's own doc
     // for why `--screenshot-after DAY` only equals world day `DAY` exactly
     // from that point on. The `+ 5` margin keeps this comfortably past the
@@ -192,6 +210,78 @@ fn screenshot_at_day_captures_that_day_not_a_later_one() {
          the render-warmup floor was satisfied: got {:.4}% of sampled pixels differing",
         DIFF_THRESHOLD * 100.0,
         diff * 100.0,
+    );
+}
+
+/// The defect `MIN_RENDER_WARMUP_FRAMES` alone used to reintroduce on a
+/// slower GPU/driver/cold shader cache: a frame count is not a
+/// render-readiness signal, so a capture that fires before the pipeline is
+/// actually ready is still a real, valid, entirely black PNG - and the old
+/// single-shot `maybe_capture_screenshot` would write it out and exit 0
+/// regardless. `app::screenshot::handle_screenshot_captured` is supposed to
+/// catch this by inspecting the pixels themselves (`is_blank`) before ever
+/// calling a capture a success, retrying up to `MAX_BLANK_CAPTURE_ATTEMPTS`
+/// times and then failing loudly.
+///
+/// `std::process::exit` can't be exercised by calling into the tool
+/// in-process (it would kill the test runner), and this real machine's
+/// pipeline reliably finishes warming up within a handful of frames
+/// (`MIN_RENDER_WARMUP_FRAMES`'s own doc), so there is no way to make a real
+/// GPU stay blank for the whole `MAX_BLANK_CAPTURE_ATTEMPTS` budget by
+/// waiting - the tool would simply recover on retry, which is the correct
+/// behavior, not the defect. `--debug-force-blank-screenshot`
+/// (`ScreenshotConfig::debug_force_blank`'s own doc) reproduces the defect's
+/// actual precondition honestly instead: it fires the very first capture
+/// attempt on frame 1 (well inside the real, measured black-frame window)
+/// with the retry budget shrunk to 1, i.e. zero retries - the same shape of
+/// race the original bug report hit, just with the tolerance for it removed
+/// rather than the GPU slowed down. This exercises the exact same
+/// `is_blank`/`handle_screenshot_captured` code path a real slow pipeline
+/// would.
+///
+/// Confirmed this can fail: before this task's fix, this flag did not exist
+/// and `maybe_capture_screenshot` had no blank check at all - it would have
+/// written the black PNG from frame 1 and exited 0, failing the assertions
+/// below (a `0` exit status, and a written file).
+#[test]
+#[ignore = "spawns a real Bevy/wgpu window; needs a working X11 DISPLAY"]
+fn a_capture_that_never_becomes_non_blank_is_refused_not_written() {
+    let _guard = GUI_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_archipelago-game"));
+    let out_path = std::env::temp_dir().join("archipelago_screenshot_acceptance_forced_blank.png");
+    let _ = std::fs::remove_file(&out_path);
+
+    let output = Command::new(&bin)
+        .args([
+            "--scenario",
+            "../../scenarios/japan_hex.json",
+            "--seed",
+            "2",
+            "--screenshot",
+            out_path.to_str().expect("temp path must be valid UTF-8"),
+            "--screenshot-at-day",
+            "0",
+            "--debug-force-blank-screenshot",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to launch {}: {e}", bin.display()));
+
+    assert!(
+        !output.status.success(),
+        "a capture that never becomes non-blank must exit non-zero, not silently succeed - got status {} \
+         (stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("uniform colour") || stderr.contains("blank"),
+        "the failure must say what went wrong (a blank/uniform-colour capture), got: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "a refused capture must never write a file at all - found one at {}",
+        out_path.display()
     );
 }
 

@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, VecDeque};
 use bevy::prelude::*;
 
 pub use map_mode::MapMode;
-pub use screenshot::{ScreenshotConfig, ScreenshotTrigger, MIN_RENDER_WARMUP_FRAMES};
+pub use screenshot::{ScreenshotConfig, ScreenshotTrigger, MAX_BLANK_CAPTURE_ATTEMPTS, MIN_RENDER_WARMUP_FRAMES};
 
 use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::action::Action;
@@ -670,6 +670,11 @@ pub fn run(
         .insert_resource(panels::UnitPanelSlots::default())
         .insert_resource(panels::InterdictPanelSlots::default())
         .insert_resource(NewspaperState { period_start: start_day, open: debug_open_newspaper, ..Default::default() })
+        // Cross-attempt state for `screenshot::maybe_capture_screenshot`/
+        // `handle_screenshot_captured` (that resource's own doc) - always
+        // present, like every other resource in this list, and inert
+        // whenever there is no `ScreenshotConfig` for it to coordinate.
+        .init_resource::<screenshot::ScreenshotAttempts>()
         .add_systems(Startup, setup::setup)
         .add_systems(
             Update,
