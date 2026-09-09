@@ -3,8 +3,28 @@
 use std::fmt;
 
 use crate::diplomacy::{Treaty, TreatyTerm};
-use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use crate::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
+use crate::transport::TransportNodeKind;
 use crate::world::Station;
+
+/// What a `NodeStruck` sortie actually achieved, so a reader can tell a
+/// decisive raid from a wasted one.
+///
+/// Three cases, because a boolean collapsed two of them into a sentence that
+/// was false either way (`codex review`, P2, on `Event::NodeStruck`'s own
+/// doc): the strike can cross the operational threshold, leave a still-
+/// working node still working, or land on something that was already rubble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrikeOutcome {
+    /// The strike crossed `balance::NODE_OPERATIONAL_THRESHOLD` - this
+    /// sortie is what took the node out.
+    KnockedOut,
+    /// The node absorbed the damage and is still working.
+    StillOperational,
+    /// The node was already below the threshold before this sortie. Nothing
+    /// was achieved that had not already been achieved.
+    AlreadyDown,
+}
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -158,6 +178,41 @@ pub enum Event {
         to: FactionId,
         terms: Vec<TreatyTerm>,
     },
+    /// `Action::StrikeNode` (docs/phase10-spec.md "3. 阻止": "飛行場と港への
+    /// 攻撃") actually landed - `action::apply_strike_node` has no `&mut
+    /// Vec<Event>` of its own to write into (it runs inside `Simulation::
+    /// apply`, not a tick system), so it queues this onto `World::
+    /// action_log`, the same "action appliers push here" shape `Diplomacy::
+    /// log`/`tick_diplomacy` already established, drained by `Simulation::
+    /// step_timed` right alongside `Diplomacy::log`. Before this variant
+    /// existed, a whole bombing campaign left nothing in the event log or
+    /// newspaper at all - see this event's own defect writeup.
+    /// `outcome` says what the sortie actually achieved. A bare boolean
+    /// could not (`codex review`, P2): read as a *transition* it called a
+    /// repeat raid on rubble "not knocked out", and every formatter renders
+    /// that as "still operational" - the opposite of the truth; read as a
+    /// *state* it claimed a fresh knockout on every wasted repeat. Three
+    /// cases need three values.
+    NodeStruck {
+        attacker: FactionId,
+        defender: FactionId,
+        node: TransportNodeId,
+        region: RegionId,
+        node_kind: TransportNodeKind,
+        outcome: StrikeOutcome,
+    },
+    /// `Action::InterdictLine`'s twin of `NodeStruck`, same reason it exists
+    /// and the same `World::action_log` queuing path. `capacity_cut` is
+    /// whether `line` actually had any `Condition` left to lose - `false`
+    /// only when it was already fully severed (`Condition` at `0.0`) before
+    /// this hit, so a reader can tell a raid that mattered from one thrown
+    /// at an already-dead route.
+    LineInterdicted {
+        attacker: FactionId,
+        defender: FactionId,
+        line: TransportLineId,
+        capacity_cut: bool,
+    },
 }
 
 impl fmt::Display for Event {
@@ -295,6 +350,28 @@ impl fmt::Display for Event {
                 f,
                 "faction {} tried to accept faction {}'s natural-language proposal, but its terms no longer held ({} term{})",
                 to.0, from.0, terms.len(), if terms.len() == 1 { "" } else { "s" }
+            ),
+            Event::NodeStruck { attacker, defender, node, region, node_kind, outcome } => write!(
+                f,
+                "faction {} strikes {} node {} in region {} (held by faction {}){}",
+                attacker.0,
+                node_kind.key(),
+                node.0,
+                region.0,
+                defender.0,
+                match outcome {
+                    StrikeOutcome::KnockedOut => ", knocking it out of operation",
+                    StrikeOutcome::StillOperational => ", but it stays operational",
+                    StrikeOutcome::AlreadyDown => ", which was already out of operation",
+                }
+            ),
+            Event::LineInterdicted { attacker, defender, line, capacity_cut } => write!(
+                f,
+                "faction {} interdicts transport line {} (held by faction {}){}",
+                attacker.0,
+                line.0,
+                defender.0,
+                if *capacity_cut { ", cutting its capacity" } else { ", but it was already severed" }
             ),
         }
     }

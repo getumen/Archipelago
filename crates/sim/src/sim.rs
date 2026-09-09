@@ -119,6 +119,15 @@ impl Simulation {
         let t0 = Instant::now();
         diplomacy::tick_diplomacy(&mut self.world, &mut events);
 
+        // Defect fix: `Action::StrikeNode`/`Action::InterdictLine` queue
+        // their own events onto `World::action_log` the instant they land
+        // (`action::apply_strike_node`/`apply_interdict_line` run inside
+        // `Simulation::apply`, which has no `&mut Vec<Event>` of its own to
+        // write into) - drained here, right alongside `Diplomacy::log`
+        // above, the exact same "action appliers push, the next tick drains
+        // first thing" convention.
+        events.append(&mut self.world.action_log);
+
         // Stage 3C (docs/phase3-spec.md "Stage 3C — 国家方針"): counts down
         // every faction's in-progress `NationalFocus` switch, the same
         // "maintenance runs before anything reads today's state" slot

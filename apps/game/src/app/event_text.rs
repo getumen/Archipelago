@@ -15,9 +15,18 @@
 //! table`, `print_final_board`, ...) that make up the rest of that file.
 
 use archipelago_sim::diplomacy::{Treaty, TreatyTerm};
-use archipelago_sim::event::Event;
+use archipelago_sim::event::{Event, StrikeOutcome};
 use archipelago_sim::good::Good;
+use archipelago_sim::transport::TransportNodeKind;
 use archipelago_sim::world::{Station, World};
+
+fn node_kind_ja(kind: TransportNodeKind) -> &'static str {
+    match kind {
+        TransportNodeKind::Airfield => "飛行場",
+        TransportNodeKind::Port => "港",
+        TransportNodeKind::Depot | TransportNodeKind::Junction => "拠点",
+    }
+}
 
 fn treaty_label(treaty: Treaty) -> &'static str {
     match treaty {
@@ -135,5 +144,28 @@ pub(super) fn format_event(world: &World, event: &Event) -> String {
             world.faction(*from).name,
             terms_ja(world, terms)
         ),
+        Event::NodeStruck { attacker, defender, node, node_kind, outcome, .. } => format!(
+            "空爆: {} 軍が {} の{}「{}」を空爆{}",
+            world.faction(*attacker).name,
+            world.faction(*defender).name,
+            node_kind_ja(*node_kind),
+            world.transport_node(*node).name,
+            match outcome {
+                StrikeOutcome::KnockedOut => " (機能停止)",
+                StrikeOutcome::StillOperational => " (稼働継続)",
+                StrikeOutcome::AlreadyDown => " (既に停止)",
+            },
+        ),
+        Event::LineInterdicted { attacker, defender, line, capacity_cut } => {
+            let l = world.transport_line(*line);
+            format!(
+                "阻止: {} 軍が {} の輸送路線「{}⇔{}」を攻撃{}",
+                world.faction(*attacker).name,
+                world.faction(*defender).name,
+                world.transport_node(l.from).name,
+                world.transport_node(l.to).name,
+                if *capacity_cut { " (輸送力低下)" } else { " (既に途絶)" },
+            )
+        }
     }
 }

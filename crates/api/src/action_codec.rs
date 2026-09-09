@@ -533,6 +533,8 @@ pub fn event_to_value(event: &archipelago_sim::event::Event) -> Value {
         Event::NaturalLanguageAccepted { .. } => "natural_language_accepted",
         Event::NaturalLanguageRejected { .. } => "natural_language_rejected",
         Event::NaturalLanguageTermsInvalid { .. } => "natural_language_terms_invalid",
+        Event::NodeStruck { .. } => "node_struck",
+        Event::LineInterdicted { .. } => "line_interdicted",
     };
     Value::obj(vec![("kind", Value::str(kind)), ("text", Value::str(event.to_string()))])
 }

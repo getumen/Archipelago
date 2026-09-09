@@ -5,12 +5,25 @@
 
 use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::diplomacy::Treaty;
-use archipelago_sim::event::Event;
+use archipelago_sim::event::{Event, StrikeOutcome};
 use archipelago_sim::focus;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::sim::Outcome;
+use archipelago_sim::transport::TransportNodeKind;
 use archipelago_sim::world::{Domain, Station, VictoryCondition, World};
+
+/// Japanese label for a `TransportNodeKind`, used by `print_event`'s
+/// `NodeStruck` line - mirrors `apps/game`'s `event_text::node_kind_ja`
+/// (small deliberate duplicate, same reason `treaty_label` above is: this
+/// crate has no library target for `apps/game` to import from).
+fn node_kind_label(kind: TransportNodeKind) -> &'static str {
+    match kind {
+        TransportNodeKind::Airfield => "飛行場",
+        TransportNodeKind::Port => "港",
+        TransportNodeKind::Depot | TransportNodeKind::Junction => "拠点",
+    }
+}
 
 /// Japanese label for a `Treaty`, used by `print_event`'s Stage 3B lines.
 fn treaty_label(treaty: Treaty) -> &'static str {
@@ -179,6 +192,29 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
             world.faction(*from).name,
             terms.len(),
         ),
+        Event::NodeStruck { attacker, defender, node, node_kind, outcome, .. } => format!(
+            "空爆: {} 軍が {} の{}「{}」を空爆{}",
+            world.faction(*attacker).name,
+            world.faction(*defender).name,
+            node_kind_label(*node_kind),
+            world.transport_node(*node).name,
+            match outcome {
+                StrikeOutcome::KnockedOut => " (機能停止)",
+                StrikeOutcome::StillOperational => " (稼働継続)",
+                StrikeOutcome::AlreadyDown => " (既に停止)",
+            },
+        ),
+        Event::LineInterdicted { attacker, defender, line, capacity_cut } => {
+            let l = world.transport_line(*line);
+            format!(
+                "阻止: {} 軍が {} の輸送路線「{}⇔{}」を攻撃{}",
+                world.faction(*attacker).name,
+                world.faction(*defender).name,
+                world.transport_node(l.from).name,
+                world.transport_node(l.to).name,
+                if *capacity_cut { " (輸送力低下)" } else { " (既に途絶)" },
+            )
+        }
     };
     println!("[day {day:4}] {line}");
 }

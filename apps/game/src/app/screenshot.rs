@@ -138,16 +138,58 @@ pub(super) fn apply_debug_camera(
     ortho.scale = config.camera_zoom;
 }
 
+/// Defect fix (`--screenshot-at-day <D>` for small `D` used to write a
+/// fully black PNG and exit 0): the primary window's swap-chain surface and
+/// sprite/mesh render pipelines are not ready on the first frames after
+/// startup - `bevy_render`'s own `submit_screenshot_commands` silently
+/// skips a screenshot request whenever `ExtractedWindow::
+/// swap_chain_texture_view` is still `None`, and even once the surface
+/// exists, `PipelineCache`'s async shader specialization means the very
+/// first frames actually presented can render nothing but the window's
+/// clear color - so a screenshot taken too early captures a real, valid,
+/// entirely black frame rather than failing.
+///
+/// Confirmed, not assumed: `--screenshot-after <n>` against this same
+/// build/machine/scenario was run five times each at `n = 2` and `n = 3` -
+/// `n = 2` produced a 0.0000%-non-black PNG in all five runs, `n = 3`
+/// produced a 100%-non-black PNG in all five runs. The boundary is exactly
+/// this sharp and perfectly repeatable (not a flaky race that "usually"
+/// clears by some frame), which is what makes a frame-count floor the right
+/// fix here rather than a guessed sleep: it is compensating for a fixed
+/// number of engine warm-up frames, not for indeterminate timing. This also
+/// explains the original bug report precisely - `ScreenshotTrigger::AtDay`
+/// runs at `Speed::X20` (`mod::run`'s own doc), so `--screenshot-at-day 5`
+/// always fires on frame 1 (day 5 is already behind day 20 by the end of
+/// that first frame's tick loop) and `--screenshot-at-day 100` fires on
+/// frame 5 - comfortably past the floor, which is why only small `D` ever
+/// showed the defect.
+///
+/// Set well above the observed 2-frame failure/3-frame success boundary as
+/// a margin for a slower GPU/driver than this one, while staying cheap in
+/// wall-clock time regardless (a handful of frames, not a fixed sleep).
+///
+/// `pub`, not private: `main.rs` validates `--screenshot-after <frames>`
+/// against this same floor at parse time (see its own call site) - a
+/// requested frame count this module could never actually honor (the
+/// render pipeline simply isn't up yet) must be rejected loudly, not
+/// silently rounded up to this value the way `maybe_capture_screenshot`'s
+/// own `ready` check below does internally for `AtDay`. Kept as the same
+/// single constant rather than a second copy so the two can never drift
+/// apart.
+pub const MIN_RENDER_WARMUP_FRAMES: u32 = 10;
+
 /// Once `ScreenshotConfig::trigger` fires - `AfterFrames(n)`: this many
 /// client frames have elapsed; `AtDay(d)`: the simulated day has reached
 /// `d` (read from `SimRes`, already advanced this frame by `sim_control::
 /// advance_simulation`, which this system runs `.after(..)` - `app::run`'s
-/// own doc) - spawns a `Screenshot` of the primary window and stops
-/// checking (`triggered`) so it fires exactly once. The observers attached
-/// to that entity save the PNG (`save_to_disk`) and then queue `AppExit` -
-/// both run once `ScreenshotCaptured` fires (asynchronously, a few frames
-/// later, once the GPU readback lands), so the process always exits only
-/// after the file is actually written, never before.
+/// own doc) - *and* at least `MIN_RENDER_WARMUP_FRAMES` have elapsed either
+/// way (see that constant's own doc for why this floor is required at all)
+/// - spawns a `Screenshot` of the primary window and stops checking
+/// (`triggered`) so it fires exactly once. The observers attached to that
+/// entity save the PNG (`save_to_disk`) and then queue `AppExit` - both run
+/// once `ScreenshotCaptured` fires (asynchronously, a few frames later,
+/// once the GPU readback lands), so the process always exits only after the
+/// file is actually written, never before.
 pub(super) fn maybe_capture_screenshot(
     mut commands: Commands,
     config: Option<Res<ScreenshotConfig>>,
@@ -162,7 +204,7 @@ pub(super) fn maybe_capture_screenshot(
         return;
     }
     *frame_count += 1;
-    let ready = match config.trigger {
+    let target_reached = match config.trigger {
         ScreenshotTrigger::AfterFrames(frames) => *frame_count >= frames,
         // `>=`, not `==`: at `Speed::X5`/`X20` several days tick within one
         // frame (`sim_control`'s own module doc - ticks per frame, not per
@@ -170,6 +212,7 @@ pub(super) fn maybe_capture_screenshot(
         // single frame rather than ever landing on it precisely.
         ScreenshotTrigger::AtDay(day) => sim.0.world().day >= day,
     };
+    let ready = target_reached && *frame_count >= MIN_RENDER_WARMUP_FRAMES;
     if !ready {
         return;
     }

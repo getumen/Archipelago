@@ -16,8 +16,8 @@ use super::overlay;
 use super::palette::faction_color;
 use super::{
     AirfieldMarker, EventLogText, FactionPanelText, InspectText, MainCamera, OwnerBorderMarker,
-    PlayerPanelText, RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii, RightColumnRoot,
-    SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
+    PlayerPanelText, PortMarker, RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii,
+    RightColumnRoot, SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -248,6 +248,20 @@ const AIRFIELD_MARKER_RADIUS: f32 = 5.0;
 /// never compete for the same screen position (opposite corners).
 const Z_AIRFIELD: f32 = 0.3;
 
+/// Defect fix (a struck port had no map indicator at all, unlike a struck
+/// airfield's own `AirfieldMarker`): the port-status twin of
+/// `AIRFIELD_MARKER_RADIUS`, same size, same `overlay::
+/// AIRFIELD_MARKER_OPERATIONAL`/`AIRFIELD_MARKER_STRUCK` colors (extending
+/// that existing operational/struck marker mechanism to ports rather than
+/// inventing a second one) - spawned at the one remaining free corner
+/// (`+radius*0.7, -radius*0.7`), so a region with a construction project,
+/// a blockaded port, an airfield, *and* a port under strike can still show
+/// all four markers without any two overlapping.
+const PORT_MARKER_RADIUS: f32 = AIRFIELD_MARKER_RADIUS;
+/// Port marker's own layer - alongside `Z_AIRFIELD`/`Z_CONSTRUCTION`, since
+/// none of the three ever compete for the same screen position.
+const Z_PORT: f32 = 0.3;
+
 pub(super) fn region_radius(population: f32) -> f32 {
     (population.max(0.0).sqrt() * POP_SCALE).clamp(MIN_REGION_RADIUS, MAX_REGION_RADIUS)
 }
@@ -471,6 +485,19 @@ pub(super) fn setup(
             Transform::from_xyz(x - radius * 0.7, y + radius * 0.7, Z_AIRFIELD),
             Visibility::Hidden,
             AirfieldMarker(region.id),
+        ));
+
+        // Defect fix: the port twin of the airfield marker just above
+        // (`PORT_MARKER_RADIUS`'s own doc) - pre-spawned hidden for every
+        // region, shown and recolored only while `MapMode::Air` is active
+        // and this region actually has a port node - `overlay::
+        // sync_port_markers`.
+        commands.spawn((
+            Mesh2d(meshes.add(Circle::new(PORT_MARKER_RADIUS))),
+            MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::NONE))),
+            Transform::from_xyz(x + radius * 0.7, y - radius * 0.7, Z_PORT),
+            Visibility::Hidden,
+            PortMarker(region.id),
         ));
 
         let [dx, dy] = region_label_dirs[region.id.index()];

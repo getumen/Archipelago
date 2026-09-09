@@ -10,6 +10,7 @@ use crate::balance::{
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
+use crate::event::Event;
 use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
@@ -1433,9 +1434,24 @@ fn apply_interdict_line(
         return Err(ActionError::NoForceInRange);
     }
 
-    let next = (existing.condition.get() - LINE_INTERDICTION_DAMAGE).max(0.0);
+    let before = existing.condition.get();
+    let next = (before - LINE_INTERDICTION_DAMAGE).max(0.0);
     world.transport_lines[line.index()].condition =
         Condition::new(next).expect("clamped into 0.0..=1.0 above");
+
+    // Defect fix: this action used to leave no trace at all (no `Event`
+    // anywhere in this function) - queued the same way `Diplomacy::log`
+    // already queues events from inside `Simulation::apply` (see `World::
+    // action_log`'s own doc), drained into the event log/newspaper by
+    // `Simulation::step_timed` next tick. `capacity_cut` is
+    // whether the line actually had any condition left to lose - `false`
+    // only when it was already fully severed before this hit.
+    world.action_log.push(Event::LineInterdicted {
+        attacker: faction,
+        defender: owner_a,
+        line,
+        capacity_cut: before > 0.0,
+    });
     Ok(())
 }
 
@@ -1551,6 +1567,7 @@ fn apply_strike_node(
     if existing.kind != TransportNodeKind::Airfield && existing.kind != TransportNodeKind::Port {
         return Err(ActionError::NodeNotStrikeable);
     }
+    let node_kind = existing.kind;
     let owner = world.region(existing.region).owner;
     if owner == faction || !world.diplomacy.is_at_war(faction, owner) {
         return Err(ActionError::NodeNotHostile);
@@ -1566,10 +1583,38 @@ fn apply_strike_node(
     // after the losses below some of those squadrons may no longer reach.
     let refresh_origins = air::strike_origin_regions(world, region, faction);
 
+    let was_operational = existing.operational();
+
     let factor = air::air_superiority_factor(world, region, faction);
     let next = (existing.condition.get() - NODE_STRIKE_DAMAGE * factor).max(0.0);
     world.transport_nodes[node.index()].condition =
         Condition::new(next).expect("clamped into 0.0..=1.0 above");
+
+    // Defect fix: this action used to leave no trace at all (no `Event`
+    // anywhere in this function) - queued the same way `Diplomacy::log`
+    // already queues events from inside `Simulation::apply` (see `World::
+    // action_log`'s own doc), drained into the event log/newspaper by
+    // `Simulation::step_timed` next tick. `knocked_out` is read
+    // fresh off the just-mutated `Condition` (never sampled before the
+    // strike landed), so it reports whether the node actually sits below
+    // `balance::NODE_OPERATIONAL_THRESHOLD` now, not merely that a strike
+    // was ordered against it.
+    world.action_log.push(Event::NodeStruck {
+        attacker: faction,
+        defender: owner,
+        node,
+        region,
+        node_kind,
+        // Three-way, not a boolean (`codex review`, P2 twice over): a
+        // transition alone made a repeat raid on rubble read as "still
+        // operational", and a state alone claimed a fresh knockout on every
+        // wasted repeat. `was_operational` is read before the damage above.
+        outcome: match (was_operational, world.transport_nodes[node.index()].operational()) {
+            (true, false) => crate::event::StrikeOutcome::KnockedOut,
+            (true, true) => crate::event::StrikeOutcome::StillOperational,
+            (false, _) => crate::event::StrikeOutcome::AlreadyDown,
+        },
+    });
 
     // This sortie is judged against the defence it actually flew into -
     // `factor` above was read before the node took any damage, so

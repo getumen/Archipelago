@@ -56,6 +56,14 @@ features = [
 archipelago-sim = { path = "../../crates/sim" }
 archipelago-agents = { path = "../../crates/agents" }
 
+# Test-only, and only to decode a `--screenshot` PNG back into pixels
+# (`tests/screenshot_acceptance.rs`'s black-frame regression check) - not a
+# new dependency in practice, since `bevy_render`'s own `png` feature above
+# already pulls this exact crate+version into the tree; this just exposes it
+# to test code instead of leaving it bevy-internal.
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [lib]
 name = "archipelago_game"
 path = "src/lib.rs"

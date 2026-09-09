@@ -530,12 +530,22 @@ pub(super) fn legend_entries(mode: MapMode, world: &SimWorld, active_good: Good)
         // Stage 10D: the fill itself reuses `Political`'s own faction
         // palette (this mode's own `legend_header` says so directly), so
         // this legend covers only what's genuinely new here - the neutral
-        // "nobody's sky" baseline, and the two airfield-marker states
-        // `overlay::sync_airfield_markers` draws.
+        // "nobody's sky" baseline, and the airfield/port marker states
+        // `overlay::sync_airfield_markers`/`sync_port_markers` draw. Port
+        // rows added by this task's own defect fix (a struck port used to
+        // have no map indicator at all) - they intentionally reuse the
+        // airfield rows' exact colors (`overlay::sync_port_markers`'s own
+        // doc: extending the same mechanism, not a second one), so this
+        // legend names both in one row rather than doubling the swatches.
+        //
+        // Three states, not two: a region may declare more than one airfield
+        // or port, and a green/red pair hid a half-wrecked region either way
+        // round (`overlay::AIRFIELD_MARKER_PARTIAL`'s own doc).
         MapMode::Air => vec![
             (super::palette::NEUTRAL, "制空権なし（中立・優勢勢力なし）".to_string(), false),
-            (super::overlay::AIRFIELD_MARKER_OPERATIONAL, "飛行場：稼働中".to_string(), false),
-            (super::overlay::AIRFIELD_MARKER_STRUCK, "飛行場：損傷（非稼働）".to_string(), false),
+            (super::overlay::AIRFIELD_MARKER_OPERATIONAL, "飛行場・港：稼働中".to_string(), false),
+            (super::overlay::AIRFIELD_MARKER_PARTIAL, "飛行場・港：一部が損傷".to_string(), false),
+            (super::overlay::AIRFIELD_MARKER_STRUCK, "飛行場・港：損傷（非稼働）".to_string(), false),
         ],
     }
 }

@@ -4,6 +4,7 @@
 use crate::balance::{INFRA_DAMAGE_SHARE, NODE_BASE, NODE_INFRA, NODE_PORT, WORKFORCE_SHARE};
 use crate::construction::Construction;
 use crate::diplomacy::Diplomacy;
+use crate::event::Event;
 use crate::focus::NationalFocus;
 use crate::good::{Good, GOOD_COUNT};
 use crate::group::GROUP_COUNT;
@@ -846,6 +847,17 @@ pub struct World {
     /// which regions have a port (`Region::port`'s own doc).
     pub transport_nodes: Vec<TransportNode>,
     pub transport_lines: Vec<TransportLine>,
+    /// Events emitted by `action::apply_strike_node`/`apply_interdict_line`
+    /// the instant a strike or an interdiction actually lands - those
+    /// appliers run inside `Simulation::apply`, which has no `&mut
+    /// Vec<Event>` of its own to write into, so they queue here instead. The
+    /// same shape `Diplomacy::log` already established for `Action::
+    /// ProposeTreaty`/`AcceptTreaty`/`RejectTreaty`/`BreakTreaty` (see that
+    /// field's own doc); `Simulation::step_timed` drains this into the day's
+    /// event list right alongside `Diplomacy::log`, so from the outside
+    /// these events appear exactly like every other tick-system event. Not
+    /// `pub`: only `action.rs` pushes and only `sim.rs` drains.
+    pub(crate) action_log: Vec<Event>,
     pub day: u32,
     /// Stage 3B (docs/phase3-spec.md "Stage 3B — 外交関係と条約"): every
     /// pair's `Stance`/`opinion`/treaty grants and the pending-proposal

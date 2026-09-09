@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, VecDeque};
 use bevy::prelude::*;
 
 pub use map_mode::MapMode;
-pub use screenshot::{ScreenshotConfig, ScreenshotTrigger};
+pub use screenshot::{ScreenshotConfig, ScreenshotTrigger, MIN_RENDER_WARMUP_FRAMES};
 
 use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::action::Action;
@@ -284,6 +284,20 @@ pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
     }
 }
 
+/// Japanese label for a `RejectionTarget`, used only by `sim_control::
+/// advance_simulation`'s durable event-log line for a rejection (defect fix:
+/// a rejection used to be visible for exactly the one tick it happened, in
+/// the per-panel corner box below only, and nowhere else - see
+/// `advance_simulation`'s own doc for where the durable copy lives and why).
+pub(crate) fn rejection_target_ja(target: RejectionTarget) -> &'static str {
+    match target {
+        RejectionTarget::Region(_) => "地域",
+        RejectionTarget::Unit => "部隊",
+        RejectionTarget::Policy => "政策",
+        RejectionTarget::Diplomacy => "外交",
+    }
+}
+
 /// The human/replay faction's most recent rejected orders, each tagged with
 /// which panel issued it (docs/phase7-spec.md "命令の可否を隠さない",
 /// extended per Stage 8B to attach the reason to the issuing panel, not only
@@ -486,6 +500,15 @@ pub(crate) struct OwnerBorderMarker(pub RegionId);
 /// (`overlay::sync_airfield_markers`).
 #[derive(Component)]
 pub(crate) struct AirfieldMarker(pub RegionId);
+
+/// Defect fix (a struck port had no map indicator at all, even though a
+/// struck airfield already gets `AirfieldMarker`): the port twin of
+/// `AirfieldMarker`, same "pre-spawn hidden alongside `RegionMarker`, toggle
+/// `Visibility`" convention, same `MapMode::Air`-gated existence check
+/// (`world.has_port_node`) and operational/struck coloring
+/// (`world.port_node_operational`) - `overlay::sync_port_markers`.
+#[derive(Component)]
+pub(crate) struct PortMarker(pub RegionId);
 
 /// Builds and runs the Bevy `App`. `world` must already be validated
 /// (`archipelago_sim::scenario::build_world`/`load_str`/`load_file`) -
@@ -709,16 +732,19 @@ pub fn run(
             // be this frame's own post-tick state, same as every system in
             // the chain above - `.after(...)` alone (no `.chain()`, nothing
             // else in this call to chain against) gets that without needing
-            // to grow that tuple at all. The four are independent of each
+            // to grow that tuple at all. The five are independent of each
             // other (disjoint entities: labels, `OwnerBorderMarker`
-            // materials, legend UI text, and - Stage 10D - `AirfieldMarker`
-            // materials), so no relative order between them is needed either.
+            // materials, legend UI text, and - Stage 10D, extended by this
+            // task's own port-marker defect fix - `AirfieldMarker`/
+            // `PortMarker` materials), so no relative order between them is
+            // needed either.
             Update,
             (
                 visuals::sync_region_label_visibility,
                 visuals::sync_owner_border,
                 map_mode::sync_mode_legend,
                 overlay::sync_airfield_markers,
+                overlay::sync_port_markers,
             )
                 .after(sim_control::advance_simulation),
         )

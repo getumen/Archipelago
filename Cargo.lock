@@ -164,6 +164,7 @@ dependencies = [
  "archipelago-agents",
  "archipelago-sim",
  "bevy",
+ "image",
 ]
 
 [[package]]

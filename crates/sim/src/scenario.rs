@@ -1232,6 +1232,7 @@ impl Scenario {
             sea_zones,
             transport_nodes,
             transport_lines,
+            action_log: Vec::new(),
             day: 0,
             diplomacy,
             victory: self.victory.clone(),

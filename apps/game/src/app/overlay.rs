@@ -86,8 +86,8 @@ use super::palette::Unit01;
 use super::setup::{link_style, Z_LINK, Z_LINK_CHOKEPOINT, Z_LINK_HIGHLIGHT};
 use super::{
     AirfieldMarker, BlockadeVisual, ChokepointMarker, ConstructionMarker, CutLineMarker,
-    LinkVisualMarker, MainCamera, RegionLayout, RegionRadii, SeaZoneCenters, SelectedRegion,
-    SelectedSeaZone, SimRes, SupplyRingMarker,
+    LinkVisualMarker, MainCamera, PortMarker, RegionLayout, RegionRadii, SeaZoneCenters,
+    SelectedRegion, SelectedSeaZone, SimRes, SupplyRingMarker,
 };
 
 /// Chokepoint tint - a link whose flow has reached its own `max_throughput`
@@ -195,6 +195,39 @@ const BLOCKADE_LINE_THICKNESS: f32 = 2.5;
 /// regardless).
 pub(super) const AIRFIELD_MARKER_OPERATIONAL: Color = Color::srgb(0.10, 0.65, 0.60);
 pub(super) const AIRFIELD_MARKER_STRUCK: Color = Color::srgb(0.55, 0.20, 0.15);
+/// Some of the region's nodes of that kind are wrecked and some still work.
+///
+/// A region may declare more than one airfield or port, and a two-colour
+/// marker hid that (`codex review`, P2): keyed on "is any of them working"
+/// it stayed green while one lay in ruins, and keyed on "are they all
+/// working" it would have called a half-functioning region dead. This is
+/// CLAUDE.md's 「『地域はこれを持っているか』と『使えるものをくれ』は同じ
+/// 検索を共有しない」 in its display form - the map has to show the mixture,
+/// not collapse it.
+pub(super) const AIRFIELD_MARKER_PARTIAL: Color = Color::srgb(0.75, 0.55, 0.15);
+
+/// The marker colour for every `kind` node `region` declares: green when
+/// they all work, red when none does, amber when it is a mixture. Shared by
+/// the airfield and port markers so the two can never drift apart.
+fn node_marker_color(world: &archipelago_sim::world::World, region: archipelago_sim::ids::RegionId, kind: archipelago_sim::transport::TransportNodeKind) -> Color {
+    let mut working = 0usize;
+    let mut total = 0usize;
+    for node in &world.transport_nodes {
+        if node.region == region && node.kind == kind {
+            total += 1;
+            if node.operational() {
+                working += 1;
+            }
+        }
+    }
+    if working == 0 {
+        AIRFIELD_MARKER_STRUCK
+    } else if working == total {
+        AIRFIELD_MARKER_OPERATIONAL
+    } else {
+        AIRFIELD_MARKER_PARTIAL
+    }
+}
 
 /// In-progress-construction marker tint - also referenced by the legend
 /// (`setup::spawn_legend`) so its swatch always matches exactly what
@@ -457,11 +490,40 @@ pub(super) fn sync_airfield_markers(
         }
         *visibility = Visibility::Visible;
         if let Some(mut mat) = materials.get_mut(&material_handle.0) {
-            mat.color = if world.airfield_node_operational(marker.0) {
-                AIRFIELD_MARKER_OPERATIONAL
-            } else {
-                AIRFIELD_MARKER_STRUCK
-            };
+            mat.color = node_marker_color(world, marker.0, archipelago_sim::transport::TransportNodeKind::Airfield);
+        }
+    }
+}
+
+/// Defect fix (a bombed-out port was invisible on the map - a struck
+/// airfield already got a marker via `sync_airfield_markers` above, a
+/// struck port got nothing): `PortMarker`'s exact twin of that system, same
+/// `MapMode::Air` gate, same `AIRFIELD_MARKER_OPERATIONAL`/
+/// `AIRFIELD_MARKER_STRUCK` colors (extending the existing operational/
+/// struck marker mechanism to ports, per this task's own instruction,
+/// rather than inventing a second one) - the only difference is which
+/// `World` query answers "does this region have the node at all" / "is it
+/// currently operational" (`has_port_node`/`port_node_operational` in place
+/// of `has_airfield_node`/`airfield_node_operational`).
+pub(super) fn sync_port_markers(
+    sim: Res<SimRes>,
+    mode: Res<MapModeRes>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut query: Query<(&PortMarker, &MeshMaterial2d<ColorMaterial>, &mut Visibility)>,
+) {
+    let world = sim.0.world();
+    for (marker, material_handle, mut visibility) in &mut query {
+        if mode.0 != MapMode::Air {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        if !world.has_port_node(marker.0) {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        *visibility = Visibility::Visible;
+        if let Some(mut mat) = materials.get_mut(&material_handle.0) {
+            mat.color = node_marker_color(world, marker.0, archipelago_sim::transport::TransportNodeKind::Port);
         }
     }
 }

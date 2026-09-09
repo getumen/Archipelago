@@ -22,9 +22,10 @@
 //! (`template_summary`) - see `newspaper_falls_back_to_template`.
 
 use archipelago_sim::diplomacy::Treaty;
-use archipelago_sim::event::Event;
+use archipelago_sim::event::{Event, StrikeOutcome};
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::naval;
+use archipelago_sim::transport::TransportNodeKind;
 use archipelago_sim::world::World;
 
 use crate::llm::{truncate_chars, LlmBackend, LlmRequest};
@@ -103,6 +104,18 @@ fn treaty_label(treaty: Treaty) -> &'static str {
     }
 }
 
+/// Japanese label for a `TransportNodeKind`, for the fallback template -
+/// same small, deliberate duplicate `treaty_label` above already is, this
+/// time of `apps/game`'s `event_text::node_kind_ja`/`apps/headless`'s
+/// `report::node_kind_label`.
+fn node_kind_label(kind: TransportNodeKind) -> &'static str {
+    match kind {
+        TransportNodeKind::Airfield => "飛行場",
+        TransportNodeKind::Port => "港",
+        TransportNodeKind::Depot | TransportNodeKind::Junction => "拠点",
+    }
+}
+
 /// The mechanical, backend-free fallback (docs/phase4-spec.md "生成に失敗し
 /// たら、テンプレートによる機械的な要約に落ちる"), and - since Stage 4C's
 /// default headless run has no LLM backend configured at all - the
@@ -142,6 +155,15 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
     let mut own_treaties: Vec<String> = Vec::new();
     let mut own_wars: Vec<String> = Vec::new();
     let mut own_unrest: Vec<&str> = Vec::new();
+    // Defect fix: `Action::StrikeNode`/`Action::InterdictLine` used to emit
+    // no `Event` at all, so a whole bombing campaign vanished from this
+    // template with nothing to show for it. `own_air_ops` is this faction's
+    // own strikes/interdictions against a rival; `struck_at_home` is a
+    // rival's strikes/interdictions against this faction - the same "own
+    // vs happened-to-us" split `own_gained`/`own_lost` already draw for
+    // `RegionCaptured`.
+    let mut own_air_ops: Vec<String> = Vec::new();
+    let mut struck_at_home: Vec<String> = Vec::new();
     let mut rival_moves: Vec<String> = Vec::new();
     let mut rival_turmoil: Vec<String> = Vec::new();
 
@@ -201,6 +223,68 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
             Event::FactionEliminated { faction: f2 } if *f2 != faction => {
                 rival_turmoil.push(format!("{}が全領土を失い脱落した", world.faction(*f2).name))
             }
+            Event::NodeStruck { attacker, defender, node, node_kind, outcome, .. } => {
+                let node_name = &world.transport_node(*node).name;
+                let kind_label = node_kind_label(*node_kind);
+                if *attacker == faction {
+                    own_air_ops.push(format!(
+                        "{}の{}「{}」を空爆{}",
+                        world.faction(*defender).name,
+                        kind_label,
+                        node_name,
+                        match outcome {
+                            StrikeOutcome::KnockedOut => "し機能を停止させた",
+                            StrikeOutcome::StillOperational => "したが機能は継続している",
+                            StrikeOutcome::AlreadyDown => "したが、既に機能を停止していた",
+                        },
+                    ));
+                } else if *defender == faction {
+                    struck_at_home.push(format!(
+                        "{}軍の空爆を受けた{}「{}」{}",
+                        world.faction(*attacker).name,
+                        kind_label,
+                        node_name,
+                        match outcome {
+                            StrikeOutcome::KnockedOut => "は機能を停止した",
+                            StrikeOutcome::StillOperational => "は稼働を継続している",
+                            StrikeOutcome::AlreadyDown => "は既に停止していた",
+                        },
+                    ));
+                } else {
+                    rival_moves.push(format!(
+                        "{}が{}の{}を空爆",
+                        world.faction(*attacker).name,
+                        world.faction(*defender).name,
+                        kind_label,
+                    ));
+                }
+            }
+            Event::LineInterdicted { attacker, defender, line, capacity_cut } => {
+                let l = world.transport_line(*line);
+                let route =
+                    format!("{}⇔{}", world.transport_node(l.from).name, world.transport_node(l.to).name);
+                if *attacker == faction {
+                    own_air_ops.push(format!(
+                        "{}の輸送路線「{}」を攻撃{}",
+                        world.faction(*defender).name,
+                        route,
+                        if *capacity_cut { "し輸送力を低下させた" } else { "したが既に途絶していた" },
+                    ));
+                } else if *defender == faction {
+                    struck_at_home.push(format!(
+                        "輸送路線「{}」が{}軍の攻撃を受け{}",
+                        route,
+                        world.faction(*attacker).name,
+                        if *capacity_cut { "輸送力が低下した" } else { "既に途絶していた" },
+                    ));
+                } else {
+                    rival_moves.push(format!(
+                        "{}が{}の輸送路線を攻撃",
+                        world.faction(*attacker).name,
+                        world.faction(*defender).name,
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -220,6 +304,8 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
         && own_treaties.is_empty()
         && own_wars.is_empty()
         && own_unrest.is_empty()
+        && own_air_ops.is_empty()
+        && struck_at_home.is_empty()
         && blockaded_ports.is_empty();
     if quiet {
         s.push_str("前線に大きな動きはなく、静穏な期間が続いた。");
@@ -251,6 +337,12 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
         }
         if !blockaded_ports.is_empty() {
             s.push_str(&format!("{}は依然として海上封鎖下にある。", blockaded_ports.join("、")));
+        }
+        if !own_air_ops.is_empty() {
+            s.push_str(&format!("航空作戦では{}。", own_air_ops.join("、")));
+        }
+        if !struck_at_home.is_empty() {
+            s.push_str(&format!("{}。政府は被害を限定的と発表している。", struck_at_home.join("、")));
         }
         if !own_treaties.is_empty() {
             s.push_str(&format!("外交面では{}。", own_treaties.join("、")));

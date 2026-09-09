@@ -359,6 +359,49 @@ fn main() {
     if args.screenshot_at_day.is_some() && args.screenshot.is_none() {
         print_usage_and_exit("--screenshot-at-day requires --screenshot <path>");
     }
+    // Fail fast rather than let the run hang forever waiting for a day the
+    // simulation can never reach: `--days <n>` (`args.days`, `Simulation::
+    // outcome`'s own cap) is a hard ceiling on `world.day` - once it's hit
+    // the `Outcome` goes `Stalemate` and `world.day` never advances again
+    // (`app::sim_control::advance_simulation`'s own fail-fast for the same
+    // reason on an *earlier* `Victory` handles the case this can't see at
+    // parse time: a scenario/seed that decides before `--days` is reached).
+    if let Some(day) = args.screenshot_at_day {
+        if day > args.days {
+            print_usage_and_exit(&format!(
+                "--screenshot-at-day {day} is past --days {} - the simulation never reaches that day.",
+                args.days
+            ));
+        }
+    }
+    // Same "no silent approximation" rule as the `AtDay` fix above, for
+    // `AfterFrames`' own mirror case: `screenshot::maybe_capture_screenshot`
+    // never fires before `screenshot::MIN_RENDER_WARMUP_FRAMES` frames have
+    // elapsed (the render pipeline genuinely isn't ready before then - see
+    // that constant's own doc), so a smaller `--screenshot-after` value
+    // would otherwise be silently rounded up to it instead of capturing the
+    // frame actually requested. `DEFAULT_SCREENSHOT_AFTER_FRAMES` (120) is
+    // always comfortably above this floor, so this only ever rejects an
+    // explicit override, never the default.
+    //
+    // `codex review` (P2): only when `--screenshot-after` is the trigger that
+    // will actually be used. `--screenshot-at-day` replaces it entirely, so
+    // rejecting a run because an unused `--screenshot-after` sits below the
+    // floor would refuse a request the tool can serve perfectly well - the
+    // usage line already presents the two as alternatives.
+    if args.screenshot.is_some()
+        && args.screenshot_at_day.is_none()
+        && args.screenshot_after < archipelago_game::app::MIN_RENDER_WARMUP_FRAMES
+    {
+        print_usage_and_exit(&format!(
+            "--screenshot-after {} is below the render pipeline's own warm-up floor of {} frames - a screenshot \
+             requested that early can never actually be captured at that frame (see archipelago_game::app::\
+             MIN_RENDER_WARMUP_FRAMES's own doc); pass at least {} frames.",
+            args.screenshot_after,
+            archipelago_game::app::MIN_RENDER_WARMUP_FRAMES,
+            archipelago_game::app::MIN_RENDER_WARMUP_FRAMES,
+        ));
+    }
 
     if args.replay.is_some() && args.play.is_none() {
         print_usage_and_exit("--replay requires --play <faction> to say which faction it replays");

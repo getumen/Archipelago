@@ -10455,6 +10455,68 @@ fn isolate_hokkaido_port_corridor(world: &mut World) {
 /// (port).condition` still read `0.4` - the strike "succeeded" on paper
 /// while doing nothing to the one thing that matters. Reverted before
 /// committing.
+/// `Event::NodeStruck { knocked_out }` reports a **transition**, not a state
+/// (`codex review`, P2).
+///
+/// Reading it back off the node after the damage meant a second sortie
+/// against a field that was already rubble still said `knocked_out: true` -
+/// so `crates/agents/src/newspaper.rs` and the event log narrated a wasted
+/// raid as a decisive one, and every repeat strike claimed another knockout.
+/// The whole reason these events exist is that design.md §23 wants the game
+/// to tell a truthful history; an event that overstates what happened is
+/// worse than the silence it replaced.
+///
+/// **Confirmed this test can fail.** Reverting to
+/// `knocked_out: !node.operational()` makes the second strike below report
+/// `true` as well, tripping the second assertion. Restored, and it passes.
+#[test]
+fn a_repeat_strike_on_a_wrecked_node_does_not_claim_another_knockout() {
+    let mut world = scenario::build_world();
+    world.units.clear();
+
+    let target_region = RegionId(0);
+    let defender = world.region(target_region).owner;
+    let attacker = FactionId(2);
+    assert!(world.diplomacy.is_at_war(attacker, defender), "sanity: mvp's default blocs are unconditional war");
+
+    // The attacker needs a squadron in reach: `apply_strike_node` requires it.
+    let own_region = RegionId(9);
+    world.region_mut(own_region).position = world.region(target_region).position;
+    let own_airfield = world.airfield_node(own_region).expect("mvp gives every region an airfield").id;
+    push_full_strength_air_unit(&mut world, attacker, own_airfield, 10.0);
+
+    let node = world.airfield_node(target_region).expect("mvp gives every region an airfield").id;
+
+    world.action_log.clear();
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node }).expect("first strike is legal");
+    assert!(
+        !world.transport_node(node).operational(),
+        "sanity: an uncontested strike on a full-health node must cross the threshold outright"
+    );
+    let first = world.action_log.iter().rev().find_map(|e| match e {
+        Event::NodeStruck { outcome, .. } => Some(*outcome),
+        _ => None,
+    });
+    assert_eq!(
+        first,
+        Some(crate::event::StrikeOutcome::KnockedOut),
+        "the strike that actually grounded the field must report the knockout"
+    );
+
+    world.action_log.clear();
+    action::apply_action(&mut world, attacker, Action::StrikeNode { node }).expect("a wrecked node is still a legal target");
+    let second = world.action_log.iter().rev().find_map(|e| match e {
+        Event::NodeStruck { outcome, .. } => Some(*outcome),
+        _ => None,
+    });
+    assert_eq!(
+        second,
+        Some(crate::event::StrikeOutcome::AlreadyDown),
+        "a second sortie against a field that was already rubble must say so - `KnockedOut` narrates a wasted \
+         raid as decisive, and `StillOperational` claims the rubble is working"
+    );
+}
+
 #[test]
 fn striking_a_port_node_stops_supply_routed_through_it() {
     let mut world = scenario::build_world();
