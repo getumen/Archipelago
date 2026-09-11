@@ -1570,7 +1570,7 @@ pub fn distribute_supply(world: &mut World) {
             }
             let faction = &world.factions[f];
             let w_munitions = faction.logistics_priority[Good::Munitions.index()];
-            let w_arms = faction.logistics_priority[Good::Arms.index()];
+            let w_arms = faction.logistics_priority[Good::Infantry.index()];
             let (m, a) =
                 split_munitions_arms(avail[r][f], w_munitions, w_arms, demand_munitions[r][f], demand_arms[r][f]);
             served_munitions[r][f] = m;
@@ -1591,7 +1591,7 @@ pub fn distribute_supply(world: &mut World) {
             }
             let faction = &world.factions[f];
             let w_munitions = faction.logistics_priority[Good::Munitions.index()];
-            let w_arms = faction.logistics_priority[Good::Arms.index()];
+            let w_arms = faction.logistics_priority[Good::Infantry.index()];
             let (m, a) = split_munitions_arms(
                 avail_zone[z][f],
                 w_munitions,
@@ -1619,7 +1619,7 @@ pub fn distribute_supply(world: &mut World) {
             }
             let faction = &world.factions[f];
             let w_munitions = faction.logistics_priority[Good::Munitions.index()];
-            let w_arms = faction.logistics_priority[Good::Arms.index()];
+            let w_arms = faction.logistics_priority[Good::Infantry.index()];
             let (m, a) = split_munitions_arms(
                 avail_air[n][f],
                 w_munitions,
@@ -1885,7 +1885,7 @@ pub fn instantaneous_arms_delivery(world: &World, unit_id: crate::ids::UnitId) -
 
     let faction_ref = &world.factions[unit.owner.index()];
     let w_munitions = faction_ref.logistics_priority[Good::Munitions.index()].max(0.0);
-    let w_arms = faction_ref.logistics_priority[Good::Arms.index()].max(0.0);
+    let w_arms = faction_ref.logistics_priority[Good::Infantry.index()].max(0.0);
     let w_sum = w_munitions + w_arms;
     let share_arms_frac = if w_sum > 0.0 { w_arms / w_sum } else { 0.5 };
     let share_arms = avail * share_arms_frac;

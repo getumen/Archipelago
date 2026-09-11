@@ -279,10 +279,18 @@ CAPACITY_SHARE_ENERGY = 0.28
 CAPACITY_SHARE_STEEL = 0.22
 CAPACITY_SHARE_MACHINERY = 0.05
 CAPACITY_SHARE_MUNITIONS = 0.42
-CAPACITY_SHARE_ARMS = 0.03
+# Stage 11A (docs/phase11-spec.md §2): `Good::Arms` was re-read as
+# `Good::Infantry` (`crates/sim/src/good.rs`'s own doc) - same slot, same
+# value, new name. Renamed here to match; the value and every formula that
+# uses it (`solve_capacity_coefficients`/`build_capacities`'s `arms`/
+# `sum_arms_w` locals) are untouched, which is what keeps
+# `scenarios/japan_hex.json`'s regenerated Infantry (ex-Arms) capacity - and
+# everything downstream of it (`Region::industry_total`, `unit_cap`,
+# `supply_source`) - byte-identical to before the rename.
+CAPACITY_SHARE_INFANTRY = 0.03
 assert abs(
     CAPACITY_SHARE_ENERGY + CAPACITY_SHARE_STEEL + CAPACITY_SHARE_MACHINERY
-    + CAPACITY_SHARE_MUNITIONS + CAPACITY_SHARE_ARMS - 1.0
+    + CAPACITY_SHARE_MUNITIONS + CAPACITY_SHARE_INFANTRY - 1.0
 ) < 1e-9
 
 # Mirrors `balance::CIVILIAN_FOOD_DEMAND_PER_POP` (crates/sim/src/balance.rs)
@@ -345,13 +353,47 @@ ENERGY_AREA_SHARE = 0.2
 # population).
 MUNITIONS_AREA_SHARE = 0.65
 
-# Machinery/Arms concentrate super-linearly in dense hexes ("人口密度に強く
-# 比例（都市圏に集中）" / "人口密度に比例、Machinery より集中" - section 2):
-# capacity_h ∝ population_h ** exponent. Arms' exponent is the larger of the
-# two so the same population difference concentrates it harder, per the
-# spec's explicit ordering.
+# Machinery/Infantry concentrate super-linearly in dense hexes ("人口密度に
+# 強く比例（都市圏に集中）" / "人口密度に比例、Machinery より集中" -
+# section 2): capacity_h ∝ population_h ** exponent. Infantry's (ex-Arms,
+# Stage 11A rename - see `CAPACITY_SHARE_INFANTRY`'s own doc) exponent is
+# the larger of the two so the same population difference concentrates it
+# harder, per the spec's explicit ordering.
 MACHINERY_DENSITY_EXPONENT = 1.6
-ARMS_DENSITY_EXPONENT = 2.0
+INFANTRY_DENSITY_EXPONENT = 2.0
+
+# --- Stage 11A: Armour/Artillery (docs/phase11-spec.md §3) ------------------
+# `Good::Armour`/`Good::Artillery` are genuinely new commodities - Stage 11A
+# gives every region production capacity for them, but no unit type draws on
+# either stock yet (`crates/sim/src/economy.rs`'s own Step 5.5 doc). Their
+# targets are deliberately *not* part of `CAPACITY_SHARE_*`'s sum-to-1.0
+# pool: stealing a slice of that budget for two goods nothing yet consumes
+# would shrink Energy/Steel/Machinery/Munitions/Infantry's own shares and
+# change `scenarios/japan_hex.json`'s simulated behavior, exactly what
+# Stage 11A's "3 シナリオの結果が変わらない" bar forbids. Both are instead
+# sized as their own independent fraction of `TARGET_INDUSTRY_TOTAL` - a
+# plausible order of magnitude relative to the other five goods, not a
+# balance-tested one (nothing consumes them yet to balance against).
+#
+# The two use *differently shaped* weights, not just different totals, so
+# they read as genuinely different industries rather than one rescaled copy
+# of the other:
+#   - Armour favors flat, populous hexes (`flat_area_weight` - the same
+#     "plain area" signal Food already uses - times population density):
+#     tanks concentrate in industrial lowlands the way Steel/Machinery do.
+#   - Artillery scales *linearly* with population (no density exponent) and
+#     favors coastal hexes (the same coastal signal Steel uses, `coastal_
+#     info`): a broader, less concentrated industry than Armour's, present
+#     in modest amount almost everywhere people are, heavier near coastal
+#     heavy industry.
+TARGET_ARMOUR_TOTAL = TARGET_INDUSTRY_TOTAL * 0.10
+TARGET_ARTILLERY_TOTAL = TARGET_INDUSTRY_TOTAL * 0.08
+ARMOUR_DENSITY_EXPONENT = 1.6
+ARMOUR_TERRAIN_FACTOR_FLAT = 1.0
+ARMOUR_TERRAIN_FACTOR_HILL = 0.4
+ARMOUR_TERRAIN_FACTOR_MOUNTAIN = 0.15
+ARTILLERY_COASTAL_FACTOR_COASTAL = 1.0
+ARTILLERY_COASTAL_FACTOR_INLAND = 0.6
 
 # Steel ("人口と、沿岸・平地であることに比例（臨海工業地帯）" - section 2):
 # capacity_h ∝ population_h * steel_factor_h, where steel_factor_h multiplies

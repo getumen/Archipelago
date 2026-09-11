@@ -844,7 +844,7 @@ fn heuristic_agent_stops_recruiting_when_network_supply_ratio_is_bad() {
     // industry keeps this faction's 3 starting units well under `unit_cap`
     // - nothing *else* here should stop `recruit` from firing.
     world.faction_mut(faction).manpower = 50.0;
-    world.faction_mut(faction).stock[Good::Arms.index()] = 100.0;
+    world.faction_mut(faction).stock[Good::Infantry.index()] = 100.0;
     world.faction_mut(faction).stock[Good::Munitions.index()] = 1000.0;
     world.faction_mut(faction).supply_ratio = 0.2; // well below DISBAND_SOLVENCY_SUPPLY_RATIO (0.5)
 

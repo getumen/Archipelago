@@ -375,7 +375,7 @@ fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain) -> Optio
     if f.manpower < UNIT_MANPOWER {
         return Some(action_error_ja(ActionError::InsufficientManpower));
     }
-    if f.stock[Good::Arms.index()] < UNIT_EQUIPMENT {
+    if f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT {
         return Some(action_error_ja(ActionError::InsufficientEquipment));
     }
     // Stage 10 follow-up: `action::apply_recruit`'s `Domain::Air` arm also
@@ -1417,13 +1417,28 @@ pub(super) fn spawn_policy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &H
             panel.spawn(chrome::panel_title("-- 政策 [P で閉じる] --", font));
 
             panel.spawn((Text::new("対象品目 [G で切替]:"), text_font(11.0, font), TextColor(Color::srgb(0.8, 0.82, 0.85))));
-            panel.spawn(row_node()).with_children(|row| {
-                for good in ALL_GOODS {
-                    row.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), GoodTabButton(good))).with_children(|b| {
-                        b.spawn((Text::new(good.label()), text_font(11.0, font), TextColor(TEXT_ENABLED)));
-                    });
-                }
-            });
+            // Stage 11A grew `ALL_GOODS` from six entries to eight
+            // (`good::Good`'s own doc: `Infantry`/`Armour`/`Artillery`
+            // replace `Arms`) - `row_node()`'s plain, non-wrapping row no
+            // longer fits every tab on one line inside this panel's fixed
+            // 340px width (`codex review` P2: the tail entries would
+            // overflow the panel and become unclickable). `FlexWrap::Wrap`
+            // lets the row spill onto a second line instead of clipping.
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(4.0),
+                    row_gap: Val::Px(3.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    for good in ALL_GOODS {
+                        row.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), GoodTabButton(good))).with_children(|b| {
+                            b.spawn((Text::new(good.label()), text_font(11.0, font), TextColor(TEXT_ENABLED)));
+                        });
+                    }
+                });
 
             for field in POLICY_FIELDS {
                 panel.spawn(row_node()).with_children(|row| {

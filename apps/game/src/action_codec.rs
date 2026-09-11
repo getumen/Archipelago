@@ -522,7 +522,7 @@ mod tests {
             Action::Build { region: RegionId(2), project: Project::Capacity(Good::Munitions) },
             Action::CancelBuild { region: RegionId(2) },
             Action::SetImportPlan { good: Good::Food, rate: 12.5 },
-            Action::SetLogisticsPriority { good: Good::Arms, weight: 0.3 },
+            Action::SetLogisticsPriority { good: Good::Infantry, weight: 0.3 },
             Action::ProposeTreaty { to: FactionId(1), treaty: Treaty::Alliance },
             Action::AcceptTreaty { from: FactionId(1), treaty: Treaty::Ceasefire },
             Action::RejectTreaty { from: FactionId(1), treaty: Treaty::NonAggression },

@@ -37,6 +37,12 @@ use archipelago_sim::world::World;
 
 fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!("error: {msg}");
+    // `codex review` (P2): built from `ALL_GOODS`, never restated. Stage 11A
+    // renamed `arms` to `infantry` and added `armour`/`artillery`, and this
+    // usage line went on advertising a key `good_from_key` no longer accepts
+    // while the three real ones stayed undiscoverable - the same drift the
+    // LLM prompt had. A list derived from the enum cannot go stale.
+    let goods = archipelago_sim::good::ALL_GOODS.map(|g| g.key()).join("|");
     eprintln!(
         "usage: archipelago-game [--scenario <path>] [--seed <n>] [--days <n>] \
          [--play <faction index or name>] [--record <path>] [--replay <path>] \
@@ -64,7 +70,7 @@ fn print_usage_and_exit(msg: &str) -> ! {
          defect's precondition on demand so it can be proven to fail loudly instead of writing the blank frame.\n\
          \n\
          --debug-map-mode industry[:<good>]: industry mode shows exactly one commodity's own map; \
-         <good> selects which one (food|energy|steel|machinery|munitions|arms), e.g. \
+         <good> selects which one ({goods}), e.g. \
          `--debug-map-mode industry:machinery`. Omitting `:<good>` (bare `industry`) keeps whatever \
          ActiveGood already is (steel by default). No other mode accepts a `:<good>` suffix."
     );

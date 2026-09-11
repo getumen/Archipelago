@@ -57,10 +57,15 @@ pub const TRANSPORT_LINE_COUNT: usize = 32;
 
 const FACTION_MANPOWER: f32 = 12.0;
 /// Initial stock per commodity, in `Good::index()` order (Food, Energy,
-/// Steel, Machinery, Munitions, Arms). Munitions/Arms keep Phase 1's
-/// `supplies`/`equipment` starting values; the upstream goods start with a
-/// modest buffer so the chain isn't starved on day one.
-const FACTION_STOCK: [f32; GOOD_COUNT] = [200.0, 100.0, 80.0, 40.0, 400.0, 250.0];
+/// Steel, Machinery, Munitions, Infantry, Armour, Artillery). Munitions/
+/// Infantry keep Phase 1's `supplies`/`equipment` starting values (Stage
+/// 11A re-read `Arms` as `Infantry` - `good::Good`'s own doc - so this is
+/// the exact same number under its new name); the upstream goods start
+/// with a modest buffer so the chain isn't starved on day one. `Armour`/
+/// `Artillery` start at `0.0`: Stage 11A gives them production capacity but
+/// no unit type draws on either stock yet ("部隊種別は入れない"), so there
+/// is nothing yet for a starting buffer to buffer against.
+const FACTION_STOCK: [f32; GOOD_COUNT] = [200.0, 100.0, 80.0, 40.0, 400.0, 250.0, 0.0, 0.0];
 /// `pub(crate)`, not private: Stage 3A regime change
 /// (`politics::apply_political_events`, docs/phase3-spec.md "政権交代の扱
 /// い") resets a faction's policy back to exactly these same starting
@@ -70,16 +75,20 @@ pub(crate) const FACTION_CONSCRIPTION: f32 = 0.5;
 /// Initial industry priority: an even three-way split of Energy between
 /// Steel, Machinery and Munitions, and an even split of Steel between
 /// Machinery and Munitions - the goods that contend for shared Energy/Steel
-/// input in Stage 2A (see `economy::tick_economy`).
-pub(crate) const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.5, 0.5, 0.5, 0.0];
+/// input in Stage 2A (see `economy::tick_economy`). `Armour`/`Artillery`
+/// (Stage 11A) have no recipe to prioritize yet, so their weight is `0.0`
+/// and unread.
+pub(crate) const FACTION_INDUSTRY_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0];
 /// Initial import plan (Stage 2C): no imports requested until an agent or
 /// player sets one via `Action::SetImportPlan`.
-pub(crate) const FACTION_IMPORT_PLAN: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+pub(crate) const FACTION_IMPORT_PLAN: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 /// Initial logistics priority (Stage 2C): an even split of the shared
-/// regional throughput between Munitions and Arms delivery, the same
-/// even-split convention `FACTION_INDUSTRY_PRIORITY` uses for its contended
-/// inputs.
-pub(crate) const FACTION_LOGISTICS_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.5, 0.5];
+/// regional throughput between Munitions and Infantry-equipment delivery,
+/// the same even-split convention `FACTION_INDUSTRY_PRIORITY` uses for its
+/// contended inputs. `Armour`/`Artillery` (Stage 11A) generate no delivery
+/// demand yet (no unit type draws on them), so their weight is `0.0` and
+/// unread.
+pub(crate) const FACTION_LOGISTICS_PRIORITY: [f32; GOOD_COUNT] = [0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0];
 const FACTION_WAR_SUPPORT: f32 = 60.0;
 const FACTION_STABILITY: f32 = 80.0;
 /// Stage 3A (docs/phase3-spec.md "Stage 3A": "初期値は全勢力共通で支持 60"):

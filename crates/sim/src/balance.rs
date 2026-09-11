@@ -26,14 +26,19 @@ pub const MANPOWER_DEMOBILIZATION_RATE: f32 = 0.02;
 
 /// Stage 2A production chain (docs/phase2-spec.md "Stage 2A"): input goods
 /// consumed per unit of output good produced, at the `Steel -> Machinery /
-/// Munitions -> Arms` stage. `Food` and `Energy` have no inputs.
+/// Munitions -> Infantry` stage. `Food` and `Energy` have no inputs.
+/// `INFANTRY_INPUT_MACHINERY`/`INFANTRY_INPUT_STEEL` are the renamed
+/// `ARMS_INPUT_MACHINERY`/`ARMS_INPUT_STEEL` (Stage 11A, `good::Good`'s own
+/// doc): same values, same recipe, now named after the commodity that
+/// carries it post-split. `Armour`/`Artillery` (Stage 11A's other two new
+/// goods) deliberately have no recipe here yet - see `economy::tick_economy`.
 pub const STEEL_INPUT_ENERGY: f32 = 0.5;
 pub const MACHINERY_INPUT_STEEL: f32 = 0.4;
 pub const MACHINERY_INPUT_ENERGY: f32 = 0.3;
 pub const MUNITIONS_INPUT_STEEL: f32 = 0.3;
 pub const MUNITIONS_INPUT_ENERGY: f32 = 0.2;
-pub const ARMS_INPUT_MACHINERY: f32 = 0.5;
-pub const ARMS_INPUT_STEEL: f32 = 0.3;
+pub const INFANTRY_INPUT_MACHINERY: f32 = 0.5;
+pub const INFANTRY_INPUT_STEEL: f32 = 0.3;
 
 /// Stage 3C playtest fix (the ninth defect of docs/phase3-spec.md §0's
 /// shape, found post-Stage-3C): `economy::tick_economy`'s Step 0/1
@@ -201,7 +206,7 @@ pub const UNIT_START_ORG_RATIO: f32 = 0.4;
 /// same `UNIT_MANPOWER`/`UNIT_EQUIPMENT`(-priced-in-Arms) cost every other
 /// domain already pays - an airframe's own airframe-and-avionics cost, on
 /// the same industrial input land/sea equipment is already priced in
-/// (`Good::Arms`), rather than a new commodity (the spec explicitly rules
+/// (`Good::Infantry`), rather than a new commodity (the spec explicitly rules
 /// out adding `Fuel`: "新しい Good を追加しない"). Set to `UNIT_EQUIPMENT`'s
 /// own order of magnitude - no scenario deploys a `Domain::Air` unit yet
 /// (10A leaves that to 10B onward), so there is nothing to measure this
@@ -410,7 +415,7 @@ pub const IMPORT_PLAN_RATE_MAX: f32 = 50.0;
 
 /// Machinery spent, from the importing faction's national stock, per unit of
 /// Food/Energy actually imported (docs/phase2-spec.md: "輸入は無償ではない。
-/// Machinery を輸出して支払う"). Kept low relative to `ARMS_INPUT_MACHINERY`/
+/// Machinery を輸出して支払う"). Kept low relative to `INFANTRY_INPUT_MACHINERY`/
 /// `CONSTRUCTION_MACHINERY_PER_POINT` so a Machinery-rich, Food-poor faction
 /// (the Stage 2A structural-famine case) can afford a meaningful import flow
 /// out of ordinary production, not just an idle stockpile.

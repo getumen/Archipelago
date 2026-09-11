@@ -35,10 +35,14 @@
 //!    `Faction::industry_priority`.
 //! 6. Civilians draw `Machinery` from what industry left behind, folding
 //!    into `Faction::shortage` the same way.
-//! 7. `Arms` is capped by what's left of the `Machinery` and `Steel` stock.
+//! 7. `Infantry` equipment (Stage 11A's renamed `Arms`, `good::Good`'s own
+//!    doc) is capped by what's left of the `Machinery` and `Steel` stock.
+//! 8. `Armour`/`Artillery` (Stage 11A, no unit type draws either yet) are
+//!    produced straight from capacity like `Food`/`Energy` - no recipe, no
+//!    interaction with any step above.
 
 use crate::balance::{
-    ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
+    INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
     CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP,
     CONSCRIPT_RATE, FOCUS_TECHNOCRACY_PRODUCTION_MULT, FOOD_EFFICIENCY_DAMPENING,
     FOOD_EFFICIENCY_FLOOR, INDUSTRIAL_STABILITY_FLOOR, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL,
@@ -312,20 +316,40 @@ pub fn tick_economy(world: &mut World) {
         stock[Good::Munitions.index()] += actual_munitions;
 
         // Step 4.5: civilians draw Machinery from what industry just
-        // produced, before Arms (the last, lowest-priority consumer in the
-        // chain) gets to spend it.
+        // produced, before Infantry equipment (the last, lowest-priority
+        // consumer in the chain) gets to spend it.
         let machinery_shortage = consume(&mut stock[Good::Machinery.index()], machinery_need, ration);
 
-        // Step 5: Arms, capped by what's left of the Machinery and Steel stock.
-        let actual_arms = pot[Good::Arms.index()]
-            .min(input_limit(stock[Good::Machinery.index()], ARMS_INPUT_MACHINERY))
-            .min(input_limit(stock[Good::Steel.index()], ARMS_INPUT_STEEL))
+        // Step 5: Infantry equipment (Stage 11A's renamed `Arms` - see
+        // `good::Good`'s own doc), capped by what's left of the Machinery
+        // and Steel stock. Unchanged from the pre-Stage-11A `Arms` formula:
+        // same inputs, same order, same values - `Good::Infantry` occupies
+        // the exact slot `Good::Arms` used to.
+        let actual_infantry = pot[Good::Infantry.index()]
+            .min(input_limit(stock[Good::Machinery.index()], INFANTRY_INPUT_MACHINERY))
+            .min(input_limit(stock[Good::Steel.index()], INFANTRY_INPUT_STEEL))
             .max(0.0);
         stock[Good::Machinery.index()] =
-            (stock[Good::Machinery.index()] - actual_arms * ARMS_INPUT_MACHINERY).max(0.0);
+            (stock[Good::Machinery.index()] - actual_infantry * INFANTRY_INPUT_MACHINERY).max(0.0);
         stock[Good::Steel.index()] =
-            (stock[Good::Steel.index()] - actual_arms * ARMS_INPUT_STEEL).max(0.0);
-        stock[Good::Arms.index()] += actual_arms;
+            (stock[Good::Steel.index()] - actual_infantry * INFANTRY_INPUT_STEEL).max(0.0);
+        stock[Good::Infantry.index()] += actual_infantry;
+
+        // Step 5.5 (Stage 11A, docs/phase11-spec.md §3): `Armour` and
+        // `Artillery` are genuinely new commodities with region-varying
+        // capacity, but no unit type draws on either yet ("部隊種別は入れ
+        // ない" - Stage 11B adds that). Produced straight from capacity, the
+        // same way `Food`/`Energy` are (Step 2 above) - no Machinery/Steel
+        // input recipe - specifically so their introduction cannot change
+        // what `Infantry` (or anything upstream of it) computes above: a
+        // recipe sharing Steel/Machinery with `Infantry` would silently
+        // shrink Infantry's own draw the moment these goods got any nonzero
+        // capacity, which is exactly the kind of one-name-two-behaviors leak
+        // Stage 11A's own acceptance bar ("3 シナリオの結果が変わらない")
+        // exists to catch. A realistic recipe belongs in Stage 11B, once a
+        // real unit type creates real demand to balance it against.
+        stock[Good::Armour.index()] += pot[Good::Armour.index()];
+        stock[Good::Artillery.index()] += pot[Good::Artillery.index()];
 
         faction.shortage = food_shortage.max(energy_shortage).max(machinery_shortage);
         // External code review fix (Stage 2C): keep each commodity's own

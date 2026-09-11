@@ -181,7 +181,7 @@ pub enum Action {
 /// - **`Military`** — orders that move, raise, or stand down force
 ///   structure: `MoveUnit`/`HoldUnit`/`DisbandUnit`/`ReinforceUnit`, and
 ///   `RecruitUnit` alongside them even though it spends `Faction::manpower`
-///   and `Good::Arms` (economic resources, same as `ReinforceUnit`). The
+///   and `Good::Infantry` (economic resources, same as `ReinforceUnit`). The
 ///   decision `RecruitUnit` represents — how large the army is, and where —
 ///   is inseparable from the other four force-structure actions: a policy
 ///   that could march and reinforce units but never raise or retire one
@@ -653,7 +653,7 @@ fn apply_hold(world: &mut World, faction: FactionId, unit_id: UnitId) -> Result<
 ///   back into `labor_ratio` over the following weeks exactly as it does
 ///   idle drafted conscripts. No new recovery mechanism is introduced;
 ///   disbanding just hands the existing one more to work with.
-/// - Equipment goes back to `Good::Arms` stock outright - there is no
+/// - Equipment goes back to `Good::Infantry` stock outright - there is no
 ///   equivalent "pool with its own decay" to route it through; Arms is
 ///   already a plain stock every other system draws from and refills.
 ///
@@ -682,7 +682,7 @@ fn apply_disband(world: &mut World, faction: FactionId, unit_id: UnitId) -> Resu
     }
 
     world.faction_mut(faction).manpower += manpower;
-    world.faction_mut(faction).stock[Good::Arms.index()] += equipment;
+    world.faction_mut(faction).stock[Good::Infantry.index()] += equipment;
     // Stage 10A (`codex review`, P2): `apply_recruit` charges
     // `AIR_UNIT_MACHINERY_COST` on top of manpower and Arms for
     // `Domain::Air`, so disband has to hand the airframe back too or a
@@ -815,7 +815,7 @@ fn apply_recruit(
     if f.manpower < UNIT_MANPOWER {
         return Err(ActionError::InsufficientManpower);
     }
-    if f.stock[Good::Arms.index()] < equipment_cost {
+    if f.stock[Good::Infantry.index()] < equipment_cost {
         return Err(ActionError::InsufficientEquipment);
     }
     if f.stock[Good::Machinery.index()] < machinery_cost {
@@ -823,7 +823,7 @@ fn apply_recruit(
     }
 
     world.faction_mut(faction).manpower -= UNIT_MANPOWER;
-    world.faction_mut(faction).stock[Good::Arms.index()] -= equipment_cost;
+    world.faction_mut(faction).stock[Good::Infantry.index()] -= equipment_cost;
     world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
 
     let id = UnitId(world.units.len() as u32);
@@ -993,10 +993,10 @@ fn apply_reinforce(
 
     let f = world.faction(faction);
     let fill_manpower = if network_reachable { need_manpower.min(f.manpower) } else { 0.0 };
-    let mut fill_equipment = deliverable_equipment.min(f.stock[Good::Arms.index()]);
+    let mut fill_equipment = deliverable_equipment.min(f.stock[Good::Infantry.index()]);
     // Stage 10A exploit fix (`codex review`, P2): an air unit's equipment
     // *is* its airframes, so replacing it must cost `Good::Machinery`, not
-    // only `Good::Arms` - the same industrial input `apply_recruit` prices a
+    // only `Good::Infantry` - the same industrial input `apply_recruit` prices a
     // fresh airframe in (`AIR_UNIT_MACHINERY_COST` per `UNIT_EQUIPMENT`),
     // charged here at that same rate for whatever fraction of the gap is
     // actually delivered. Without this, `apply_disband`'s equipment-
@@ -1031,7 +1031,7 @@ fn apply_reinforce(
     };
 
     world.faction_mut(faction).manpower -= fill_manpower;
-    world.faction_mut(faction).stock[Good::Arms.index()] -= fill_equipment;
+    world.faction_mut(faction).stock[Good::Infantry.index()] -= fill_equipment;
     if is_air {
         world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
     }

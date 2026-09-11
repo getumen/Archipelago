@@ -243,8 +243,11 @@ pub(super) struct ModeLegendHeader;
 /// largest `legend_entries` list any mode actually needs. `Industry`'s six
 /// goods used to tie with `Supply`'s own six rows; Stage 9D added a seventh
 /// `Supply` row (`overlay::COLOR_LINE_CUT`, distinguishing a severed route
-/// from a merely idle one), so `Supply` alone now sets this bound.
-pub(super) const MODE_LEGEND_ROWS: usize = 7;
+/// from a merely idle one). Stage 11A grew `Good` from six to eight
+/// (`good::Good`'s own doc: `Infantry`/`Armour`/`Artillery` replace the
+/// single `Arms`), so `Industry` - one row per `ALL_GOODS` entry - now sets
+/// this bound instead.
+pub(super) const MODE_LEGEND_ROWS: usize = 8;
 
 /// Fixed, categorical terrain palette - deliberately earthy/desaturated
 /// (never a fully-saturated primary the way `palette::faction_color` is),
@@ -346,8 +349,9 @@ pub(super) fn industry_thresholds(world: &SimWorld, good: Good) -> [f32; 4] {
 /// One fixed hue per `Good`, chosen to read distinctly from each other and
 /// from `palette::faction_color`'s own fully-saturated set (this mode is
 /// never shown alongside a faction-colored fill, so the only collision that
-/// matters is between these six): green food/agriculture, gold energy,
-/// cool steel-gray steel, orange machinery, red munitions, violet arms.
+/// matters is between these eight): green food/agriculture, gold energy,
+/// cool steel-gray steel, orange machinery, red munitions, violet infantry
+/// equipment, slate-blue armour, rust artillery.
 /// Used twice over: as the map's own fill (`industry_fill`, mixed by band)
 /// and as the legend row's swatch/text color (`legend_entries`) - the same
 /// palette in both places, per the task's own ask, is what lets a commodity
@@ -360,7 +364,9 @@ fn good_hue(good: Good) -> Color {
         Good::Steel => Color::srgb(0.55, 0.62, 0.70),
         Good::Machinery => Color::srgb(0.90, 0.55, 0.15),
         Good::Munitions => Color::srgb(0.85, 0.20, 0.20),
-        Good::Arms => Color::srgb(0.60, 0.35, 0.80),
+        Good::Infantry => Color::srgb(0.60, 0.35, 0.80),
+        Good::Armour => Color::srgb(0.30, 0.40, 0.80),
+        Good::Artillery => Color::srgb(0.60, 0.30, 0.10),
     }
 }
 

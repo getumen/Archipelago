@@ -46,7 +46,9 @@ fn good_label(good: Good) -> &'static str {
         Good::Steel => "鋼材",
         Good::Machinery => "機械",
         Good::Munitions => "弾薬",
-        Good::Arms => "兵器",
+        Good::Infantry => "歩兵装備",
+        Good::Armour => "機甲装備",
+        Good::Artillery => "砲兵装備",
     }
 }
 

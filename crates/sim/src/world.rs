@@ -419,17 +419,27 @@ impl Region {
     }
 
     /// Sum of every commodity's *effective* (devastation-adjusted) capacity
-    /// except `Food` — this region's contribution to war-relevant industry
-    /// (Stage 2A redefinition of the Phase 1 `industry` field that
-    /// `World::industry_total` and `supply_source`/`value` below depend on).
+    /// that currently equips or sustains a fielded unit — this region's
+    /// contribution to war-relevant industry (Stage 2A redefinition of the
+    /// Phase 1 `industry` field that `World::industry_total` and
+    /// `supply_source`/`value` below depend on, which in turn feed
+    /// `agents::unit_cap`'s recruitment ceiling).
+    ///
+    /// **Deliberately not "every non-`Food` `Good`."** Stage 11A
+    /// (docs/phase11-spec.md §3) gives `Armour`/`Artillery` real,
+    /// region-varying capacity as data, but "部隊種別は入れない" - no unit
+    /// type draws on either stock yet. Blanket-iterating `ALL_GOODS` here
+    /// would let that not-yet-usable capacity inflate `unit_cap`/
+    /// `supply_source`/`value` the instant it existed, silently growing
+    /// every scenario's recruitable force and transport-network base with
+    /// no matching demand anywhere - exactly the kind of change Stage 11A's
+    /// own acceptance bar ("3 シナリオの結果が変わらない") forbids. Extend
+    /// this list, not `ALL_GOODS` itself, when Stage 11B actually wires a
+    /// land unit type to draw `Armour`/`Artillery`.
     pub fn industry_total(&self) -> f32 {
-        let mut total = 0.0;
-        for good in crate::good::ALL_GOODS {
-            if good != Good::Food {
-                total += self.effective_capacity(good);
-            }
-        }
-        total
+        const INDUSTRY_GOODS: [Good; 5] =
+            [Good::Energy, Good::Steel, Good::Machinery, Good::Munitions, Good::Infantry];
+        INDUSTRY_GOODS.iter().map(|&good| self.effective_capacity(good)).sum()
     }
 
     pub fn supply_source(&self) -> f32 {

@@ -774,7 +774,7 @@ happens. Respond with ONLY a single JSON object, no other text, matching this sc
 \"terms\": [{\"kind\": \"sign\", \"treaty\": <one of \"ceasefire\", \"non_aggression\", \"alliance\", \
 \"military_access\", \"port_access\", \"trade_agreement\">} | {\"kind\": \"withdraw\", \"region\": <region id \
 number>} | {\"kind\": \"cede\", \"region\": <region id number>} | {\"kind\": \"deliver\", \"good\": <one of \
-\"food\", \"energy\", \"steel\", \"machinery\", \"munitions\", \"arms\">, \"amount\": <number>}]}. \"terms\" is \
+\"food\", \"energy\", \"steel\", \"machinery\", \"munitions\", \"infantry\", \"armour\", \"artillery\">, \"amount\": <number>}]}. \"terms\" is \
 your best-effort structured reading of what the proposal actually offers/asks, from the *proposing* faction's \
 side (e.g. \"I will withdraw from region 4\" is {\"kind\":\"withdraw\",\"region\":4} even though you are the one \
 receiving the offer); \"accept\" is your own faction's verdict on the deal as a whole.";
@@ -1185,5 +1185,37 @@ mod json_tests {
                 other => panic!("expected a distinct Malformed error for {label}, got {other:?}"),
             }
         }
+    }
+
+    /// Every `Good` the parser accepts must be named in the prompt, and
+    /// nothing else.
+    ///
+    /// `codex review` (P2): Stage 11A renamed `arms` to `infantry` and added
+    /// `armour`/`artillery`, but `NL_SYSTEM_PROMPT` still told the model to
+    /// emit `"arms"`. `good_from_key` matches against `ALL_GOODS`, so an
+    /// equipment delivery term came back unparseable and was **silently
+    /// dropped** - the model was being instructed to speak a language the
+    /// parser had stopped understanding, and nothing anywhere said so.
+    ///
+    /// Derived from `ALL_GOODS` rather than restating a list, so the next
+    /// commodity change fails here instead of quietly losing terms again.
+    ///
+    /// **Confirmed this test can fail.** Restoring `\"arms\"` in the prompt
+    /// trips it naming `infantry` as missing (and `arms` as unknown).
+    #[test]
+    fn the_nl_prompt_names_exactly_the_goods_the_parser_accepts() {
+        for good in ALL_GOODS {
+            let quoted = format!("\"{}\"", good.key());
+            assert!(
+                NL_SYSTEM_PROMPT.contains(&quoted),
+                "NL_SYSTEM_PROMPT must name every good the parser accepts, but {} is missing - a delivery term \
+                 using it would be silently dropped by `good_from_key`",
+                good.key()
+            );
+        }
+        assert!(
+            !NL_SYSTEM_PROMPT.contains("\"arms\""),
+            "NL_SYSTEM_PROMPT still names the pre-Stage-11A `arms` key, which `good_from_key` no longer accepts"
+        );
     }
 }

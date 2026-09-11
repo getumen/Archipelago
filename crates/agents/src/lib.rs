@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
-    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, ARMS_INPUT_MACHINERY, ARMS_INPUT_STEEL,
+    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL,
     CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT,
     FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_PER_PORT, MACHINERY_INPUT_STEEL,
     MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
@@ -645,7 +645,7 @@ fn choose_opening_focus(faction: FactionId, world: &World) -> NationalFocus {
     }
 
     let industry_total: f32 = own_regions.iter().map(|&r| world.region(r).industry_total()).sum::<f32>().max(0.01);
-    let arms: f32 = own_regions.iter().map(|&r| world.region(r).effective_capacity(Good::Arms)).sum();
+    let arms: f32 = own_regions.iter().map(|&r| world.region(r).effective_capacity(Good::Infantry)).sum();
     let machinery: f32 = own_regions
         .iter()
         .map(|&r| world.region(r).effective_capacity(Good::Machinery))
@@ -1487,8 +1487,8 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
     // days of Arms output than the Steel stock does, Machinery is the
     // blocking upstream good, and raising its share of the shared
     // Steel/Energy input (at Munitions' expense) is what relieves it.
-    let machinery_limited_arms_days = f.stock[Good::Machinery.index()] / ARMS_INPUT_MACHINERY;
-    let steel_limited_arms_days = f.stock[Good::Steel.index()] / ARMS_INPUT_STEEL;
+    let machinery_limited_arms_days = f.stock[Good::Machinery.index()] / INFANTRY_INPUT_MACHINERY;
+    let steel_limited_arms_days = f.stock[Good::Steel.index()] / INFANTRY_INPUT_STEEL;
     let arms_blocked_on_machinery = machinery_limited_arms_days < steel_limited_arms_days;
 
     // Stage 3A AI (docs/phase3-spec.md: "Military が低ければ Arms 寄りに
@@ -1515,7 +1515,7 @@ fn set_policy(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) 
     // economy. Ease off (back to full delivery) once stability drops too
     // far or the stockpiles have recovered - rationing further at that
     // point just compounds the unrest it caused.
-    let arms_low = f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * ARMS_LOW_UNIT_MARGIN;
+    let arms_low = f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * ARMS_LOW_UNIT_MARGIN;
     let ration = if (munitions_running_low || arms_low) && f.stability > RATION_STABILITY_FLOOR {
         CIVILIAN_RATION_LOW
     } else {
@@ -1596,7 +1596,7 @@ fn set_logistics_priority(obs: &Observation, actions: &mut Vec<Action>) {
         _ => (0.5, 0.5),
     };
     actions.push(Action::SetLogisticsPriority { good: Good::Munitions, weight: munitions_weight });
-    actions.push(Action::SetLogisticsPriority { good: Good::Arms, weight: arms_weight });
+    actions.push(Action::SetLogisticsPriority { good: Good::Infantry, weight: arms_weight });
 }
 
 /// Tops up under-strength units (land or fleet) sitting safely in friendly,
@@ -1642,7 +1642,7 @@ fn recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation,
         return;
     }
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
     {
         return;
     }
@@ -1978,7 +1978,7 @@ fn naval_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observ
         return;
     }
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
     {
         return;
     }
@@ -2139,7 +2139,7 @@ fn air_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observat
         return;
     }
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.stock[Good::Arms.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
         || f.stock[Good::Machinery.index()] < AIR_UNIT_MACHINERY_COST * RECRUIT_STOCK_MARGIN
     {
         return;
@@ -2570,8 +2570,8 @@ fn zone_path_next(world: &World, from: SeaZoneId, to: SeaZoneId) -> Option<SeaZo
 /// slows down instead of stalling - this gate only stops *new* orders).
 fn build(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
-    let machinery_days = f.stock[Good::Machinery.index()] / ARMS_INPUT_MACHINERY;
-    let steel_days = f.stock[Good::Steel.index()] / ARMS_INPUT_STEEL;
+    let machinery_days = f.stock[Good::Machinery.index()] / INFANTRY_INPUT_MACHINERY;
+    let steel_days = f.stock[Good::Steel.index()] / INFANTRY_INPUT_STEEL;
     if machinery_days < BUILD_STOCK_RESERVE_DAYS || steel_days < BUILD_STOCK_RESERVE_DAYS {
         return;
     }
@@ -2794,17 +2794,17 @@ fn bottleneck_good(obs: &Observation) -> Option<Good> {
         steel_cap += region.effective_capacity(Good::Steel);
         machinery_cap += region.effective_capacity(Good::Machinery);
         munitions_cap += region.effective_capacity(Good::Munitions);
-        arms_cap += region.effective_capacity(Good::Arms);
+        arms_cap += region.effective_capacity(Good::Infantry);
     }
 
     let steel_needed = machinery_cap * MACHINERY_INPUT_STEEL
         + munitions_cap * MUNITIONS_INPUT_STEEL
-        + arms_cap * ARMS_INPUT_STEEL;
+        + arms_cap * INFANTRY_INPUT_STEEL;
     if steel_cap < steel_needed {
         return Some(Good::Steel);
     }
 
-    let machinery_needed = arms_cap * ARMS_INPUT_MACHINERY;
+    let machinery_needed = arms_cap * INFANTRY_INPUT_MACHINERY;
     if machinery_cap < machinery_needed {
         return Some(Good::Machinery);
     }

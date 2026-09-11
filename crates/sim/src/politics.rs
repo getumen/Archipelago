@@ -101,7 +101,7 @@ pub fn tick_politics(
         }
     }
 
-    let arms_stock: Vec<f32> = world.factions.iter().map(|f| f.stock[Good::Arms.index()]).collect();
+    let arms_stock: Vec<f32> = world.factions.iter().map(|f| f.stock[Good::Infantry.index()]).collect();
     let machinery_ratio: Vec<f32> = world.factions.iter().map(|f| f.machinery_output_ratio).collect();
 
     for f_idx in 0..n {

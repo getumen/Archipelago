@@ -9,14 +9,7 @@
       ],
       "terrain": "plain",
       "population": 520.0,
-      "capacity": {
-        "food": 8.299,
-        "energy": 0.502,
-        "steel": 0.132,
-        "machinery": 0.109,
-        "munitions": 0.072,
-        "arms": 0.0
-      },
+      "capacity": { "food": 8.299, "energy": 0.502, "steel": 0.132, "machinery": 0.109, "munitions": 0.072, "infantry": 0.0, "armour": 0.058, "artillery": 0.0474 },
       "infrastructure": 0.55,
       "port": 1.0,
       "links": [
@@ -36,14 +29,7 @@
       ],
       "terrain": "hill",
       "population": 120.0,
-      "capacity": {
-        "food": 1.915,
-        "energy": 0.116,
-        "steel": 0.03,
-        "machinery": 0.025,
-        "munitions": 0.017,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.915, "energy": 0.116, "steel": 0.03, "machinery": 0.025, "munitions": 0.017, "infantry": 0.0, "armour": 0.0132, "artillery": 0.0109 },
       "infrastructure": 0.45,
       "port": 0.7,
       "links": [
@@ -71,14 +57,7 @@
       ],
       "terrain": "hill",
       "population": 118.0,
-      "capacity": {
-        "food": 1.883,
-        "energy": 0.114,
-        "steel": 0.03,
-        "machinery": 0.025,
-        "munitions": 0.016,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.883, "energy": 0.114, "steel": 0.03, "machinery": 0.025, "munitions": 0.016, "infantry": 0.0, "armour": 0.0132, "artillery": 0.0107 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -105,14 +84,7 @@
       ],
       "terrain": "hill",
       "population": 93.0,
-      "capacity": {
-        "food": 1.484,
-        "energy": 0.09,
-        "steel": 0.024,
-        "machinery": 0.019,
-        "munitions": 0.013,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.484, "energy": 0.09, "steel": 0.024, "machinery": 0.019, "munitions": 0.013, "infantry": 0.0, "armour": 0.0102, "artillery": 0.0086 },
       "infrastructure": 0.45,
       "port": 0.7,
       "links": [
@@ -139,14 +111,7 @@
       ],
       "terrain": "plain",
       "population": 230.0,
-      "capacity": {
-        "food": 1.519,
-        "energy": 0.311,
-        "steel": 0.182,
-        "machinery": 0.18,
-        "munitions": 0.095,
-        "arms": 0.01
-      },
+      "capacity": { "food": 1.519, "energy": 0.311, "steel": 0.182, "machinery": 0.18, "munitions": 0.095, "infantry": 0.01, "armour": 0.0903, "artillery": 0.0645 },
       "infrastructure": 0.65,
       "port": 0.6,
       "links": [
@@ -173,14 +138,7 @@
       ],
       "terrain": "hill",
       "population": 105.0,
-      "capacity": {
-        "food": 1.676,
-        "energy": 0.101,
-        "steel": 0.027,
-        "machinery": 0.022,
-        "munitions": 0.014,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.676, "energy": 0.101, "steel": 0.027, "machinery": 0.022, "munitions": 0.014, "infantry": 0.0, "armour": 0.0118, "artillery": 0.0095 },
       "infrastructure": 0.45,
       "port": 0.7,
       "links": [
@@ -211,14 +169,7 @@
       ],
       "terrain": "hill",
       "population": 180.0,
-      "capacity": {
-        "food": 1.189,
-        "energy": 0.243,
-        "steel": 0.142,
-        "machinery": 0.141,
-        "munitions": 0.075,
-        "arms": 0.008
-      },
+      "capacity": { "food": 1.189, "energy": 0.243, "steel": 0.142, "machinery": 0.141, "munitions": 0.075, "infantry": 0.008, "armour": 0.0706, "artillery": 0.0505 },
       "infrastructure": 0.65,
       "port": 0.6,
       "links": [
@@ -257,14 +208,7 @@
       ],
       "terrain": "plain",
       "population": 285.0,
-      "capacity": {
-        "food": 0.941,
-        "energy": 0.66,
-        "steel": 0.857,
-        "machinery": 0.559,
-        "munitions": 0.275,
-        "arms": 0.091
-      },
+      "capacity": { "food": 0.941, "energy": 0.66, "steel": 0.857, "machinery": 0.559, "munitions": 0.275, "infantry": 0.091, "armour": 0.3242, "artillery": 0.2692 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -295,14 +239,7 @@
       ],
       "terrain": "plain",
       "population": 190.0,
-      "capacity": {
-        "food": 1.255,
-        "energy": 0.257,
-        "steel": 0.15,
-        "machinery": 0.149,
-        "munitions": 0.079,
-        "arms": 0.008
-      },
+      "capacity": { "food": 1.255, "energy": 0.257, "steel": 0.15, "machinery": 0.149, "munitions": 0.079, "infantry": 0.008, "armour": 0.0746, "artillery": 0.0533 },
       "infrastructure": 0.65,
       "port": 0.0,
       "links": [
@@ -333,14 +270,7 @@
       ],
       "terrain": "plain",
       "population": 190.0,
-      "capacity": {
-        "food": 1.255,
-        "energy": 0.257,
-        "steel": 0.15,
-        "machinery": 0.149,
-        "munitions": 0.079,
-        "arms": 0.008
-      },
+      "capacity": { "food": 1.255, "energy": 0.257, "steel": 0.15, "machinery": 0.149, "munitions": 0.079, "infantry": 0.008, "armour": 0.0746, "artillery": 0.0533 },
       "infrastructure": 0.65,
       "port": 0.0,
       "links": [
@@ -375,14 +305,7 @@
       ],
       "terrain": "plain",
       "population": 735.0,
-      "capacity": {
-        "food": 2.427,
-        "energy": 1.703,
-        "steel": 2.209,
-        "machinery": 1.442,
-        "munitions": 0.71,
-        "arms": 0.235
-      },
+      "capacity": { "food": 2.427, "energy": 1.703, "steel": 2.209, "machinery": 1.442, "munitions": 0.71, "infantry": 0.235, "armour": 0.836, "artillery": 0.6943 },
       "infrastructure": 0.8,
       "port": 0.0,
       "links": [
@@ -421,14 +344,7 @@
       ],
       "terrain": "plain",
       "population": 628.0,
-      "capacity": {
-        "food": 2.074,
-        "energy": 1.455,
-        "steel": 1.887,
-        "machinery": 1.232,
-        "munitions": 0.607,
-        "arms": 0.201
-      },
+      "capacity": { "food": 2.074, "energy": 1.455, "steel": 1.887, "machinery": 1.232, "munitions": 0.607, "infantry": 0.201, "armour": 0.7142, "artillery": 0.5932 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -455,14 +371,7 @@
       ],
       "terrain": "urban",
       "population": 1400.0,
-      "capacity": {
-        "food": 0.77,
-        "energy": 2.974,
-        "steel": 1.993,
-        "machinery": 4.028,
-        "munitions": 1.739,
-        "arms": 1.643
-      },
+      "capacity": { "food": 0.77, "energy": 2.974, "steel": 1.993, "machinery": 4.028, "munitions": 1.739, "infantry": 1.643, "armour": 1.7087, "artillery": 0.8461 },
       "infrastructure": 1.0,
       "port": 1.5,
       "links": [
@@ -493,14 +402,7 @@
       ],
       "terrain": "urban",
       "population": 923.0,
-      "capacity": {
-        "food": 0.508,
-        "energy": 1.961,
-        "steel": 1.314,
-        "machinery": 2.655,
-        "munitions": 1.146,
-        "arms": 1.083
-      },
+      "capacity": { "food": 0.508, "energy": 1.961, "steel": 1.314, "machinery": 2.655, "munitions": 1.146, "infantry": 1.083, "armour": 1.1263, "artillery": 0.5577 },
       "infrastructure": 0.95,
       "port": 1.4,
       "links": [
@@ -527,14 +429,7 @@
       ],
       "terrain": "plain",
       "population": 215.0,
-      "capacity": {
-        "food": 3.431,
-        "energy": 0.208,
-        "steel": 0.054,
-        "machinery": 0.045,
-        "munitions": 0.03,
-        "arms": 0.0
-      },
+      "capacity": { "food": 3.431, "energy": 0.208, "steel": 0.054, "machinery": 0.045, "munitions": 0.03, "infantry": 0.0, "armour": 0.0238, "artillery": 0.0195 },
       "infrastructure": 0.45,
       "port": 0.8,
       "links": [
@@ -569,14 +464,7 @@
       ],
       "terrain": "hill",
       "population": 102.0,
-      "capacity": {
-        "food": 0.674,
-        "energy": 0.138,
-        "steel": 0.081,
-        "machinery": 0.08,
-        "munitions": 0.042,
-        "arms": 0.004
-      },
+      "capacity": { "food": 0.674, "energy": 0.138, "steel": 0.081, "machinery": 0.08, "munitions": 0.042, "infantry": 0.004, "armour": 0.0401, "artillery": 0.0287 },
       "infrastructure": 0.5,
       "port": 0.6,
       "links": [
@@ -607,14 +495,7 @@
       ],
       "terrain": "hill",
       "population": 111.0,
-      "capacity": {
-        "food": 0.733,
-        "energy": 0.15,
-        "steel": 0.088,
-        "machinery": 0.087,
-        "munitions": 0.046,
-        "arms": 0.005
-      },
+      "capacity": { "food": 0.733, "energy": 0.15, "steel": 0.088, "machinery": 0.087, "munitions": 0.046, "infantry": 0.005, "armour": 0.0436, "artillery": 0.0312 },
       "infrastructure": 0.5,
       "port": 0.6,
       "links": [
@@ -641,14 +522,7 @@
       ],
       "terrain": "plain",
       "population": 75.0,
-      "capacity": {
-        "food": 0.495,
-        "energy": 0.101,
-        "steel": 0.059,
-        "machinery": 0.059,
-        "munitions": 0.031,
-        "arms": 0.003
-      },
+      "capacity": { "food": 0.495, "energy": 0.101, "steel": 0.059, "machinery": 0.059, "munitions": 0.031, "infantry": 0.003, "armour": 0.0295, "artillery": 0.0209 },
       "infrastructure": 0.5,
       "port": 0.6,
       "links": [
@@ -679,14 +553,7 @@
       ],
       "terrain": "mountain",
       "population": 80.0,
-      "capacity": {
-        "food": 0.44,
-        "energy": 0.062,
-        "steel": 0.02,
-        "machinery": 0.031,
-        "munitions": 0.011,
-        "arms": 0.0
-      },
+      "capacity": { "food": 0.44, "energy": 0.062, "steel": 0.02, "machinery": 0.031, "munitions": 0.011, "infantry": 0.0, "armour": 0.0138, "artillery": 0.0072 },
       "infrastructure": 0.55,
       "port": 0.0,
       "links": [
@@ -721,14 +588,7 @@
       ],
       "terrain": "mountain",
       "population": 202.0,
-      "capacity": {
-        "food": 1.112,
-        "energy": 0.156,
-        "steel": 0.051,
-        "machinery": 0.079,
-        "munitions": 0.028,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.112, "energy": 0.156, "steel": 0.051, "machinery": 0.079, "munitions": 0.028, "infantry": 0.0, "armour": 0.0353, "artillery": 0.0183 },
       "infrastructure": 0.55,
       "port": 0.0,
       "links": [
@@ -767,14 +627,7 @@
       ],
       "terrain": "mountain",
       "population": 195.0,
-      "capacity": {
-        "food": 1.073,
-        "energy": 0.151,
-        "steel": 0.049,
-        "machinery": 0.077,
-        "munitions": 0.027,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.073, "energy": 0.151, "steel": 0.049, "machinery": 0.077, "munitions": 0.027, "infantry": 0.0, "armour": 0.0343, "artillery": 0.0176 },
       "infrastructure": 0.55,
       "port": 0.0,
       "links": [
@@ -817,14 +670,7 @@
       ],
       "terrain": "plain",
       "population": 360.0,
-      "capacity": {
-        "food": 1.189,
-        "energy": 0.834,
-        "steel": 1.082,
-        "machinery": 0.706,
-        "munitions": 0.348,
-        "arms": 0.115
-      },
+      "capacity": { "food": 1.189, "energy": 0.834, "steel": 1.082, "machinery": 0.706, "munitions": 0.348, "infantry": 0.115, "armour": 0.4094, "artillery": 0.3401 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -855,14 +701,7 @@
       ],
       "terrain": "urban",
       "population": 750.0,
-      "capacity": {
-        "food": 0.413,
-        "energy": 1.593,
-        "steel": 1.068,
-        "machinery": 2.158,
-        "munitions": 0.931,
-        "arms": 0.88
-      },
+      "capacity": { "food": 0.413, "energy": 1.593, "steel": 1.068, "machinery": 2.158, "munitions": 0.931, "infantry": 0.88, "armour": 0.9155, "artillery": 0.4532 },
       "infrastructure": 0.95,
       "port": 1.3,
       "links": [
@@ -889,14 +728,7 @@
       ],
       "terrain": "plain",
       "population": 172.0,
-      "capacity": {
-        "food": 0.568,
-        "energy": 0.399,
-        "steel": 0.517,
-        "machinery": 0.337,
-        "munitions": 0.166,
-        "arms": 0.055
-      },
+      "capacity": { "food": 0.568, "energy": 0.399, "steel": 0.517, "machinery": 0.337, "munitions": 0.166, "infantry": 0.055, "armour": 0.1955, "artillery": 0.1625 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -931,14 +763,7 @@
       ],
       "terrain": "plain",
       "population": 141.0,
-      "capacity": {
-        "food": 0.931,
-        "energy": 0.191,
-        "steel": 0.112,
-        "machinery": 0.111,
-        "munitions": 0.058,
-        "arms": 0.006
-      },
+      "capacity": { "food": 0.931, "energy": 0.191, "steel": 0.112, "machinery": 0.111, "munitions": 0.058, "infantry": 0.006, "armour": 0.0556, "artillery": 0.0396 },
       "infrastructure": 0.65,
       "port": 0.0,
       "links": [
@@ -969,14 +794,7 @@
       ],
       "terrain": "urban",
       "population": 254.0,
-      "capacity": {
-        "food": 0.14,
-        "energy": 0.54,
-        "steel": 0.362,
-        "machinery": 0.731,
-        "munitions": 0.315,
-        "arms": 0.298
-      },
+      "capacity": { "food": 0.14, "energy": 0.54, "steel": 0.362, "machinery": 0.731, "munitions": 0.315, "infantry": 0.298, "armour": 0.3101, "artillery": 0.1535 },
       "infrastructure": 0.8,
       "port": 0.4,
       "links": [
@@ -1011,14 +829,7 @@
       ],
       "terrain": "urban",
       "population": 878.0,
-      "capacity": {
-        "food": 0.483,
-        "energy": 1.865,
-        "steel": 1.25,
-        "machinery": 2.526,
-        "munitions": 1.09,
-        "arms": 1.031
-      },
+      "capacity": { "food": 0.483, "energy": 1.865, "steel": 1.25, "machinery": 2.526, "munitions": 1.09, "infantry": 1.031, "armour": 1.0716, "artillery": 0.5305 },
       "infrastructure": 0.95,
       "port": 1.3,
       "links": [
@@ -1049,14 +860,7 @@
       ],
       "terrain": "urban",
       "population": 540.0,
-      "capacity": {
-        "food": 0.297,
-        "energy": 1.147,
-        "steel": 0.769,
-        "machinery": 1.554,
-        "munitions": 0.671,
-        "arms": 0.634
-      },
+      "capacity": { "food": 0.297, "energy": 1.147, "steel": 0.769, "machinery": 1.554, "munitions": 0.671, "infantry": 0.634, "armour": 0.6592, "artillery": 0.3265 },
       "infrastructure": 0.85,
       "port": 1.4,
       "links": [
@@ -1092,14 +896,7 @@
       ],
       "terrain": "hill",
       "population": 130.0,
-      "capacity": {
-        "food": 0.859,
-        "energy": 0.176,
-        "steel": 0.103,
-        "machinery": 0.102,
-        "munitions": 0.054,
-        "arms": 0.006
-      },
+      "capacity": { "food": 0.859, "energy": 0.176, "steel": 0.103, "machinery": 0.102, "munitions": 0.054, "infantry": 0.006, "armour": 0.0511, "artillery": 0.0365 },
       "infrastructure": 0.65,
       "port": 0.0,
       "links": [
@@ -1130,14 +927,7 @@
       ],
       "terrain": "hill",
       "population": 90.0,
-      "capacity": {
-        "food": 0.297,
-        "energy": 0.209,
-        "steel": 0.27,
-        "machinery": 0.177,
-        "munitions": 0.087,
-        "arms": 0.029
-      },
+      "capacity": { "food": 0.297, "energy": 0.209, "steel": 0.27, "machinery": 0.177, "munitions": 0.087, "infantry": 0.029, "armour": 0.1024, "artillery": 0.0849 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -1164,14 +954,7 @@
       ],
       "terrain": "hill",
       "population": 55.0,
-      "capacity": {
-        "food": 0.878,
-        "energy": 0.053,
-        "steel": 0.014,
-        "machinery": 0.012,
-        "munitions": 0.008,
-        "arms": 0.0
-      },
+      "capacity": { "food": 0.878, "energy": 0.053, "steel": 0.014, "machinery": 0.012, "munitions": 0.008, "infantry": 0.0, "armour": 0.0063, "artillery": 0.0051 },
       "infrastructure": 0.45,
       "port": 0.7,
       "links": [
@@ -1198,14 +981,7 @@
       ],
       "terrain": "hill",
       "population": 65.0,
-      "capacity": {
-        "food": 1.037,
-        "energy": 0.063,
-        "steel": 0.016,
-        "machinery": 0.014,
-        "munitions": 0.009,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.037, "energy": 0.063, "steel": 0.016, "machinery": 0.014, "munitions": 0.009, "infantry": 0.0, "armour": 0.0073, "artillery": 0.0058 },
       "infrastructure": 0.45,
       "port": 0.7,
       "links": [
@@ -1232,14 +1008,7 @@
       ],
       "terrain": "plain",
       "population": 186.0,
-      "capacity": {
-        "food": 0.614,
-        "energy": 0.431,
-        "steel": 0.559,
-        "machinery": 0.365,
-        "munitions": 0.18,
-        "arms": 0.06
-      },
+      "capacity": { "food": 0.614, "energy": 0.431, "steel": 0.559, "machinery": 0.365, "munitions": 0.18, "infantry": 0.06, "armour": 0.2116, "artillery": 0.1758 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -1271,14 +1040,7 @@
       ],
       "terrain": "hill",
       "population": 278.0,
-      "capacity": {
-        "food": 0.918,
-        "energy": 0.644,
-        "steel": 0.836,
-        "machinery": 0.545,
-        "munitions": 0.269,
-        "arms": 0.089
-      },
+      "capacity": { "food": 0.918, "energy": 0.644, "steel": 0.836, "machinery": 0.545, "munitions": 0.269, "infantry": 0.089, "armour": 0.3161, "artillery": 0.2628 },
       "infrastructure": 0.75,
       "port": 0.9,
       "links": [
@@ -1310,14 +1072,7 @@
       ],
       "terrain": "hill",
       "population": 132.0,
-      "capacity": {
-        "food": 0.436,
-        "energy": 0.306,
-        "steel": 0.397,
-        "machinery": 0.259,
-        "munitions": 0.128,
-        "arms": 0.042
-      },
+      "capacity": { "food": 0.436, "energy": 0.306, "steel": 0.397, "machinery": 0.259, "munitions": 0.128, "infantry": 0.042, "armour": 0.1502, "artillery": 0.1249 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -1344,14 +1099,7 @@
       ],
       "terrain": "hill",
       "population": 70.0,
-      "capacity": {
-        "food": 1.117,
-        "energy": 0.068,
-        "steel": 0.018,
-        "machinery": 0.015,
-        "munitions": 0.01,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.117, "energy": 0.068, "steel": 0.018, "machinery": 0.015, "munitions": 0.01, "infantry": 0.0, "armour": 0.0079, "artillery": 0.0065 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -1383,14 +1131,7 @@
       ],
       "terrain": "hill",
       "population": 93.0,
-      "capacity": {
-        "food": 0.614,
-        "energy": 0.126,
-        "steel": 0.074,
-        "machinery": 0.073,
-        "munitions": 0.039,
-        "arms": 0.004
-      },
+      "capacity": { "food": 0.614, "energy": 0.126, "steel": 0.074, "machinery": 0.073, "munitions": 0.039, "infantry": 0.004, "armour": 0.0366, "artillery": 0.0263 },
       "infrastructure": 0.65,
       "port": 0.6,
       "links": [
@@ -1418,14 +1159,7 @@
       ],
       "terrain": "hill",
       "population": 130.0,
-      "capacity": {
-        "food": 0.859,
-        "energy": 0.176,
-        "steel": 0.103,
-        "machinery": 0.102,
-        "munitions": 0.054,
-        "arms": 0.006
-      },
+      "capacity": { "food": 0.859, "energy": 0.176, "steel": 0.103, "machinery": 0.102, "munitions": 0.054, "infantry": 0.006, "armour": 0.0511, "artillery": 0.0365 },
       "infrastructure": 0.65,
       "port": 0.6,
       "links": [
@@ -1457,14 +1191,7 @@
       ],
       "terrain": "hill",
       "population": 68.0,
-      "capacity": {
-        "food": 1.085,
-        "energy": 0.066,
-        "steel": 0.017,
-        "machinery": 0.014,
-        "munitions": 0.009,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.085, "energy": 0.066, "steel": 0.017, "machinery": 0.014, "munitions": 0.009, "infantry": 0.0, "armour": 0.0075, "artillery": 0.006 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -1487,14 +1214,7 @@
       ],
       "terrain": "urban",
       "population": 510.0,
-      "capacity": {
-        "food": 0.281,
-        "energy": 1.083,
-        "steel": 0.726,
-        "machinery": 1.467,
-        "munitions": 0.633,
-        "arms": 0.599
-      },
+      "capacity": { "food": 0.281, "energy": 1.083, "steel": 0.726, "machinery": 1.467, "munitions": 0.633, "infantry": 0.599, "armour": 0.6223, "artillery": 0.3081 },
       "infrastructure": 0.85,
       "port": 1.2,
       "links": [
@@ -1525,14 +1245,7 @@
       ],
       "terrain": "hill",
       "population": 80.0,
-      "capacity": {
-        "food": 1.277,
-        "energy": 0.077,
-        "steel": 0.02,
-        "machinery": 0.017,
-        "munitions": 0.011,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.277, "energy": 0.077, "steel": 0.02, "machinery": 0.017, "munitions": 0.011, "infantry": 0.0, "armour": 0.0089, "artillery": 0.0072 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -1555,14 +1268,7 @@
       ],
       "terrain": "hill",
       "population": 128.0,
-      "capacity": {
-        "food": 0.845,
-        "energy": 0.173,
-        "steel": 0.101,
-        "machinery": 0.1,
-        "munitions": 0.053,
-        "arms": 0.005
-      },
+      "capacity": { "food": 0.845, "energy": 0.173, "steel": 0.101, "machinery": 0.1, "munitions": 0.053, "infantry": 0.005, "armour": 0.0502, "artillery": 0.0358 },
       "infrastructure": 0.65,
       "port": 0.6,
       "links": [
@@ -1581,14 +1287,7 @@
       ],
       "terrain": "plain",
       "population": 171.0,
-      "capacity": {
-        "food": 2.729,
-        "energy": 0.165,
-        "steel": 0.043,
-        "machinery": 0.036,
-        "munitions": 0.024,
-        "arms": 0.0
-      },
+      "capacity": { "food": 2.729, "energy": 0.165, "steel": 0.043, "machinery": 0.036, "munitions": 0.024, "infantry": 0.0, "armour": 0.019, "artillery": 0.0155 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -1619,14 +1318,7 @@
       ],
       "terrain": "plain",
       "population": 111.0,
-      "capacity": {
-        "food": 0.367,
-        "energy": 0.257,
-        "steel": 0.334,
-        "machinery": 0.218,
-        "munitions": 0.107,
-        "arms": 0.036
-      },
+      "capacity": { "food": 0.367, "energy": 0.257, "steel": 0.334, "machinery": 0.218, "munitions": 0.107, "infantry": 0.036, "armour": 0.1264, "artillery": 0.1049 },
       "infrastructure": 0.8,
       "port": 0.9,
       "links": [
@@ -1653,14 +1345,7 @@
       ],
       "terrain": "plain",
       "population": 105.0,
-      "capacity": {
-        "food": 1.676,
-        "energy": 0.101,
-        "steel": 0.027,
-        "machinery": 0.022,
-        "munitions": 0.014,
-        "arms": 0.0
-      },
+      "capacity": { "food": 1.676, "energy": 0.101, "steel": 0.027, "machinery": 0.022, "munitions": 0.014, "infantry": 0.0, "armour": 0.0118, "artillery": 0.0095 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -1687,14 +1372,7 @@
       ],
       "terrain": "hill",
       "population": 155.0,
-      "capacity": {
-        "food": 2.474,
-        "energy": 0.15,
-        "steel": 0.039,
-        "machinery": 0.032,
-        "munitions": 0.021,
-        "arms": 0.0
-      },
+      "capacity": { "food": 2.474, "energy": 0.15, "steel": 0.039, "machinery": 0.032, "munitions": 0.021, "infantry": 0.0, "armour": 0.017, "artillery": 0.014 },
       "infrastructure": 0.6,
       "port": 0.7,
       "links": [
@@ -1722,14 +1400,7 @@
       ],
       "terrain": "hill",
       "population": 146.0,
-      "capacity": {
-        "food": 0.964,
-        "energy": 0.197,
-        "steel": 0.115,
-        "machinery": 0.115,
-        "munitions": 0.06,
-        "arms": 0.006
-      },
+      "capacity": { "food": 0.964, "energy": 0.197, "steel": 0.115, "machinery": 0.115, "munitions": 0.06, "infantry": 0.006, "armour": 0.0575, "artillery": 0.0408 },
       "infrastructure": 0.65,
       "port": 0.6,
       "links": [
