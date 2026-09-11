@@ -17,7 +17,7 @@
 | `docs/conventions.md` | **コーディング規約。拘束力がある。作業前に必ず読む** |
 | `docs/design.md` | 企画書。何を作ろうとしているか |
 | `docs/future-work.md` | 検討して見送った判断と残件。**同じ議論を繰り返さないための記録** |
-| `docs/mvp-spec.md` 〜 `docs/phase10-spec.md` | 各段階の実装仕様と受け入れ基準 |
+| `docs/mvp-spec.md` 〜 `docs/phase11-spec.md` | 各段階の実装仕様と受け入れ基準 |
 
 ## 構成
 
