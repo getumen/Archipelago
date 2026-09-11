@@ -32,6 +32,7 @@ use archipelago_sim::focus::NationalFocus;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::json::{self, Value};
+use archipelago_sim::military::Branch;
 use archipelago_sim::world::{Domain, Station};
 
 fn good_key(good: Good) -> &'static str {
@@ -181,10 +182,11 @@ pub fn action_to_value(action: &Action) -> Value {
         }
         Action::HoldUnit { unit } => Value::obj(vec![("type", Value::str("hold_unit")), ("unit", Value::num(unit.0 as f64))]),
         Action::DisbandUnit { unit } => Value::obj(vec![("type", Value::str("disband_unit")), ("unit", Value::num(unit.0 as f64))]),
-        Action::RecruitUnit { region, domain } => Value::obj(vec![
+        Action::RecruitUnit { region, domain, branch } => Value::obj(vec![
             ("type", Value::str("recruit_unit")),
             ("region", Value::num(region.0 as f64)),
             ("domain", Value::str(domain.key())),
+            ("branch", Value::str(branch.key())),
         ]),
         Action::ReinforceUnit { unit } => Value::obj(vec![("type", Value::str("reinforce_unit")), ("unit", Value::num(unit.0 as f64))]),
         Action::SetConscription(v) => Value::obj(vec![("type", Value::str("set_conscription")), ("value", Value::f32num(v))]),
@@ -266,7 +268,15 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
                 None => Domain::Land,
                 Some(key) => Domain::from_key(key).ok_or_else(|| format!("unknown domain `{key}`"))?,
             };
-            Ok(Action::RecruitUnit { region, domain })
+            // Stage 11B: defaults to `Infantry` when absent, the same
+            // "missing means the old default" convention `domain` above
+            // already established - a recording made before this stage
+            // replays unchanged.
+            let branch = match v.get("branch").and_then(Value::as_str) {
+                None => Branch::Infantry,
+                Some(key) => Branch::from_key(key).ok_or_else(|| format!("unknown branch `{key}`"))?,
+            };
+            Ok(Action::RecruitUnit { region, domain, branch })
         }
         "reinforce_unit" => Ok(Action::ReinforceUnit { unit: UnitId(u32_field("unit")?) }),
         "set_conscription" => Ok(Action::SetConscription(f32_field("value")?)),
@@ -504,15 +514,15 @@ mod tests {
             Action::MoveUnit { unit: UnitId(3), to: Station::Sea(SeaZoneId(1)) },
             Action::HoldUnit { unit: UnitId(2) },
             Action::DisbandUnit { unit: UnitId(2) },
-            Action::RecruitUnit { region: RegionId(1), domain: Domain::Land },
-            Action::RecruitUnit { region: RegionId(1), domain: Domain::Sea },
+            Action::RecruitUnit { region: RegionId(1), domain: Domain::Land, branch: Branch::Infantry },
+            Action::RecruitUnit { region: RegionId(1), domain: Domain::Sea, branch: Branch::Infantry },
             // Stage 10D: these two were never in this sample list even
             // though `action_to_value`/`action_from_value` already handled
             // them (`Domain::Air`'s own arm landed in Stage 10A,
             // `StrikeNode` in Stage 10C) - this test's whole point is to
             // catch a codec that silently mis-round-trips a variant, and
             // neither variant was actually being checked here before.
-            Action::RecruitUnit { region: RegionId(1), domain: Domain::Air },
+            Action::RecruitUnit { region: RegionId(1), domain: Domain::Air, branch: Branch::Infantry },
             Action::StrikeNode { node: archipelago_sim::ids::TransportNodeId(2) },
             Action::ReinforceUnit { unit: UnitId(4) },
             Action::SetConscription(0.42),

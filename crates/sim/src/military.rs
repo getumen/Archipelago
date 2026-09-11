@@ -2,22 +2,136 @@
 //! systems that resolve what happens to them each tick.
 
 use crate::balance::{
-    AIR_MOVE_DAYS, ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD, BROKEN_LOSS_MULT,
-    CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE, DEVASTATION_PER_COMBAT_DAMAGE,
-    EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT, FLEET_MOVE_DAYS,
-    FOCUS_DEFENSIVE_HOME_DEFENSE_MULT, FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT,
-    FOCUS_MILITARY_ORG_CAP_MULT, MANPOWER_LOSS_PER_DAMAGE, MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN,
-    MUTINY_ORG_REGEN_MULT, OCCUPATION_DECAY, OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN,
-    ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR, UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
-    UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN, WAR_SUPPORT_LOSS_PENALTY,
+    AIR_MOVE_DAYS, ARMOUR_HILL_MULT, ARMOUR_MOUNTAIN_MULT, ARMOUR_MOVE_MULT, ARMOUR_PLAIN_MULT,
+    ARMOUR_SUPPLY_WEIGHT, ARMOUR_URBAN_MULT, ARTILLERY_ATTACK_MULT, ARTILLERY_MOVE_MULT,
+    ARTILLERY_SUPPLY_WEIGHT, ATTRITION_MANPOWER, ATTRITION_ORG, ATTRITION_SUPPLY_THRESHOLD,
+    BROKEN_LOSS_MULT, CAPTURE_UNREST, COMBAT_DAMAGE, DEVASTATION_ON_CAPTURE,
+    DEVASTATION_PER_COMBAT_DAMAGE, EQUIPMENT_LOSS_PER_DAMAGE, EXPERIENCE_GAIN_PER_HIT,
+    FLEET_MOVE_DAYS, FOCUS_DEFENSIVE_HOME_DEFENSE_MULT, FOCUS_DEFENSIVE_OFFENSE_PENALTY_MULT,
+    FOCUS_MILITARY_ORG_CAP_MULT, INFANTRY_HILL_MULT, INFANTRY_MOUNTAIN_MULT, INFANTRY_MOVE_MULT,
+    INFANTRY_PLAIN_MULT, INFANTRY_SUPPLY_WEIGHT, INFANTRY_URBAN_MULT, MANPOWER_LOSS_PER_DAMAGE,
+    MORALE_LOSS_PER_BROKEN_HIT, MORALE_REGEN, MUTINY_ORG_REGEN_MULT, OCCUPATION_DECAY,
+    OCCUPATION_RATE, ORG_DAMAGE_MULT, ORG_MARCH_DRAIN, ORG_REGEN, STRAIT_CROSSING_FACTOR_FLOOR,
+    UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG, WAR_SUPPORT_CAPTURE_GAIN,
+    WAR_SUPPORT_LOSS_PENALTY,
 };
 use crate::diplomacy::Treaty;
 use crate::event::Event;
 use crate::focus::{self, NationalFocus};
+use crate::good::Good;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::naval;
 use crate::rng::Rng;
-use crate::world::{OccupationKind, Region, Station, Terrain, World};
+use crate::world::{Domain, OccupationKind, Region, Station, Terrain, World};
+
+/// Stage 11B (docs/phase11-spec.md §1): the three land branches. Sea and Air
+/// stay undivided (each is already distinguished by `Domain`/`Station`, and
+/// splitting either further would need its own justification the spec
+/// explicitly withholds - "海軍と航空は分けない"). A wildcard-free enum, the
+/// same discipline `Domain`/`Terrain`/`Station` already follow: adding a
+/// fourth branch anywhere in this codebase becomes a compile error at every
+/// `match`, not a silently-ignored case.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Branch {
+    Infantry,
+    Armour,
+    Artillery,
+}
+
+impl Branch {
+    /// The commodity this branch's equipment is drawn from and refilled
+    /// into - `action::apply_recruit`/`apply_reinforce`/`apply_disband` all
+    /// go through this rather than a hardcoded `Good::Infantry`, which is
+    /// exactly the single-equipment-pool shape Stage 11B exists to break.
+    pub const fn equipment_good(self) -> Good {
+        match self {
+            Branch::Infantry => Good::Infantry,
+            Branch::Armour => Good::Armour,
+            Branch::Artillery => Good::Artillery,
+        }
+    }
+
+    /// `balance::INFANTRY_SUPPLY_WEIGHT`/`ARMOUR_SUPPLY_WEIGHT`/
+    /// `ARTILLERY_SUPPLY_WEIGHT`'s own doc has the physical justification for
+    /// each value - read by `logistics::unit_supply_demand`.
+    pub const fn supply_weight(self) -> f32 {
+        match self {
+            Branch::Infantry => INFANTRY_SUPPLY_WEIGHT,
+            Branch::Armour => ARMOUR_SUPPLY_WEIGHT,
+            Branch::Artillery => ARTILLERY_SUPPLY_WEIGHT,
+        }
+    }
+
+    /// `balance::INFANTRY_MOVE_MULT`/`ARMOUR_MOVE_MULT`/`ARTILLERY_MOVE_MULT`'s
+    /// own doc has the justification - read by `action::apply_move`'s land
+    /// arm and `tick_recovery`'s land retreat branch, multiplied onto
+    /// `move_required` alongside the existing `hostile`/terrain terms.
+    pub const fn move_mult(self) -> f32 {
+        match self {
+            Branch::Infantry => INFANTRY_MOVE_MULT,
+            Branch::Armour => ARMOUR_MOVE_MULT,
+            Branch::Artillery => ARTILLERY_MOVE_MULT,
+        }
+    }
+
+    /// Lowercase English key, the same `Domain::key()`/`Good::key()`
+    /// convention - used wherever a `Branch` crosses a text boundary
+    /// (JSON action encoding, observation export).
+    pub const fn key(self) -> &'static str {
+        match self {
+            Branch::Infantry => "infantry",
+            Branch::Armour => "armour",
+            Branch::Artillery => "artillery",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Branch> {
+        match key {
+            "infantry" => Some(Branch::Infantry),
+            "armour" => Some(Branch::Armour),
+            "artillery" => Some(Branch::Artillery),
+            _ => None,
+        }
+    }
+}
+
+/// Stage 11B's per-branch, per-terrain/posture combat multiplier - folded
+/// into `raw_power`/`side_power` in `tick_combat` at exactly the
+/// multiplicative slot `Terrain::defense_bonus` and `combat_posture_mult`
+/// already occupy there (docs/phase11-spec.md §0: "戦闘の三すくみにはしな
+/// い" - this reads terrain or posture, never *another branch*, so there is
+/// no rock/paper/scissors matchup to derive).
+///
+/// `Infantry`/`Armour` read `terrain` - the region's own terrain, exactly
+/// like `Terrain::defense_bonus` already does, independent of who is
+/// attacking or defending. `Artillery` reads `is_defender` instead: its
+/// differentiator is deliberately posture, not terrain
+/// (`balance::ARTILLERY_ATTACK_MULT`'s own doc), riding the very same
+/// attacker/defender fact `combat_posture_mult` already established for
+/// `NationalFocus::DefensivePosture` rather than inventing a second axis.
+pub fn branch_terrain_mult(branch: Branch, terrain: Terrain, is_defender: bool) -> f32 {
+    match branch {
+        Branch::Infantry => match terrain {
+            Terrain::Mountain => INFANTRY_MOUNTAIN_MULT,
+            Terrain::Hill => INFANTRY_HILL_MULT,
+            Terrain::Urban => INFANTRY_URBAN_MULT,
+            Terrain::Plain => INFANTRY_PLAIN_MULT,
+        },
+        Branch::Armour => match terrain {
+            Terrain::Plain => ARMOUR_PLAIN_MULT,
+            Terrain::Hill => ARMOUR_HILL_MULT,
+            Terrain::Mountain => ARMOUR_MOUNTAIN_MULT,
+            Terrain::Urban => ARMOUR_URBAN_MULT,
+        },
+        Branch::Artillery => {
+            if is_defender {
+                1.0
+            } else {
+                ARTILLERY_ATTACK_MULT
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Movement {
@@ -90,11 +204,38 @@ pub struct Unit {
     pub arms_delivery_station: Station,
     pub experience: f32,
     pub alive: bool,
+    /// Stage 11B (docs/phase11-spec.md §1): `Some(branch)` for every land
+    /// unit (`station.domain() == Domain::Land`), `None` for every fleet and
+    /// air unit - there is no fourth "no branch" land value to accidentally
+    /// construct, and no branch to misread for a domain that doesn't have
+    /// one. Set once, at `action::apply_recruit`, and never changed
+    /// afterward (a unit's branch is fixed at raising, like its `Domain`
+    /// already effectively is).
+    pub branch: Option<Branch>,
 }
 
 impl Unit {
     pub fn manpower_ratio(&self) -> f32 {
         self.manpower / UNIT_MANPOWER
+    }
+
+    /// The commodity this unit's equipment is drawn from/refunded to -
+    /// `Branch::equipment_good` for a land unit, `Good::Naval`/`Good::
+    /// Aircraft` fixed for a fleet/squadron (docs/phase11-spec.md §2 "海軍と
+    /// 航空の装備": Stage 11B gives them their own commodity rather than
+    /// splitting either further by sub-type). The single place `action::
+    /// apply_recruit`/`apply_reinforce`/`apply_disband` ask "which stock does
+    /// this unit's equipment belong to" - never three independently
+    /// maintained copies of the same domain/branch match that could drift.
+    pub fn equipment_good(&self) -> Good {
+        match self.station.domain() {
+            Domain::Land => self
+                .branch
+                .expect("a land unit always carries Some(branch) - see Unit::branch's own doc")
+                .equipment_good(),
+            Domain::Sea => Good::Naval,
+            Domain::Air => Good::Aircraft,
+        }
     }
 
     pub fn equipment_ratio(&self) -> f32 {
@@ -317,6 +458,7 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         let region = world.region(region_id);
         let defender = pick_defender(world, region, &factions_present);
         let defense_bonus = region.terrain.defense_bonus();
+        let region_terrain = region.terrain;
         let region_core = region.core;
 
         // Stage 3C `NationalFocus::DefensivePosture` (docs/phase3-spec.md:
@@ -333,16 +475,35 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
             .map(|&f| combat_posture_mult(world, f, f == defender, region_core == f))
             .collect();
 
-        // Effective power per side, in the same order as `factions_present`.
-        let power: Vec<f32> = factions_present
-            .iter()
-            .enumerate()
-            .map(|(i, &f)| {
-                let base = world.region_power(region_id, f);
-                let terrain_mult = if f == defender { defense_bonus } else { 1.0 };
-                base * terrain_mult * side_mult[i]
-            })
-            .collect();
+        // Effective power per side, in the same order as `factions_present`,
+        // and each side's own unit list with its already-computed effective
+        // power (`combat_power() * terrain_mult * side_mult * branch_mult`) -
+        // Stage 11B: `branch_mult` (`branch_terrain_mult`) varies *within* a
+        // side when it fields more than one branch, so `power[side_idx]` can
+        // no longer be `world.region_power`'s branch-blind sum times a
+        // uniform multiplier the way it was before branches existed; it is
+        // now the real sum of exactly the per-unit numbers the damage-sharing
+        // loop below uses, computed once here rather than twice.
+        let mut power: Vec<f32> = Vec::with_capacity(factions_present.len());
+        let mut side_units: Vec<Vec<(UnitId, f32)>> = Vec::with_capacity(factions_present.len());
+        for (i, &f) in factions_present.iter().enumerate() {
+            let is_defender = f == defender;
+            let terrain_mult = if is_defender { defense_bonus } else { 1.0 };
+            let units: Vec<(UnitId, f32)> = world
+                .units_in(region_id)
+                .filter(|u| u.owner == f)
+                .map(|u| {
+                    let branch_mult = u
+                        .branch
+                        .map(|b| branch_terrain_mult(b, region_terrain, is_defender))
+                        .unwrap_or(1.0);
+                    (u.id, u.combat_power() * terrain_mult * side_mult[i] * branch_mult)
+                })
+                .collect();
+            let side_power = units.iter().fold(0.0, |acc, &(_, p)| acc + p);
+            power.push(side_power);
+            side_units.push(units);
+        }
 
         let mut battle_casualties = 0.0f32;
         // Raw damage dealt in this region today, summed across every side
@@ -374,17 +535,9 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                 continue;
             }
 
-            let unit_ids: Vec<UnitId> = world
-                .units_in(region_id)
-                .filter(|u| u.owner == side_faction)
-                .map(|u| u.id)
-                .collect();
-
-            for unit_id in unit_ids {
+            for &(unit_id, raw_power) in &side_units[side_idx] {
                 fought[unit_id.index()] = true;
                 let unit = world.unit_mut(unit_id);
-                let terrain_mult = if side_faction == defender { defense_bonus } else { 1.0 };
-                let raw_power = unit.combat_power() * terrain_mult * side_mult[side_idx];
                 let share = raw_power / side_power;
                 let dmg = dmg_side * share;
 
@@ -586,7 +739,12 @@ pub fn tick_recovery(world: &mut World, fought: &[bool], events: &mut Vec<Event>
                     (Station::Region(from), Station::Region(to)) => {
                         let link = world.link_between(from, to).unwrap();
                         (
-                            move_required(link.kind, world.region(to).terrain, false) * 0.5,
+                            move_required(link.kind, world.region(to).terrain, false)
+                                * 0.5
+                                * unit
+                                    .branch
+                                    .expect("a land unit always carries Some(branch)")
+                                    .move_mult(),
                             link.strait_zone,
                         )
                     }

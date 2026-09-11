@@ -395,6 +395,29 @@ ARMOUR_TERRAIN_FACTOR_MOUNTAIN = 0.15
 ARTILLERY_COASTAL_FACTOR_COASTAL = 1.0
 ARTILLERY_COASTAL_FACTOR_INLAND = 0.6
 
+# --- Stage 11B: Naval/Aircraft (docs/phase11-spec.md §2 "海軍と航空の装備")
+# ------------------------------------------------------------------------
+# Finishes what Stage 11A deferred: `Domain::Sea`/`Domain::Air` recruits used
+# to draw `Good::Infantry`'s stock, sharing a pool with land's own
+# infantry-branch equipment even though a warship and a rifle share no
+# industrial base. Both get the exact same treatment Armour/Artillery got in
+# Stage 11A - their own independent fraction of `TARGET_INDUSTRY_TOTAL`
+# (`TARGET_ARMOUR_TOTAL`'s own doc has the full account of why "independent
+# of the sum-to-1.0 `CAPACITY_SHARE_*` pool" rather than carved out of it),
+# each with its own weight shape so the two read as genuinely different
+# industries:
+#   - Naval scales with population *and* how much port a hex actually has
+#     (`build_ports`'s own already-solved per-hex figure, itself built from
+#     coastal-direction count and population) - a shipyard's capacity is a
+#     function of the harbor it sits on, not population alone the way
+#     Artillery's flat coastal bonus is.
+#   - Aircraft reuses Machinery's own "concentrates super-linearly in dense
+#     hexes" signal (`MACHINERY_DENSITY_EXPONENT`) with no coastal or port
+#     term at all - airframe manufacturing draws on the same advanced,
+#     population-dense industrial base Machinery does, landlocked or not.
+TARGET_NAVAL_TOTAL = TARGET_INDUSTRY_TOTAL * 0.07
+TARGET_AIRCRAFT_TOTAL = TARGET_INDUSTRY_TOTAL * 0.06
+
 # Steel ("人口と、沿岸・平地であることに比例（臨海工業地帯）" - section 2):
 # capacity_h ∝ population_h * steel_factor_h, where steel_factor_h multiplies
 # a terrain term (flat land favored) by a coastal term (coastal favored) -

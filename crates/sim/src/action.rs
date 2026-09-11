@@ -15,7 +15,7 @@ use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use crate::logistics;
-use crate::military::{air_move_required, fleet_move_required, move_required, Movement, Unit};
+use crate::military::{air_move_required, fleet_move_required, move_required, Branch, Movement, Unit};
 use crate::naval;
 use crate::transport::{Condition, TransportNodeKind};
 use crate::world::{Domain, Station, World};
@@ -44,11 +44,20 @@ pub enum Action {
     /// depot. See `apply_disband`'s doc for exactly what is refunded, and
     /// why standing down is refused while the unit is under enemy contact.
     DisbandUnit { unit: UnitId },
-    /// Stage 2D (docs/phase2-spec.md "艦隊"): `domain` picks land or sea.
-    /// A fleet can only be built in an owned, uncontested region that has a
-    /// port (`region.port > 0.0`); it launches into that port's lowest-id
-    /// facing sea zone (`naval::home_zone`).
-    RecruitUnit { region: RegionId, domain: Domain },
+    /// Stage 2D (docs/phase2-spec.md "艦隊"): `domain` picks land, sea, or
+    /// air. A fleet can only be built in an owned, uncontested region that
+    /// has a port (`region.port > 0.0`); it launches into that port's
+    /// lowest-id facing sea zone (`naval::home_zone`).
+    ///
+    /// Stage 11B (docs/phase11-spec.md §1): `branch` picks the land branch
+    /// (Infantry/Armour/Artillery) a `Domain::Land` recruit raises - see
+    /// `military::Unit::branch`'s own doc for the invariant this stamps onto
+    /// the new unit. Present regardless of `domain` (never a fourth,
+    /// domain-conditional payload shape) but read only by the `Domain::Land`
+    /// arm of `apply_recruit`; a `Domain::Sea`/`Domain::Air` recruit's own
+    /// equipment commodity (`Good::Naval`/`Good::Aircraft`) doesn't depend on
+    /// it at all.
+    RecruitUnit { region: RegionId, domain: Domain, branch: Branch },
     ReinforceUnit { unit: UnitId },
     SetConscription(f32),
     SetIndustryPriority { good: Good, weight: f32 },
@@ -440,7 +449,7 @@ pub fn apply_action(
         Action::MoveUnit { unit, to } => apply_move(world, faction, unit, to),
         Action::HoldUnit { unit } => apply_hold(world, faction, unit),
         Action::DisbandUnit { unit } => apply_disband(world, faction, unit),
-        Action::RecruitUnit { region, domain } => apply_recruit(world, faction, region, domain),
+        Action::RecruitUnit { region, domain, branch } => apply_recruit(world, faction, region, domain, branch),
         Action::ReinforceUnit { unit } => apply_reinforce(world, faction, unit),
         Action::SetConscription(value) => apply_set_conscription(world, faction, value),
         Action::SetIndustryPriority { good, weight } => {
@@ -509,7 +518,14 @@ fn apply_move(
             let link = world.link_between(from_r, to_r).ok_or(ActionError::NotAdjacent)?;
             let dest = world.region(to_r);
             let hostile = dest.owner != faction;
-            let required = move_required(link.kind, dest.terrain, hostile);
+            // Stage 11B (docs/phase11-spec.md §1 "移動"): a land unit's own
+            // branch speed multiplier, riding the same multiplicative slot
+            // `hostile`'s `1.5x` already occupies inside `move_required`.
+            let branch_mult = unit
+                .branch
+                .expect("a land unit always carries Some(branch) - see Unit::branch's own doc")
+                .move_mult();
+            let required = move_required(link.kind, dest.terrain, hostile) * branch_mult;
             // External code review fix (Stage 2D): a Strait link's crossing
             // time is throttled the same way its supply throughput is — by
             // the highest sea control any other faction holds in the zone
@@ -653,9 +669,14 @@ fn apply_hold(world: &mut World, faction: FactionId, unit_id: UnitId) -> Result<
 ///   back into `labor_ratio` over the following weeks exactly as it does
 ///   idle drafted conscripts. No new recovery mechanism is introduced;
 ///   disbanding just hands the existing one more to work with.
-/// - Equipment goes back to `Good::Infantry` stock outright - there is no
-///   equivalent "pool with its own decay" to route it through; Arms is
-///   already a plain stock every other system draws from and refills.
+/// - Equipment goes back to this unit's own `Unit::equipment_good` stock
+///   outright - there is no equivalent "pool with its own decay" to route it
+///   through; every equipment good is already a plain stock every other
+///   system draws from and refills, and Stage 11B routes the refund to
+///   whichever one this unit actually drew from (Infantry/Armour/Artillery
+///   by branch, Naval/Aircraft by domain) rather than always `Good::
+///   Infantry` - refunding into the wrong pool would itself be a one-way
+///   leak out of whichever stock actually paid for this unit.
 ///
 /// Rejected while the unit shares its station with an enemy
 /// (`ActionError::RegionContested`, the same check and error
@@ -681,8 +702,9 @@ fn apply_disband(world: &mut World, faction: FactionId, unit_id: UnitId) -> Resu
         return Err(ActionError::RegionContested);
     }
 
+    let equipment_good = unit.equipment_good();
     world.faction_mut(faction).manpower += manpower;
-    world.faction_mut(faction).stock[Good::Infantry.index()] += equipment;
+    world.faction_mut(faction).stock[equipment_good.index()] += equipment;
     // Stage 10A (`codex review`, P2): `apply_recruit` charges
     // `AIR_UNIT_MACHINERY_COST` on top of manpower and Arms for
     // `Domain::Air`, so disband has to hand the airframe back too or a
@@ -720,6 +742,7 @@ fn apply_recruit(
     faction: FactionId,
     region_id: RegionId,
     domain: Domain,
+    branch: Branch,
 ) -> Result<(), ActionError> {
     let region = world
         .regions
@@ -812,10 +835,21 @@ fn apply_recruit(
     // ("新しい Good を追加しない"), so the airframe itself is priced in an
     // existing industrial input instead of a fourth recruit-cost good.
     let machinery_cost = if domain == Domain::Air { AIR_UNIT_MACHINERY_COST } else { 0.0 };
+    // Stage 11B: which commodity `equipment_cost` above is actually priced
+    // in - `Branch::equipment_good` for a land recruit (only `domain ==
+    // Domain::Land` gives `branch` any meaning; a fresh `Unit` isn't
+    // constructed yet to ask `Unit::equipment_good` through), `Good::Naval`/
+    // `Good::Aircraft` fixed for sea/air (`Good`'s own module doc - finishing
+    // what 11A deferred instead of both sharing `Good::Infantry`).
+    let equipment_good = match domain {
+        Domain::Land => branch.equipment_good(),
+        Domain::Sea => Good::Naval,
+        Domain::Air => Good::Aircraft,
+    };
     if f.manpower < UNIT_MANPOWER {
         return Err(ActionError::InsufficientManpower);
     }
-    if f.stock[Good::Infantry.index()] < equipment_cost {
+    if f.stock[equipment_good.index()] < equipment_cost {
         return Err(ActionError::InsufficientEquipment);
     }
     if f.stock[Good::Machinery.index()] < machinery_cost {
@@ -823,7 +857,7 @@ fn apply_recruit(
     }
 
     world.faction_mut(faction).manpower -= UNIT_MANPOWER;
-    world.faction_mut(faction).stock[Good::Infantry.index()] -= equipment_cost;
+    world.faction_mut(faction).stock[equipment_good.index()] -= equipment_cost;
     world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
 
     let id = UnitId(world.units.len() as u32);
@@ -849,6 +883,7 @@ fn apply_recruit(
         arms_delivery_station: station,
         experience: 0.0,
         alive: true,
+        branch: if domain == Domain::Land { Some(branch) } else { None },
     });
     Ok(())
 }
@@ -990,10 +1025,15 @@ fn apply_reinforce(
     // against the now-smaller remaining gap instead of a shrinking budget).
     let deliverable_equipment = need_equipment.min(unit.arms_budget.max(0.0));
     let is_air = unit.station.domain() == Domain::Air;
+    // Stage 11B: this unit's own equipment commodity - Infantry/Armour/
+    // Artillery by branch for a land unit, Naval/Aircraft fixed for a
+    // fleet/squadron (`Unit::equipment_good`'s own doc). Replaces the
+    // hardcoded `Good::Infantry` every domain and every branch used to share.
+    let equipment_good = unit.equipment_good();
 
     let f = world.faction(faction);
     let fill_manpower = if network_reachable { need_manpower.min(f.manpower) } else { 0.0 };
-    let mut fill_equipment = deliverable_equipment.min(f.stock[Good::Infantry.index()]);
+    let mut fill_equipment = deliverable_equipment.min(f.stock[equipment_good.index()]);
     // Stage 10A exploit fix (`codex review`, P2): an air unit's equipment
     // *is* its airframes, so replacing it must cost `Good::Machinery`, not
     // only `Good::Infantry` - the same industrial input `apply_recruit` prices a
@@ -1031,7 +1071,7 @@ fn apply_reinforce(
     };
 
     world.faction_mut(faction).manpower -= fill_manpower;
-    world.faction_mut(faction).stock[Good::Infantry.index()] -= fill_equipment;
+    world.faction_mut(faction).stock[equipment_good.index()] -= fill_equipment;
     if is_air {
         world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
     }

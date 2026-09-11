@@ -84,9 +84,20 @@ fn region_demand(world: &World) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
 /// *identical* question for exactly one arriving unit's own demand, rather
 /// than an independently-maintained second copy of this same two-line
 /// formula that could silently drift from `region_demand`'s.
-fn unit_supply_demand(unit: &Unit, in_combat: bool) -> (f32, f32) {
+pub(crate) fn unit_supply_demand(unit: &Unit, in_combat: bool) -> (f32, f32) {
     let mult = if in_combat { COMBAT_SUPPLY_MULT } else { 1.0 };
-    let munitions = unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult;
+    // Stage 11B (docs/phase11-spec.md §1 "補給の重さ"): `Branch::supply_weight`
+    // rides this exact same multiplicative term `COMBAT_SUPPLY_MULT` already
+    // occupies, rather than a new demand channel - a heavier branch simply
+    // asks the transport network for more daily throughput per unit of
+    // manpower. This function is shared across all three domains
+    // (`region_demand` above, and `instantaneous_land_grant`/
+    // `instantaneous_sea_grant`/`instantaneous_air_grant` below) - only a
+    // land unit carries `Some(branch)` (`Unit::branch`'s own doc), so a
+    // fleet/squadron reads the neutral `1.0` here, exactly its pre-Stage-11B
+    // weight.
+    let branch_weight = unit.branch.map(|b| b.supply_weight()).unwrap_or(1.0);
+    let munitions = unit.manpower * SUPPLY_NEED_PER_MANPOWER * mult * branch_weight;
     let equipment_gap = (UNIT_EQUIPMENT - unit.equipment).max(0.0);
     let arms = equipment_gap * ARMS_SUPPLY_NEED_PER_GAP;
     (munitions, arms)
@@ -1570,6 +1581,23 @@ pub fn distribute_supply(world: &mut World) {
             }
             let faction = &world.factions[f];
             let w_munitions = faction.logistics_priority[Good::Munitions.index()];
+            // Stage 11B: this stays keyed to `Good::Infantry`'s slot even
+            // though a region can now field Armour/Artillery units too -
+            // `logistics_priority` splits the *network's* delivery-ratio
+            // budget between consumables and equipment shipments in general,
+            // a transport-capacity question the network is indifferent to
+            // the contents of, not the *stock* question of which specific
+            // commodity gets debited (that separation happens per unit's own
+            // `Unit::equipment_good` in `action::apply_recruit`/
+            // `apply_reinforce`/`apply_disband` - see `Good`'s own module
+            // doc for why the two must not be conflated). Splitting this
+            // ratio further, per branch, would need every land branch's
+            // demand carried as its own array through `region_demand`/
+            // `compute_transport_flow` for a benefit this stage doesn't ask
+            // for: no acceptance criterion needs the *ratio* to differ by
+            // branch, only the *stock* each branch draws down and the
+            // *demand* a heavier branch adds to the network (already true via
+            // `Branch::supply_weight`, folded into `demand_munitions` itself).
             let w_arms = faction.logistics_priority[Good::Infantry.index()];
             let (m, a) =
                 split_munitions_arms(avail[r][f], w_munitions, w_arms, demand_munitions[r][f], demand_arms[r][f]);
@@ -1591,7 +1619,9 @@ pub fn distribute_supply(world: &mut World) {
             }
             let faction = &world.factions[f];
             let w_munitions = faction.logistics_priority[Good::Munitions.index()];
-            let w_arms = faction.logistics_priority[Good::Infantry.index()];
+            // Stage 11B: fleets draw `Good::Naval`, not `Good::Infantry` -
+            // finishing what 11A deferred (`Good`'s own module doc).
+            let w_arms = faction.logistics_priority[Good::Naval.index()];
             let (m, a) = split_munitions_arms(
                 avail_zone[z][f],
                 w_munitions,
@@ -1619,7 +1649,8 @@ pub fn distribute_supply(world: &mut World) {
             }
             let faction = &world.factions[f];
             let w_munitions = faction.logistics_priority[Good::Munitions.index()];
-            let w_arms = faction.logistics_priority[Good::Infantry.index()];
+            // Stage 11B: air units draw `Good::Aircraft`, not `Good::Infantry`.
+            let w_arms = faction.logistics_priority[Good::Aircraft.index()];
             let (m, a) = split_munitions_arms(
                 avail_air[n][f],
                 w_munitions,

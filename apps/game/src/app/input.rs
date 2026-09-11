@@ -42,6 +42,7 @@ use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::ALL_FOCI;
 use archipelago_sim::good::{ALL_GOODS, GOOD_COUNT};
 use archipelago_sim::ids::RegionId;
+use archipelago_sim::military::Branch;
 use archipelago_sim::world::{Domain, Station};
 
 use super::map_mode::MapModeRes;
@@ -366,11 +367,11 @@ fn handle_menu_keys(keys: &ButtonInput<KeyCode>, region: RegionId, active_good: 
         return;
     }
     let action = if keys.just_pressed(KeyCode::Digit1) {
-        Some(Action::RecruitUnit { region, domain: Domain::Land })
+        Some(Action::RecruitUnit { region, domain: Domain::Land, branch: Branch::Infantry })
     } else if keys.just_pressed(KeyCode::Digit2) {
-        Some(Action::RecruitUnit { region, domain: Domain::Sea })
+        Some(Action::RecruitUnit { region, domain: Domain::Sea, branch: Branch::Infantry })
     } else if keys.just_pressed(KeyCode::Digit3) {
-        Some(Action::RecruitUnit { region, domain: Domain::Air })
+        Some(Action::RecruitUnit { region, domain: Domain::Air, branch: Branch::Infantry })
     } else if keys.just_pressed(KeyCode::Digit4) {
         Some(Action::Build { region, project: Project::Infrastructure })
     } else if keys.just_pressed(KeyCode::Digit5) {
@@ -1199,7 +1200,7 @@ mod tests {
     fn air_unit_region_click_redeploys_to_that_regions_airfield() {
         let mut sim = SimRes(SimDriver::new_with_player(archipelago_sim::scenario::build_world(), 1, Some(FactionId(0)), None));
         let capital = sim.0.world().faction(FactionId(0)).capital;
-        sim.0.push_human_action(Action::RecruitUnit { region: capital, domain: Domain::Air });
+        sim.0.push_human_action(Action::RecruitUnit { region: capital, domain: Domain::Air, branch: Branch::Infantry });
         sim.0.tick();
         assert!(sim.0.last_human_action_errors().is_empty(), "recruiting the squadron used by this test must succeed: {:?}", sim.0.last_human_action_errors());
         let squadron = sim

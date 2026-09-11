@@ -13,7 +13,9 @@
         "munitions": 0.3602,
         "infantry": 0.0037,
         "armour": 0.0358,
-        "artillery": 0.08
+        "artillery": 0.08,
+        "naval": 0.0771,
+        "aircraft": 0.0198
       },
       "infrastructure": 0.624,
       "port": 1.029,
@@ -42,7 +44,9 @@
         "munitions": 0.2935,
         "infantry": 0.0009,
         "armour": 0.0118,
-        "artillery": 0.04
+        "artillery": 0.04,
+        "naval": 0.0299,
+        "aircraft": 0.0065
       },
       "infrastructure": 0.588,
       "port": 0.799,
@@ -74,7 +78,9 @@
         "munitions": 0.3589,
         "infantry": 0.0036,
         "armour": 0.0352,
-        "artillery": 0.0792
+        "artillery": 0.0792,
+        "naval": 0.0658,
+        "aircraft": 0.0195
       },
       "infrastructure": 0.623,
       "port": 0.888,
@@ -111,7 +117,9 @@
         "munitions": 0.2774,
         "infantry": 0.0005,
         "armour": 0.003,
-        "artillery": 0.0304
+        "artillery": 0.0304,
+        "naval": 0.0159,
+        "aircraft": 0.0042
       },
       "infrastructure": 0.476,
       "port": 0.561,
@@ -155,7 +163,9 @@
         "munitions": 0.2651,
         "infantry": 0.0003,
         "armour": 0.002,
-        "artillery": 0.023
+        "artillery": 0.023,
+        "naval": 0.0131,
+        "aircraft": 0.0027
       },
       "infrastructure": 0.466,
       "port": 0.606,
@@ -195,7 +205,9 @@
         "munitions": 0.3224,
         "infantry": 0.0019,
         "armour": 0.0084,
-        "artillery": 0.0574
+        "artillery": 0.0574,
+        "naval": 0.0339,
+        "aircraft": 0.0116
       },
       "infrastructure": 0.505,
       "port": 0.632,
@@ -239,7 +251,9 @@
         "munitions": 0.2967,
         "infantry": 0.001,
         "armour": 0.0127,
-        "artillery": 0.0419
+        "artillery": 0.0419,
+        "naval": 0.0206,
+        "aircraft": 0.0071
       },
       "infrastructure": 0.59,
       "port": 0.524,
@@ -287,7 +301,9 @@
         "munitions": 0.8313,
         "infantry": 0.0749,
         "armour": 0.1605,
-        "artillery": 0.3624
+        "artillery": 0.3624,
+        "naval": 0.3488,
+        "aircraft": 0.2223
       },
       "infrastructure": 0.663,
       "port": 1.028,
@@ -331,7 +347,9 @@
         "munitions": 1.0621,
         "infantry": 0.143,
         "armour": 0.673,
-        "artillery": 0.5007
+        "artillery": 0.5007,
+        "naval": 0.6018,
+        "aircraft": 0.3729
       },
       "infrastructure": 1.0,
       "port": 1.284,
@@ -367,7 +385,9 @@
         "munitions": 0.3284,
         "infantry": 0.0021,
         "armour": 0.0231,
-        "artillery": 0.0609
+        "artillery": 0.0609,
+        "naval": 0.0445,
+        "aircraft": 0.0128
       },
       "infrastructure": 0.608,
       "port": 0.78,
@@ -403,7 +423,9 @@
         "munitions": 0.3091,
         "infantry": 0.0014,
         "armour": 0.0066,
-        "artillery": 0.0494
+        "artillery": 0.0494,
+        "naval": 0.0348,
+        "aircraft": 0.0092
       },
       "infrastructure": 0.497,
       "port": 0.753,
@@ -439,7 +461,9 @@
         "munitions": 0.4051,
         "infantry": 0.0065,
         "armour": 0.0569,
-        "artillery": 0.1069
+        "artillery": 0.1069,
+        "naval": 0.0798,
+        "aircraft": 0.0315
       },
       "infrastructure": 0.643,
       "port": 0.798,
@@ -479,7 +503,9 @@
         "munitions": 0.4156,
         "infantry": 0.0073,
         "armour": 0.0624,
-        "artillery": 0.1132
+        "artillery": 0.1132,
+        "naval": 0.0708,
+        "aircraft": 0.0346
       },
       "infrastructure": 0.647,
       "port": 0.668,
@@ -527,7 +553,9 @@
         "munitions": 0.2516,
         "infantry": 0.0001,
         "armour": 0.0004,
-        "artillery": 0.009
+        "artillery": 0.009,
+        "naval": 0.0,
+        "aircraft": 0.0014
       },
       "infrastructure": 0.353,
       "port": 0.0,
@@ -575,7 +603,9 @@
         "munitions": 0.2832,
         "infantry": 0.0007,
         "armour": 0.0036,
-        "artillery": 0.0338
+        "artillery": 0.0338,
+        "naval": 0.0181,
+        "aircraft": 0.005
       },
       "infrastructure": 0.48,
       "port": 0.571,
@@ -619,7 +649,9 @@
         "munitions": 0.3132,
         "infantry": 0.0015,
         "armour": 0.0179,
-        "artillery": 0.0518
+        "artillery": 0.0518,
+        "naval": 0.0334,
+        "aircraft": 0.0099
       },
       "infrastructure": 0.6,
       "port": 0.689,
@@ -659,7 +691,9 @@
         "munitions": 0.2462,
         "infantry": 0.0001,
         "armour": 0.0007,
-        "artillery": 0.0117
+        "artillery": 0.0117,
+        "naval": 0.0053,
+        "aircraft": 0.0009
       },
       "infrastructure": 0.447,
       "port": 0.488,
@@ -703,7 +737,9 @@
         "munitions": 0.2663,
         "infantry": 0.0003,
         "armour": 0.0021,
-        "artillery": 0.0238
+        "artillery": 0.0238,
+        "naval": 0.0135,
+        "aircraft": 0.0028
       },
       "infrastructure": 0.467,
       "port": 0.609,
@@ -743,7 +779,9 @@
         "munitions": 0.3161,
         "infantry": 0.0016,
         "armour": 0.0075,
-        "artillery": 0.0536
+        "artillery": 0.0536,
+        "naval": 0.0383,
+        "aircraft": 0.0104
       },
       "infrastructure": 0.501,
       "port": 0.763,
@@ -779,7 +817,9 @@
         "munitions": 0.2888,
         "infantry": 0.0008,
         "armour": 0.0042,
-        "artillery": 0.0372
+        "artillery": 0.0372,
+        "naval": 0.0251,
+        "aircraft": 0.0058
       },
       "infrastructure": 0.484,
       "port": 0.721,
@@ -815,7 +855,9 @@
         "munitions": 0.2621,
         "infantry": 0.0003,
         "armour": 0.0017,
-        "artillery": 0.0212
+        "artillery": 0.0212,
+        "naval": 0.0105,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.464,
       "port": 0.529,
@@ -859,7 +901,9 @@
         "munitions": 0.2395,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0046
+        "artillery": 0.0046,
+        "naval": 0.0,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.338,
       "port": 0.0,
@@ -907,7 +951,9 @@
         "munitions": 0.2512,
         "infantry": 0.0001,
         "armour": 0.0004,
-        "artillery": 0.0088
+        "artillery": 0.0088,
+        "naval": 0.0,
+        "aircraft": 0.0013
       },
       "infrastructure": 0.353,
       "port": 0.0,
@@ -955,7 +1001,9 @@
         "munitions": 0.237,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0037
+        "artillery": 0.0037,
+        "naval": 0.0,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.334,
       "port": 0.0,
@@ -1003,7 +1051,9 @@
         "munitions": 0.3015,
         "infantry": 0.0011,
         "armour": 0.0057,
-        "artillery": 0.0448
+        "artillery": 0.0448,
+        "naval": 0.0311,
+        "aircraft": 0.0078
       },
       "infrastructure": 0.493,
       "port": 0.742,
@@ -1039,7 +1089,9 @@
         "munitions": 0.3094,
         "infantry": 0.0014,
         "armour": 0.0067,
-        "artillery": 0.0496
+        "artillery": 0.0496,
+        "naval": 0.035,
+        "aircraft": 0.0092
       },
       "infrastructure": 0.497,
       "port": 0.754,
@@ -1075,7 +1127,9 @@
         "munitions": 0.3642,
         "infantry": 0.0039,
         "armour": 0.015,
-        "artillery": 0.0824
+        "artillery": 0.0824,
+        "naval": 0.0527,
+        "aircraft": 0.0208
       },
       "infrastructure": 0.526,
       "port": 0.684,
@@ -1119,7 +1173,9 @@
         "munitions": 0.2703,
         "infantry": 0.0004,
         "armour": 0.0009,
-        "artillery": 0.0157
+        "artillery": 0.0157,
+        "naval": 0.0,
+        "aircraft": 0.0033
       },
       "infrastructure": 0.371,
       "port": 0.0,
@@ -1167,7 +1223,9 @@
         "munitions": 0.2507,
         "infantry": 0.0001,
         "armour": 0.0009,
-        "artillery": 0.0144
+        "artillery": 0.0144,
+        "naval": 0.0068,
+        "aircraft": 0.0013
       },
       "infrastructure": 0.452,
       "port": 0.501,
@@ -1211,7 +1269,9 @@
         "munitions": 0.3056,
         "infantry": 0.0013,
         "armour": 0.0062,
-        "artillery": 0.0473
+        "artillery": 0.0473,
+        "naval": 0.0331,
+        "aircraft": 0.0085
       },
       "infrastructure": 0.495,
       "port": 0.748,
@@ -1247,7 +1307,9 @@
         "munitions": 0.3167,
         "infantry": 0.0017,
         "armour": 0.0191,
-        "artillery": 0.054
+        "artillery": 0.054,
+        "naval": 0.0421,
+        "aircraft": 0.0106
       },
       "infrastructure": 0.602,
       "port": 0.834,
@@ -1279,7 +1341,9 @@
         "munitions": 0.3502,
         "infantry": 0.0031,
         "armour": 0.0126,
-        "artillery": 0.074
+        "artillery": 0.074,
+        "naval": 0.0462,
+        "aircraft": 0.0175
       },
       "infrastructure": 0.519,
       "port": 0.668,
@@ -1328,7 +1392,9 @@
         "munitions": 0.2858,
         "infantry": 0.0007,
         "armour": 0.0039,
-        "artillery": 0.0212
+        "artillery": 0.0212,
+        "naval": 0.0,
+        "aircraft": 0.0054
       },
       "infrastructure": 0.482,
       "port": 0.0,
@@ -1376,7 +1442,9 @@
         "munitions": 0.2457,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0068
+        "artillery": 0.0068,
+        "naval": 0.0,
+        "aircraft": 0.0009
       },
       "infrastructure": 0.347,
       "port": 0.0,
@@ -1424,7 +1492,9 @@
         "munitions": 0.2447,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0108
+        "artillery": 0.0108,
+        "naval": 0.0049,
+        "aircraft": 0.0008
       },
       "infrastructure": 0.345,
       "port": 0.484,
@@ -1468,7 +1538,9 @@
         "munitions": 0.2395,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0077
+        "artillery": 0.0077,
+        "naval": 0.0033,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.438,
       "port": 0.466,
@@ -1512,7 +1584,9 @@
         "munitions": 0.3068,
         "infantry": 0.0013,
         "armour": 0.0158,
-        "artillery": 0.048
+        "artillery": 0.048,
+        "naval": 0.0306,
+        "aircraft": 0.0088
       },
       "infrastructure": 0.596,
       "port": 0.68,
@@ -1552,7 +1626,9 @@
         "munitions": 0.4222,
         "infantry": 0.0078,
         "armour": 0.0264,
-        "artillery": 0.1172
+        "artillery": 0.1172,
+        "naval": 0.0893,
+        "aircraft": 0.0365
       },
       "infrastructure": 0.55,
       "port": 0.814,
@@ -1592,7 +1668,9 @@
         "munitions": 0.3022,
         "infantry": 0.0012,
         "armour": 0.0058,
-        "artillery": 0.0272
+        "artillery": 0.0272,
+        "naval": 0.0,
+        "aircraft": 0.008
       },
       "infrastructure": 0.493,
       "port": 0.0,
@@ -1640,7 +1718,9 @@
         "munitions": 0.2415,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0053
+        "artillery": 0.0053,
+        "naval": 0.0,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.341,
       "port": 0.0,
@@ -1688,7 +1768,9 @@
         "munitions": 0.2926,
         "infantry": 0.0009,
         "armour": 0.0046,
-        "artillery": 0.0395
+        "artillery": 0.0395,
+        "naval": 0.0243,
+        "aircraft": 0.0064
       },
       "infrastructure": 0.487,
       "port": 0.657,
@@ -1728,7 +1810,9 @@
         "munitions": 0.3298,
         "infantry": 0.0022,
         "armour": 0.0095,
-        "artillery": 0.0618
+        "artillery": 0.0618,
+        "naval": 0.0452,
+        "aircraft": 0.0131
       },
       "infrastructure": 0.509,
       "port": 0.782,
@@ -1764,7 +1848,9 @@
         "munitions": 0.2927,
         "infantry": 0.0009,
         "armour": 0.0046,
-        "artillery": 0.0396
+        "artillery": 0.0396,
+        "naval": 0.0244,
+        "aircraft": 0.0064
       },
       "infrastructure": 0.487,
       "port": 0.658,
@@ -1804,7 +1890,9 @@
         "munitions": 0.3452,
         "infantry": 0.0029,
         "armour": 0.0118,
-        "artillery": 0.071
+        "artillery": 0.071,
+        "naval": 0.0486,
+        "aircraft": 0.0164
       },
       "infrastructure": 0.517,
       "port": 0.732,
@@ -1844,7 +1932,9 @@
         "munitions": 0.3196,
         "infantry": 0.0018,
         "armour": 0.008,
-        "artillery": 0.0557
+        "artillery": 0.0557,
+        "naval": 0.04,
+        "aircraft": 0.0111
       },
       "infrastructure": 0.503,
       "port": 0.768,
@@ -1880,7 +1970,9 @@
         "munitions": 0.3057,
         "infantry": 0.0013,
         "armour": 0.0155,
-        "artillery": 0.0474
+        "artillery": 0.0474,
+        "naval": 0.0363,
+        "aircraft": 0.0086
       },
       "infrastructure": 0.595,
       "port": 0.818,
@@ -1912,7 +2004,9 @@
         "munitions": 0.3302,
         "infantry": 0.0022,
         "armour": 0.0095,
-        "artillery": 0.062
+        "artillery": 0.062,
+        "naval": 0.0495,
+        "aircraft": 0.0132
       },
       "infrastructure": 0.509,
       "port": 0.852,
@@ -1944,7 +2038,9 @@
         "munitions": 0.4305,
         "infantry": 0.0085,
         "armour": 0.0282,
-        "artillery": 0.1221
+        "artillery": 0.1221,
+        "naval": 0.094,
+        "aircraft": 0.039
       },
       "infrastructure": 0.553,
       "port": 0.822,
@@ -1984,7 +2080,9 @@
         "munitions": 0.2627,
         "infantry": 0.0003,
         "armour": 0.0018,
-        "artillery": 0.013
+        "artillery": 0.013,
+        "naval": 0.0,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.464,
       "port": 0.0,
@@ -2032,7 +2130,9 @@
         "munitions": 0.2596,
         "infantry": 0.0002,
         "armour": 0.0006,
-        "artillery": 0.0118
+        "artillery": 0.0118,
+        "naval": 0.0,
+        "aircraft": 0.0021
       },
       "infrastructure": 0.361,
       "port": 0.0,
@@ -2080,7 +2180,9 @@
         "munitions": 0.2434,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.01
+        "artillery": 0.01,
+        "naval": 0.0052,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.344,
       "port": 0.549,
@@ -2120,7 +2222,9 @@
         "munitions": 0.4546,
         "infantry": 0.0106,
         "armour": 0.0842,
-        "artillery": 0.1366
+        "artillery": 0.1366,
+        "naval": 0.1348,
+        "aircraft": 0.0467
       },
       "infrastructure": 0.662,
       "port": 1.054,
@@ -2153,7 +2257,9 @@
         "munitions": 0.411,
         "infantry": 0.007,
         "armour": 0.06,
-        "artillery": 0.1105
+        "artillery": 0.1105,
+        "naval": 0.1048,
+        "aircraft": 0.0332
       },
       "infrastructure": 0.645,
       "port": 1.014,
@@ -2181,7 +2287,9 @@
         "munitions": 0.3188,
         "infantry": 0.0017,
         "armour": 0.0079,
-        "artillery": 0.0552
+        "artillery": 0.0552,
+        "naval": 0.036,
+        "aircraft": 0.0109
       },
       "infrastructure": 0.503,
       "port": 0.697,
@@ -2221,7 +2329,9 @@
         "munitions": 0.2635,
         "infantry": 0.0003,
         "armour": 0.0007,
-        "artillery": 0.022
+        "artillery": 0.022,
+        "naval": 0.011,
+        "aircraft": 0.0025
       },
       "infrastructure": 0.365,
       "port": 0.532,
@@ -2265,7 +2375,9 @@
         "munitions": 0.3615,
         "infantry": 0.0037,
         "armour": 0.0145,
-        "artillery": 0.0808
+        "artillery": 0.0808,
+        "naval": 0.0621,
+        "aircraft": 0.0201
       },
       "infrastructure": 0.524,
       "port": 0.821,
@@ -2301,7 +2413,9 @@
         "munitions": 0.3212,
         "infantry": 0.0018,
         "armour": 0.0206,
-        "artillery": 0.0566
+        "artillery": 0.0566,
+        "naval": 0.0334,
+        "aircraft": 0.0114
       },
       "infrastructure": 0.604,
       "port": 0.63,
@@ -2345,7 +2459,9 @@
         "munitions": 0.3757,
         "infantry": 0.0046,
         "armour": 0.0171,
-        "artillery": 0.0536
+        "artillery": 0.0536,
+        "naval": 0.0,
+        "aircraft": 0.0237
       },
       "infrastructure": 0.531,
       "port": 0.0,
@@ -2393,7 +2509,9 @@
         "munitions": 0.2938,
         "infantry": 0.0009,
         "armour": 0.0048,
-        "artillery": 0.0241
+        "artillery": 0.0241,
+        "naval": 0.0,
+        "aircraft": 0.0066
       },
       "infrastructure": 0.488,
       "port": 0.0,
@@ -2441,7 +2559,9 @@
         "munitions": 0.2439,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0103
+        "artillery": 0.0103,
+        "naval": 0.0046,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.344,
       "port": 0.481,
@@ -2485,7 +2605,9 @@
         "munitions": 0.2658,
         "infantry": 0.0003,
         "armour": 0.002,
-        "artillery": 0.0234
+        "artillery": 0.0234,
+        "naval": 0.0148,
+        "aircraft": 0.0028
       },
       "infrastructure": 0.467,
       "port": 0.677,
@@ -2521,7 +2643,9 @@
         "munitions": 0.2983,
         "infantry": 0.0011,
         "armour": 0.0132,
-        "artillery": 0.0429
+        "artillery": 0.0429,
+        "naval": 0.0324,
+        "aircraft": 0.0073
       },
       "infrastructure": 0.591,
       "port": 0.807,
@@ -2553,7 +2677,9 @@
         "munitions": 0.2622,
         "infantry": 0.0003,
         "armour": 0.0017,
-        "artillery": 0.0213
+        "artillery": 0.0213,
+        "naval": 0.0119,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.464,
       "port": 0.6,
@@ -2593,7 +2719,9 @@
         "munitions": 0.263,
         "infantry": 0.0003,
         "armour": 0.0018,
-        "artillery": 0.0217
+        "artillery": 0.0217,
+        "naval": 0.0122,
+        "aircraft": 0.0025
       },
       "infrastructure": 0.464,
       "port": 0.601,
@@ -2633,7 +2761,9 @@
         "munitions": 0.24,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0079
+        "artillery": 0.0079,
+        "naval": 0.004,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.339,
       "port": 0.537,
@@ -2673,7 +2803,9 @@
         "munitions": 0.2694,
         "infantry": 0.0004,
         "armour": 0.0023,
-        "artillery": 0.0256
+        "artillery": 0.0256,
+        "naval": 0.0131,
+        "aircraft": 0.0032
       },
       "infrastructure": 0.47,
       "port": 0.545,
@@ -2717,7 +2849,9 @@
         "munitions": 0.3145,
         "infantry": 0.0016,
         "armour": 0.0183,
-        "artillery": 0.0526
+        "artillery": 0.0526,
+        "naval": 0.0306,
+        "aircraft": 0.0101
       },
       "infrastructure": 0.6,
       "port": 0.621,
@@ -2761,7 +2895,9 @@
         "munitions": 0.4113,
         "infantry": 0.007,
         "armour": 0.0601,
-        "artillery": 0.1106
+        "artillery": 0.1106,
+        "naval": 0.076,
+        "aircraft": 0.0333
       },
       "infrastructure": 0.646,
       "port": 0.734,
@@ -2805,7 +2941,9 @@
         "munitions": 0.2823,
         "infantry": 0.0006,
         "armour": 0.0035,
-        "artillery": 0.02
+        "artillery": 0.02,
+        "naval": 0.0,
+        "aircraft": 0.0049
       },
       "infrastructure": 0.48,
       "port": 0.0,
@@ -2853,7 +2991,9 @@
         "munitions": 0.2432,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0059
+        "artillery": 0.0059,
+        "naval": 0.0,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.343,
       "port": 0.0,
@@ -2901,7 +3041,9 @@
         "munitions": 0.2926,
         "infantry": 0.0009,
         "armour": 0.0116,
-        "artillery": 0.0395
+        "artillery": 0.0395,
+        "naval": 0.0269,
+        "aircraft": 0.0064
       },
       "infrastructure": 0.587,
       "port": 0.727,
@@ -2937,7 +3079,9 @@
         "munitions": 0.2916,
         "infantry": 0.0009,
         "armour": 0.0113,
-        "artillery": 0.0389
+        "artillery": 0.0389,
+        "naval": 0.029,
+        "aircraft": 0.0063
       },
       "infrastructure": 0.586,
       "port": 0.796,
@@ -2969,7 +3113,9 @@
         "munitions": 0.2367,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.006
+        "artillery": 0.006,
+        "naval": 0.0025,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.334,
       "port": 0.454,
@@ -3013,7 +3159,9 @@
         "munitions": 0.2644,
         "infantry": 0.0003,
         "armour": 0.0019,
-        "artillery": 0.0226
+        "artillery": 0.0226,
+        "naval": 0.0113,
+        "aircraft": 0.0026
       },
       "infrastructure": 0.466,
       "port": 0.534,
@@ -3057,7 +3205,9 @@
         "munitions": 0.8359,
         "infantry": 0.076,
         "armour": 0.406,
-        "artillery": 0.3651
+        "artillery": 0.3651,
+        "naval": 0.3523,
+        "aircraft": 0.225
       },
       "infrastructure": 1.0,
       "port": 1.031,
@@ -3102,7 +3252,9 @@
         "munitions": 0.465,
         "infantry": 0.0116,
         "armour": 0.0362,
-        "artillery": 0.0857
+        "artillery": 0.0857,
+        "naval": 0.0,
+        "aircraft": 0.0501
       },
       "infrastructure": 0.565,
       "port": 0.0,
@@ -3150,7 +3302,9 @@
         "munitions": 0.3713,
         "infantry": 0.0043,
         "armour": 0.0163,
-        "artillery": 0.0866
+        "artillery": 0.0866,
+        "naval": 0.0561,
+        "aircraft": 0.0225
       },
       "infrastructure": 0.529,
       "port": 0.692,
@@ -3194,7 +3348,9 @@
         "munitions": 0.2389,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0073
+        "artillery": 0.0073,
+        "naval": 0.0046,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.437,
       "port": 0.674,
@@ -3226,7 +3382,9 @@
         "munitions": 0.2419,
         "infantry": 0.0,
         "armour": 0.0004,
-        "artillery": 0.0091
+        "artillery": 0.0091,
+        "naval": 0.0053,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.442,
       "port": 0.615,
@@ -3262,7 +3420,9 @@
         "munitions": 0.2553,
         "infantry": 0.0002,
         "armour": 0.0012,
-        "artillery": 0.0171
+        "artillery": 0.0171,
+        "naval": 0.0105,
+        "aircraft": 0.0017
       },
       "infrastructure": 0.457,
       "port": 0.653,
@@ -3298,7 +3458,9 @@
         "munitions": 0.2841,
         "infantry": 0.0007,
         "armour": 0.0093,
-        "artillery": 0.0344
+        "artillery": 0.0344,
+        "naval": 0.0207,
+        "aircraft": 0.0051
       },
       "infrastructure": 0.581,
       "port": 0.643,
@@ -3338,7 +3500,9 @@
         "munitions": 0.281,
         "infantry": 0.0006,
         "armour": 0.0085,
-        "artillery": 0.0325
+        "artillery": 0.0325,
+        "naval": 0.0215,
+        "aircraft": 0.0047
       },
       "infrastructure": 0.579,
       "port": 0.707,
@@ -3374,7 +3538,9 @@
         "munitions": 0.2522,
         "infantry": 0.0001,
         "armour": 0.001,
-        "artillery": 0.0153
+        "artillery": 0.0153,
+        "naval": 0.0102,
+        "aircraft": 0.0014
       },
       "infrastructure": 0.454,
       "port": 0.715,
@@ -3406,7 +3572,9 @@
         "munitions": 0.2535,
         "infantry": 0.0001,
         "armour": 0.0011,
-        "artillery": 0.016
+        "artillery": 0.016,
+        "naval": 0.0087,
+        "aircraft": 0.0015
       },
       "infrastructure": 0.455,
       "port": 0.579,
@@ -3446,7 +3614,9 @@
         "munitions": 0.3976,
         "infantry": 0.006,
         "armour": 0.0531,
-        "artillery": 0.1024
+        "artillery": 0.1024,
+        "naval": 0.0824,
+        "aircraft": 0.0294
       },
       "infrastructure": 0.64,
       "port": 0.86,
@@ -3482,7 +3652,9 @@
         "munitions": 0.3384,
         "infantry": 0.0026,
         "armour": 0.0269,
-        "artillery": 0.067
+        "artillery": 0.067,
+        "naval": 0.0453,
+        "aircraft": 0.0149
       },
       "infrastructure": 0.613,
       "port": 0.723,
@@ -3523,7 +3695,9 @@
         "munitions": 0.61,
         "infantry": 0.0301,
         "armour": 0.1935,
-        "artillery": 0.2297
+        "artillery": 0.2297,
+        "naval": 0.1772,
+        "aircraft": 0.1072
       },
       "infrastructure": 0.71,
       "port": 0.824,
@@ -3571,7 +3745,9 @@
         "munitions": 0.3761,
         "infantry": 0.0046,
         "armour": 0.0171,
-        "artillery": 0.0537
+        "artillery": 0.0537,
+        "naval": 0.0,
+        "aircraft": 0.0237
       },
       "infrastructure": 0.531,
       "port": 0.0,
@@ -3619,7 +3795,9 @@
         "munitions": 0.4307,
         "infantry": 0.0085,
         "armour": 0.0282,
-        "artillery": 0.1223
+        "artillery": 0.1223,
+        "naval": 0.0941,
+        "aircraft": 0.0391
       },
       "infrastructure": 0.553,
       "port": 0.823,
@@ -3659,7 +3837,9 @@
         "munitions": 0.3145,
         "infantry": 0.0016,
         "armour": 0.0183,
-        "artillery": 0.0526
+        "artillery": 0.0526,
+        "naval": 0.0409,
+        "aircraft": 0.0101
       },
       "infrastructure": 0.6,
       "port": 0.831,
@@ -3691,7 +3871,9 @@
         "munitions": 0.3829,
         "infantry": 0.005,
         "armour": 0.046,
-        "artillery": 0.0936
+        "artillery": 0.0936,
+        "naval": 0.0924,
+        "aircraft": 0.0255
       },
       "infrastructure": 0.634,
       "port": 1.055,
@@ -3720,7 +3902,9 @@
         "munitions": 0.2383,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0069
+        "artillery": 0.0069,
+        "naval": 0.0044,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.436,
       "port": 0.671,
@@ -3752,7 +3936,9 @@
         "munitions": 0.2387,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0072
+        "artillery": 0.0072,
+        "naval": 0.0031,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.437,
       "port": 0.463,
@@ -3796,7 +3982,9 @@
         "munitions": 0.2326,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0035
+        "artillery": 0.0035,
+        "naval": 0.0017,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.326,
       "port": 0.505,
@@ -3836,7 +4024,9 @@
         "munitions": 0.2332,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0039
+        "artillery": 0.0039,
+        "naval": 0.0024,
+        "aircraft": 0.0002
       },
       "infrastructure": 0.427,
       "port": 0.648,
@@ -3868,7 +4058,9 @@
         "munitions": 0.245,
         "infantry": 0.0001,
         "armour": 0.0006,
-        "artillery": 0.011
+        "artillery": 0.011,
+        "naval": 0.0064,
+        "aircraft": 0.0008
       },
       "infrastructure": 0.446,
       "port": 0.625,
@@ -3904,7 +4096,9 @@
         "munitions": 0.2434,
         "infantry": 0.0001,
         "armour": 0.0005,
-        "artillery": 0.01
+        "artillery": 0.01,
+        "naval": 0.0045,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.444,
       "port": 0.479,
@@ -3948,7 +4142,9 @@
         "munitions": 0.2659,
         "infantry": 0.0003,
         "armour": 0.005,
-        "artillery": 0.0235
+        "artillery": 0.0235,
+        "naval": 0.0134,
+        "aircraft": 0.0028
       },
       "infrastructure": 0.567,
       "port": 0.608,
@@ -3988,7 +4184,9 @@
         "munitions": 0.3312,
         "infantry": 0.0022,
         "armour": 0.0242,
-        "artillery": 0.0627
+        "artillery": 0.0627,
+        "naval": 0.0378,
+        "aircraft": 0.0134
       },
       "infrastructure": 0.61,
       "port": 0.644,
@@ -4032,7 +4230,9 @@
         "munitions": 2.7058,
         "infantry": 1.2594,
         "armour": 3.8357,
-        "artillery": 1.4858
+        "artillery": 1.4858,
+        "naval": 2.2252,
+        "aircraft": 2.1255
       },
       "infrastructure": 1.0,
       "port": 1.6,
@@ -4080,7 +4280,9 @@
         "munitions": 0.7399,
         "infantry": 0.054,
         "armour": 0.1234,
-        "artillery": 0.1845
+        "artillery": 0.1845,
+        "naval": 0.0,
+        "aircraft": 0.171
       },
       "infrastructure": 0.643,
       "port": 0.0,
@@ -4128,7 +4330,9 @@
         "munitions": 0.3983,
         "infantry": 0.006,
         "armour": 0.0214,
-        "artillery": 0.1028
+        "artillery": 0.1028,
+        "naval": 0.0694,
+        "aircraft": 0.0296
       },
       "infrastructure": 0.54,
       "port": 0.721,
@@ -4172,7 +4376,9 @@
         "munitions": 0.2616,
         "infantry": 0.0002,
         "armour": 0.0017,
-        "artillery": 0.0209
+        "artillery": 0.0209,
+        "naval": 0.0117,
+        "aircraft": 0.0023
       },
       "infrastructure": 0.463,
       "port": 0.598,
@@ -4212,7 +4418,9 @@
         "munitions": 0.2727,
         "infantry": 0.0004,
         "armour": 0.0026,
-        "artillery": 0.0275
+        "artillery": 0.0275,
+        "naval": 0.0142,
+        "aircraft": 0.0036
       },
       "infrastructure": 0.473,
       "port": 0.552,
@@ -4256,7 +4464,9 @@
         "munitions": 0.2627,
         "infantry": 0.0003,
         "armour": 0.0018,
-        "artillery": 0.0216
+        "artillery": 0.0216,
+        "naval": 0.0107,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.464,
       "port": 0.531,
@@ -4300,7 +4510,9 @@
         "munitions": 0.5001,
         "infantry": 0.0153,
         "armour": 0.0451,
-        "artillery": 0.1639
+        "artillery": 0.1639,
+        "naval": 0.1462,
+        "aircraft": 0.0625
       },
       "infrastructure": 0.577,
       "port": 0.953,
@@ -4341,7 +4553,9 @@
         "munitions": 0.2404,
         "infantry": 0.0,
         "armour": 0.0004,
-        "artillery": 0.0082
+        "artillery": 0.0082,
+        "naval": 0.0052,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.44,
       "port": 0.679,
@@ -4374,7 +4588,9 @@
         "munitions": 0.2603,
         "infantry": 0.0002,
         "armour": 0.0016,
-        "artillery": 0.0201
+        "artillery": 0.0201,
+        "naval": 0.0125,
+        "aircraft": 0.0022
       },
       "infrastructure": 0.462,
       "port": 0.665,
@@ -4410,7 +4626,9 @@
         "munitions": 0.2543,
         "infantry": 0.0002,
         "armour": 0.0011,
-        "artillery": 0.0165
+        "artillery": 0.0165,
+        "naval": 0.0112,
+        "aircraft": 0.0016
       },
       "infrastructure": 0.456,
       "port": 0.721,
@@ -4442,7 +4660,9 @@
         "munitions": 0.2379,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0067
+        "artillery": 0.0067,
+        "naval": 0.0029,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.436,
       "port": 0.46,
@@ -4486,7 +4706,9 @@
         "munitions": 0.2707,
         "infantry": 0.0004,
         "armour": 0.0061,
-        "artillery": 0.0264
+        "artillery": 0.0264,
+        "naval": 0.0135,
+        "aircraft": 0.0034
       },
       "infrastructure": 0.571,
       "port": 0.548,
@@ -4530,7 +4752,9 @@
         "munitions": 0.2611,
         "infantry": 0.0002,
         "armour": 0.0016,
-        "artillery": 0.0206
+        "artillery": 0.0206,
+        "naval": 0.0102,
+        "aircraft": 0.0023
       },
       "infrastructure": 0.463,
       "port": 0.527,
@@ -4574,7 +4798,9 @@
         "munitions": 0.2593,
         "infantry": 0.0002,
         "armour": 0.0037,
-        "artillery": 0.0195
+        "artillery": 0.0195,
+        "naval": 0.0096,
+        "aircraft": 0.0021
       },
       "infrastructure": 0.561,
       "port": 0.523,
@@ -4618,7 +4844,9 @@
         "munitions": 0.2416,
         "infantry": 0.0,
         "armour": 0.0004,
-        "artillery": 0.0089
+        "artillery": 0.0089,
+        "naval": 0.004,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.441,
       "port": 0.473,
@@ -4662,7 +4890,9 @@
         "munitions": 0.2498,
         "infantry": 0.0001,
         "armour": 0.0009,
-        "artillery": 0.0083
+        "artillery": 0.0083,
+        "naval": 0.0,
+        "aircraft": 0.0012
       },
       "infrastructure": 0.451,
       "port": 0.0,
@@ -4710,7 +4940,9 @@
         "munitions": 0.2365,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0058
+        "artillery": 0.0058,
+        "naval": 0.0029,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.433,
       "port": 0.524,
@@ -4750,7 +4982,9 @@
         "munitions": 0.2411,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0086
+        "artillery": 0.0086,
+        "naval": 0.0044,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.341,
       "port": 0.542,
@@ -4790,7 +5024,9 @@
         "munitions": 0.3563,
         "infantry": 0.0034,
         "armour": 0.0137,
-        "artillery": 0.0466
+        "artillery": 0.0466,
+        "naval": 0.0,
+        "aircraft": 0.0189
       },
       "infrastructure": 0.522,
       "port": 0.0,
@@ -4838,7 +5074,9 @@
         "munitions": 0.4009,
         "infantry": 0.0062,
         "armour": 0.0219,
-        "artillery": 0.0627
+        "artillery": 0.0627,
+        "naval": 0.0,
+        "aircraft": 0.0304
       },
       "infrastructure": 0.541,
       "port": 0.0,
@@ -4886,7 +5124,9 @@
         "munitions": 0.4533,
         "infantry": 0.0105,
         "armour": 0.0334,
-        "artillery": 0.0815
+        "artillery": 0.0815,
+        "naval": 0.0,
+        "aircraft": 0.0462
       },
       "infrastructure": 0.561,
       "port": 0.0,
@@ -4934,7 +5174,9 @@
         "munitions": 0.3191,
         "infantry": 0.0018,
         "armour": 0.008,
-        "artillery": 0.0332
+        "artillery": 0.0332,
+        "naval": 0.0,
+        "aircraft": 0.011
       },
       "infrastructure": 0.503,
       "port": 0.0,
@@ -4982,7 +5224,9 @@
         "munitions": 0.3265,
         "infantry": 0.002,
         "armour": 0.009,
-        "artillery": 0.0359
+        "artillery": 0.0359,
+        "naval": 0.0,
+        "aircraft": 0.0125
       },
       "infrastructure": 0.507,
       "port": 0.0,
@@ -5030,7 +5274,9 @@
         "munitions": 0.2339,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0026
+        "artillery": 0.0026,
+        "naval": 0.0,
+        "aircraft": 0.0002
       },
       "infrastructure": 0.329,
       "port": 0.0,
@@ -5078,7 +5324,9 @@
         "munitions": 0.2667,
         "infantry": 0.0003,
         "armour": 0.0008,
-        "artillery": 0.0144
+        "artillery": 0.0144,
+        "naval": 0.0,
+        "aircraft": 0.0029
       },
       "infrastructure": 0.368,
       "port": 0.0,
@@ -5126,7 +5374,9 @@
         "munitions": 0.2843,
         "infantry": 0.0007,
         "armour": 0.0037,
-        "artillery": 0.0345
+        "artillery": 0.0345,
+        "naval": 0.0185,
+        "aircraft": 0.0052
       },
       "infrastructure": 0.481,
       "port": 0.573,
@@ -5170,7 +5420,9 @@
         "munitions": 0.2916,
         "infantry": 0.0009,
         "armour": 0.0045,
-        "artillery": 0.0389
+        "artillery": 0.0389,
+        "naval": 0.0264,
+        "aircraft": 0.0062
       },
       "infrastructure": 0.486,
       "port": 0.726,
@@ -5206,7 +5458,9 @@
         "munitions": 0.3089,
         "infantry": 0.0014,
         "armour": 0.0066,
-        "artillery": 0.0493
+        "artillery": 0.0493,
+        "naval": 0.0444,
+        "aircraft": 0.0091
       },
       "infrastructure": 0.497,
       "port": 0.963,
@@ -5235,7 +5489,9 @@
         "munitions": 0.2349,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0049
+        "artillery": 0.0049,
+        "naval": 0.0027,
+        "aircraft": 0.0002
       },
       "infrastructure": 0.431,
       "port": 0.587,
@@ -5271,7 +5527,9 @@
         "munitions": 0.2877,
         "infantry": 0.0008,
         "armour": 0.0102,
-        "artillery": 0.0366
+        "artillery": 0.0366,
+        "naval": 0.0246,
+        "aircraft": 0.0057
       },
       "infrastructure": 0.584,
       "port": 0.719,
@@ -5307,7 +5565,9 @@
         "munitions": 0.2471,
         "infantry": 0.0001,
         "armour": 0.0007,
-        "artillery": 0.0122
+        "artillery": 0.0122,
+        "naval": 0.0072,
+        "aircraft": 0.001
       },
       "infrastructure": 0.448,
       "port": 0.631,
@@ -5344,7 +5604,9 @@
         "munitions": 0.2397,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0078
+        "artillery": 0.0078,
+        "naval": 0.0054,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.439,
       "port": 0.746,
@@ -5372,7 +5634,9 @@
         "munitions": 0.2755,
         "infantry": 0.0005,
         "armour": 0.0071,
-        "artillery": 0.0292
+        "artillery": 0.0292,
+        "naval": 0.0172,
+        "aircraft": 0.004
       },
       "infrastructure": 0.575,
       "port": 0.627,
@@ -5412,7 +5676,9 @@
         "munitions": 0.2616,
         "infantry": 0.0002,
         "armour": 0.0017,
-        "artillery": 0.0126
+        "artillery": 0.0126,
+        "naval": 0.0,
+        "aircraft": 0.0023
       },
       "infrastructure": 0.463,
       "port": 0.0,
@@ -5460,7 +5726,9 @@
         "munitions": 0.2544,
         "infantry": 0.0002,
         "armour": 0.0012,
-        "artillery": 0.01
+        "artillery": 0.01,
+        "naval": 0.0,
+        "aircraft": 0.0016
       },
       "infrastructure": 0.456,
       "port": 0.0,
@@ -5508,7 +5776,9 @@
         "munitions": 0.2474,
         "infantry": 0.0001,
         "armour": 0.0007,
-        "artillery": 0.0074
+        "artillery": 0.0074,
+        "naval": 0.0,
+        "aircraft": 0.001
       },
       "infrastructure": 0.449,
       "port": 0.0,
@@ -5556,7 +5826,9 @@
         "munitions": 0.2464,
         "infantry": 0.0001,
         "armour": 0.0007,
-        "artillery": 0.0071
+        "artillery": 0.0071,
+        "naval": 0.0,
+        "aircraft": 0.0009
       },
       "infrastructure": 0.447,
       "port": 0.0,
@@ -5604,7 +5876,9 @@
         "munitions": 0.2365,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0059
+        "artillery": 0.0059,
+        "naval": 0.0025,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.433,
       "port": 0.454,
@@ -5648,7 +5922,9 @@
         "munitions": 0.2502,
         "infantry": 0.0001,
         "armour": 0.0009,
-        "artillery": 0.0141
+        "artillery": 0.0141,
+        "naval": 0.0093,
+        "aircraft": 0.0012
       },
       "infrastructure": 0.452,
       "port": 0.71,
@@ -5680,7 +5956,9 @@
         "munitions": 0.2541,
         "infantry": 0.0002,
         "armour": 0.0004,
-        "artillery": 0.0164
+        "artillery": 0.0164,
+        "naval": 0.0089,
+        "aircraft": 0.0016
       },
       "infrastructure": 0.356,
       "port": 0.58,
@@ -5720,7 +5998,9 @@
         "munitions": 0.2626,
         "infantry": 0.0003,
         "armour": 0.0007,
-        "artillery": 0.0215
+        "artillery": 0.0215,
+        "naval": 0.0107,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.364,
       "port": 0.53,
@@ -5764,7 +6044,9 @@
         "munitions": 0.3775,
         "infantry": 0.0047,
         "armour": 0.0174,
-        "artillery": 0.0904
+        "artillery": 0.0904,
+        "naval": 0.0591,
+        "aircraft": 0.0241
       },
       "infrastructure": 0.532,
       "port": 0.699,
@@ -5808,7 +6090,9 @@
         "munitions": 0.3655,
         "infantry": 0.0039,
         "armour": 0.0152,
-        "artillery": 0.0832
+        "artillery": 0.0832,
+        "naval": 0.0534,
+        "aircraft": 0.0211
       },
       "infrastructure": 0.526,
       "port": 0.685,
@@ -5852,7 +6136,9 @@
         "munitions": 0.5237,
         "infantry": 0.0181,
         "armour": 0.1287,
-        "artillery": 0.1068
+        "artillery": 0.1068,
+        "naval": 0.0,
+        "aircraft": 0.0713
       },
       "infrastructure": 0.685,
       "port": 0.0,
@@ -5900,7 +6186,9 @@
         "munitions": 0.2727,
         "infantry": 0.0004,
         "armour": 0.0026,
-        "artillery": 0.0165
+        "artillery": 0.0165,
+        "naval": 0.0,
+        "aircraft": 0.0036
       },
       "infrastructure": 0.473,
       "port": 0.0,
@@ -5948,7 +6236,9 @@
         "munitions": 0.242,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0055
+        "artillery": 0.0055,
+        "naval": 0.0,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.342,
       "port": 0.0,
@@ -5996,7 +6286,9 @@
         "munitions": 0.2318,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0018
+        "artillery": 0.0018,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.324,
       "port": 0.0,
@@ -6044,7 +6336,9 @@
         "munitions": 0.2309,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0015
+        "artillery": 0.0015,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.322,
       "port": 0.0,
@@ -6092,7 +6386,9 @@
         "munitions": 0.2395,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0077
+        "artillery": 0.0077,
+        "naval": 0.0033,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.338,
       "port": 0.466,
@@ -6136,7 +6432,9 @@
         "munitions": 0.414,
         "infantry": 0.0072,
         "armour": 0.0246,
-        "artillery": 0.1122
+        "artillery": 0.1122,
+        "naval": 0.0921,
+        "aircraft": 0.0341
       },
       "infrastructure": 0.547,
       "port": 0.876,
@@ -6172,7 +6470,9 @@
         "munitions": 0.2873,
         "infantry": 0.0008,
         "armour": 0.0101,
-        "artillery": 0.0363
+        "artillery": 0.0363,
+        "naval": 0.0244,
+        "aircraft": 0.0056
       },
       "infrastructure": 0.583,
       "port": 0.719,
@@ -6208,7 +6508,9 @@
         "munitions": 0.2582,
         "infantry": 0.0002,
         "armour": 0.0014,
-        "artillery": 0.0189
+        "artillery": 0.0189,
+        "naval": 0.0092,
+        "aircraft": 0.002
       },
       "infrastructure": 0.46,
       "port": 0.52,
@@ -6252,7 +6554,9 @@
         "munitions": 0.2563,
         "infantry": 0.0002,
         "armour": 0.0013,
-        "artillery": 0.0177
+        "artillery": 0.0177,
+        "naval": 0.0086,
+        "aircraft": 0.0018
       },
       "infrastructure": 0.458,
       "port": 0.516,
@@ -6296,7 +6600,9 @@
         "munitions": 0.2425,
         "infantry": 0.0001,
         "armour": 0.0005,
-        "artillery": 0.0095
+        "artillery": 0.0095,
+        "naval": 0.0061,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.443,
       "port": 0.686,
@@ -6328,7 +6634,9 @@
         "munitions": 0.266,
         "infantry": 0.0003,
         "armour": 0.0051,
-        "artillery": 0.0236
+        "artillery": 0.0236,
+        "naval": 0.0119,
+        "aircraft": 0.0028
       },
       "infrastructure": 0.567,
       "port": 0.538,
@@ -6372,7 +6680,9 @@
         "munitions": 0.2333,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0024
+        "artillery": 0.0024,
+        "naval": 0.0,
+        "aircraft": 0.0002
       },
       "infrastructure": 0.327,
       "port": 0.0,
@@ -6420,7 +6730,9 @@
         "munitions": 0.2378,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.004
+        "artillery": 0.004,
+        "naval": 0.0,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.436,
       "port": 0.0,
@@ -6468,7 +6780,9 @@
         "munitions": 0.2306,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0014
+        "artillery": 0.0014,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.321,
       "port": 0.0,
@@ -6516,7 +6830,9 @@
         "munitions": 0.2319,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0019
+        "artillery": 0.0019,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.325,
       "port": 0.0,
@@ -6564,7 +6880,9 @@
         "munitions": 0.2708,
         "infantry": 0.0004,
         "armour": 0.0061,
-        "artillery": 0.0264
+        "artillery": 0.0264,
+        "naval": 0.017,
+        "aircraft": 0.0034
       },
       "infrastructure": 0.571,
       "port": 0.688,
@@ -6600,7 +6918,9 @@
         "munitions": 0.4228,
         "infantry": 0.0079,
         "armour": 0.0662,
-        "artillery": 0.1175
+        "artillery": 0.1175,
+        "naval": 0.1051,
+        "aircraft": 0.0367
       },
       "infrastructure": 0.65,
       "port": 0.955,
@@ -6632,7 +6952,9 @@
         "munitions": 1.1116,
         "infantry": 0.1605,
         "armour": 0.7379,
-        "artillery": 0.5304
+        "artillery": 0.5304,
+        "naval": 0.5791,
+        "aircraft": 0.4089
       },
       "infrastructure": 1.0,
       "port": 1.167,
@@ -6676,7 +6998,9 @@
         "munitions": 0.3969,
         "infantry": 0.0059,
         "armour": 0.0211,
-        "artillery": 0.0612
+        "artillery": 0.0612,
+        "naval": 0.0,
+        "aircraft": 0.0292
       },
       "infrastructure": 0.54,
       "port": 0.0,
@@ -6724,7 +7048,9 @@
         "munitions": 0.2784,
         "infantry": 0.0005,
         "armour": 0.0012,
-        "artillery": 0.0186
+        "artillery": 0.0186,
+        "naval": 0.0,
+        "aircraft": 0.0043
       },
       "infrastructure": 0.377,
       "port": 0.0,
@@ -6772,7 +7098,9 @@
         "munitions": 0.2435,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.006
+        "artillery": 0.006,
+        "naval": 0.0,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.344,
       "port": 0.0,
@@ -6820,7 +7148,9 @@
         "munitions": 0.2527,
         "infantry": 0.0001,
         "armour": 0.0004,
-        "artillery": 0.0093
+        "artillery": 0.0093,
+        "naval": 0.0,
+        "aircraft": 0.0014
       },
       "infrastructure": 0.355,
       "port": 0.0,
@@ -6868,7 +7198,9 @@
         "munitions": 0.2817,
         "infantry": 0.0006,
         "armour": 0.0035,
-        "artillery": 0.0198
+        "artillery": 0.0198,
+        "naval": 0.0,
+        "aircraft": 0.0048
       },
       "infrastructure": 0.479,
       "port": 0.0,
@@ -6916,7 +7248,9 @@
         "munitions": 0.255,
         "infantry": 0.0002,
         "armour": 0.0004,
-        "artillery": 0.0102
+        "artillery": 0.0102,
+        "naval": 0.0,
+        "aircraft": 0.0017
       },
       "infrastructure": 0.357,
       "port": 0.0,
@@ -6964,7 +7298,9 @@
         "munitions": 0.4511,
         "infantry": 0.0103,
         "armour": 0.0329,
-        "artillery": 0.1345
+        "artillery": 0.1345,
+        "naval": 0.0971,
+        "aircraft": 0.0455
       },
       "infrastructure": 0.56,
       "port": 0.771,
@@ -7008,7 +7344,9 @@
         "munitions": 0.3554,
         "infantry": 0.0034,
         "armour": 0.0337,
-        "artillery": 0.0771
+        "artillery": 0.0771,
+        "naval": 0.0537,
+        "aircraft": 0.0187
       },
       "infrastructure": 0.622,
       "port": 0.744,
@@ -7048,7 +7386,9 @@
         "munitions": 0.4121,
         "infantry": 0.007,
         "armour": 0.0605,
-        "artillery": 0.1111
+        "artillery": 0.1111,
+        "naval": 0.091,
+        "aircraft": 0.0335
       },
       "infrastructure": 0.646,
       "port": 0.875,
@@ -7089,7 +7429,9 @@
         "munitions": 0.2536,
         "infantry": 0.0001,
         "armour": 0.0011,
-        "artillery": 0.0161
+        "artillery": 0.0161,
+        "naval": 0.0098,
+        "aircraft": 0.0015
       },
       "infrastructure": 0.456,
       "port": 0.649,
@@ -7125,7 +7467,9 @@
         "munitions": 0.2748,
         "infantry": 0.0005,
         "armour": 0.0028,
-        "artillery": 0.0288
+        "artillery": 0.0288,
+        "naval": 0.0169,
+        "aircraft": 0.0039
       },
       "infrastructure": 0.474,
       "port": 0.626,
@@ -7165,7 +7509,9 @@
         "munitions": 0.2624,
         "infantry": 0.0003,
         "armour": 0.0017,
-        "artillery": 0.0214
+        "artillery": 0.0214,
+        "naval": 0.0106,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.464,
       "port": 0.53,
@@ -7209,7 +7555,9 @@
         "munitions": 0.2357,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0032
+        "artillery": 0.0032,
+        "naval": 0.0,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.332,
       "port": 0.0,
@@ -7257,7 +7605,9 @@
         "munitions": 0.2505,
         "infantry": 0.0001,
         "armour": 0.0009,
-        "artillery": 0.0086
+        "artillery": 0.0086,
+        "naval": 0.0,
+        "aircraft": 0.0013
       },
       "infrastructure": 0.452,
       "port": 0.0,
@@ -7305,7 +7655,9 @@
         "munitions": 0.2461,
         "infantry": 0.0001,
         "armour": 0.0007,
-        "artillery": 0.0116
+        "artillery": 0.0116,
+        "naval": 0.0053,
+        "aircraft": 0.0009
       },
       "infrastructure": 0.447,
       "port": 0.488,
@@ -7349,7 +7701,9 @@
         "munitions": 0.2744,
         "infantry": 0.0005,
         "armour": 0.0069,
-        "artillery": 0.0286
+        "artillery": 0.0286,
+        "naval": 0.0186,
+        "aircraft": 0.0038
       },
       "infrastructure": 0.574,
       "port": 0.695,
@@ -7385,7 +7739,9 @@
         "munitions": 0.2529,
         "infantry": 0.0001,
         "armour": 0.0026,
-        "artillery": 0.0157
+        "artillery": 0.0157,
+        "naval": 0.0095,
+        "aircraft": 0.0015
       },
       "infrastructure": 0.555,
       "port": 0.647,
@@ -7421,7 +7777,9 @@
         "munitions": 0.2311,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0016
+        "artillery": 0.0016,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.322,
       "port": 0.0,
@@ -7469,7 +7827,9 @@
         "munitions": 0.2322,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.002
+        "artillery": 0.002,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.325,
       "port": 0.0,
@@ -7517,7 +7877,9 @@
         "munitions": 0.23,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0012
+        "artillery": 0.0012,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.319,
       "port": 0.0,
@@ -7565,7 +7927,9 @@
         "munitions": 0.2305,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0014
+        "artillery": 0.0014,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.321,
       "port": 0.0,
@@ -7613,7 +7977,9 @@
         "munitions": 0.238,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0068
+        "artillery": 0.0068,
+        "naval": 0.0029,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.436,
       "port": 0.46,
@@ -7657,7 +8023,9 @@
         "munitions": 1.0621,
         "infantry": 0.143,
         "armour": 0.673,
-        "artillery": 0.5007
+        "artillery": 0.5007,
+        "naval": 0.6018,
+        "aircraft": 0.373
       },
       "infrastructure": 1.0,
       "port": 1.284,
@@ -7693,7 +8061,9 @@
         "munitions": 0.3465,
         "infantry": 0.0029,
         "armour": 0.012,
-        "artillery": 0.0431
+        "artillery": 0.0431,
+        "naval": 0.0,
+        "aircraft": 0.0167
       },
       "infrastructure": 0.517,
       "port": 0.0,
@@ -7741,7 +8111,9 @@
         "munitions": 0.2823,
         "infantry": 0.0006,
         "armour": 0.0013,
-        "artillery": 0.02
+        "artillery": 0.02,
+        "naval": 0.0,
+        "aircraft": 0.0049
       },
       "infrastructure": 0.38,
       "port": 0.0,
@@ -7789,7 +8161,9 @@
         "munitions": 0.2415,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0053
+        "artillery": 0.0053,
+        "naval": 0.0,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.341,
       "port": 0.0,
@@ -7837,7 +8211,9 @@
         "munitions": 0.2467,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.0072
+        "artillery": 0.0072,
+        "naval": 0.0,
+        "aircraft": 0.001
       },
       "infrastructure": 0.348,
       "port": 0.0,
@@ -7885,7 +8261,9 @@
         "munitions": 0.2479,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.0076
+        "artillery": 0.0076,
+        "naval": 0.0,
+        "aircraft": 0.001
       },
       "infrastructure": 0.349,
       "port": 0.0,
@@ -7933,7 +8311,9 @@
         "munitions": 0.2422,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0056
+        "artillery": 0.0056,
+        "naval": 0.0,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.342,
       "port": 0.0,
@@ -7981,7 +8361,9 @@
         "munitions": 0.25,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.0084
+        "artillery": 0.0084,
+        "naval": 0.0,
+        "aircraft": 0.0012
       },
       "infrastructure": 0.352,
       "port": 0.0,
@@ -8029,7 +8411,9 @@
         "munitions": 0.2419,
         "infantry": 0.0,
         "armour": 0.0004,
-        "artillery": 0.0055
+        "artillery": 0.0055,
+        "naval": 0.0,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.442,
       "port": 0.0,
@@ -8077,7 +8461,9 @@
         "munitions": 0.243,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0058
+        "artillery": 0.0058,
+        "naval": 0.0,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.343,
       "port": 0.0,
@@ -8125,7 +8511,9 @@
         "munitions": 0.2879,
         "infantry": 0.0008,
         "armour": 0.0041,
-        "artillery": 0.0366
+        "artillery": 0.0366,
+        "naval": 0.0199,
+        "aircraft": 0.0057
       },
       "infrastructure": 0.484,
       "port": 0.579,
@@ -8169,7 +8557,9 @@
         "munitions": 0.306,
         "infantry": 0.0013,
         "armour": 0.0062,
-        "artillery": 0.0475
+        "artillery": 0.0475,
+        "naval": 0.0302,
+        "aircraft": 0.0086
       },
       "infrastructure": 0.495,
       "port": 0.678,
@@ -8209,7 +8599,9 @@
         "munitions": 0.2443,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0105
+        "artillery": 0.0105,
+        "naval": 0.0054,
+        "aircraft": 0.0008
       },
       "infrastructure": 0.345,
       "port": 0.552,
@@ -8249,7 +8641,9 @@
         "munitions": 0.3317,
         "infantry": 0.0023,
         "armour": 0.0098,
-        "artillery": 0.0629
+        "artillery": 0.0629,
+        "naval": 0.038,
+        "aircraft": 0.0135
       },
       "infrastructure": 0.51,
       "port": 0.644,
@@ -8293,7 +8687,9 @@
         "munitions": 0.2393,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0045
+        "artillery": 0.0045,
+        "naval": 0.0,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.438,
       "port": 0.0,
@@ -8341,7 +8737,9 @@
         "munitions": 0.265,
         "infantry": 0.0003,
         "armour": 0.0019,
-        "artillery": 0.0138
+        "artillery": 0.0138,
+        "naval": 0.0,
+        "aircraft": 0.0027
       },
       "infrastructure": 0.466,
       "port": 0.0,
@@ -8389,7 +8787,9 @@
         "munitions": 0.2586,
         "infantry": 0.0002,
         "armour": 0.0014,
-        "artillery": 0.0115
+        "artillery": 0.0115,
+        "naval": 0.0,
+        "aircraft": 0.002
       },
       "infrastructure": 0.46,
       "port": 0.0,
@@ -8437,7 +8837,9 @@
         "munitions": 0.2362,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0034
+        "artillery": 0.0034,
+        "naval": 0.0,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.333,
       "port": 0.0,
@@ -8485,7 +8887,9 @@
         "munitions": 0.251,
         "infantry": 0.0001,
         "armour": 0.0009,
-        "artillery": 0.0087
+        "artillery": 0.0087,
+        "naval": 0.0,
+        "aircraft": 0.0013
       },
       "infrastructure": 0.453,
       "port": 0.0,
@@ -8533,7 +8937,9 @@
         "munitions": 0.2794,
         "infantry": 0.0006,
         "armour": 0.0081,
-        "artillery": 0.0316
+        "artillery": 0.0316,
+        "naval": 0.0187,
+        "aircraft": 0.0045
       },
       "infrastructure": 0.578,
       "port": 0.634,
@@ -8573,7 +8979,9 @@
         "munitions": 0.2314,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0028
+        "artillery": 0.0028,
+        "naval": 0.0011,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.323,
       "port": 0.428,
@@ -8617,7 +9025,9 @@
         "munitions": 0.2378,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.004
+        "artillery": 0.004,
+        "naval": 0.0,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.436,
       "port": 0.0,
@@ -8665,7 +9075,9 @@
         "munitions": 0.2512,
         "infantry": 0.0001,
         "armour": 0.0024,
-        "artillery": 0.0088
+        "artillery": 0.0088,
+        "naval": 0.0,
+        "aircraft": 0.0013
       },
       "infrastructure": 0.553,
       "port": 0.0,
@@ -8713,7 +9125,9 @@
         "munitions": 0.2326,
         "infantry": 0.0,
         "armour": 0.0,
-        "artillery": 0.0021
+        "artillery": 0.0021,
+        "naval": 0.0,
+        "aircraft": 0.0001
       },
       "infrastructure": 0.326,
       "port": 0.0,
@@ -8761,7 +9175,9 @@
         "munitions": 0.2369,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0037
+        "artillery": 0.0037,
+        "naval": 0.0,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.434,
       "port": 0.0,
@@ -8809,7 +9225,9 @@
         "munitions": 0.2718,
         "infantry": 0.0004,
         "armour": 0.0063,
-        "artillery": 0.027
+        "artillery": 0.027,
+        "naval": 0.0157,
+        "aircraft": 0.0035
       },
       "infrastructure": 0.572,
       "port": 0.62,
@@ -8849,7 +9267,9 @@
         "munitions": 0.5551,
         "infantry": 0.0221,
         "armour": 0.1511,
-        "artillery": 0.1968
+        "artillery": 0.1968,
+        "naval": 0.1705,
+        "aircraft": 0.0837
       },
       "infrastructure": 0.694,
       "port": 0.925,
@@ -8889,7 +9309,9 @@
         "munitions": 0.267,
         "infantry": 0.0003,
         "armour": 0.0021,
-        "artillery": 0.0145
+        "artillery": 0.0145,
+        "naval": 0.0,
+        "aircraft": 0.0029
       },
       "infrastructure": 0.468,
       "port": 0.0,
@@ -8937,7 +9359,9 @@
         "munitions": 0.2372,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0038
+        "artillery": 0.0038,
+        "naval": 0.0,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.335,
       "port": 0.0,
@@ -8985,7 +9409,9 @@
         "munitions": 0.2576,
         "infantry": 0.0002,
         "armour": 0.0014,
-        "artillery": 0.0111
+        "artillery": 0.0111,
+        "naval": 0.0,
+        "aircraft": 0.0019
       },
       "infrastructure": 0.46,
       "port": 0.0,
@@ -9033,7 +9459,9 @@
         "munitions": 0.2405,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.005
+        "artillery": 0.005,
+        "naval": 0.0,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.34,
       "port": 0.0,
@@ -9081,7 +9509,9 @@
         "munitions": 0.2688,
         "infantry": 0.0004,
         "armour": 0.0008,
-        "artillery": 0.0151
+        "artillery": 0.0151,
+        "naval": 0.0,
+        "aircraft": 0.0031
       },
       "infrastructure": 0.369,
       "port": 0.0,
@@ -9129,7 +9559,9 @@
         "munitions": 0.2786,
         "infantry": 0.0006,
         "armour": 0.0012,
-        "artillery": 0.0186
+        "artillery": 0.0186,
+        "naval": 0.0,
+        "aircraft": 0.0044
       },
       "infrastructure": 0.377,
       "port": 0.0,
@@ -9177,7 +9609,9 @@
         "munitions": 0.2485,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.0078
+        "artillery": 0.0078,
+        "naval": 0.0,
+        "aircraft": 0.0011
       },
       "infrastructure": 0.35,
       "port": 0.0,
@@ -9225,7 +9659,9 @@
         "munitions": 0.2431,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0059
+        "artillery": 0.0059,
+        "naval": 0.0,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.343,
       "port": 0.0,
@@ -9273,7 +9709,9 @@
         "munitions": 0.2656,
         "infantry": 0.0003,
         "armour": 0.002,
-        "artillery": 0.014
+        "artillery": 0.014,
+        "naval": 0.0,
+        "aircraft": 0.0028
       },
       "infrastructure": 0.467,
       "port": 0.0,
@@ -9321,7 +9759,9 @@
         "munitions": 0.2695,
         "infantry": 0.0004,
         "armour": 0.0023,
-        "artillery": 0.0154
+        "artillery": 0.0154,
+        "naval": 0.0,
+        "aircraft": 0.0032
       },
       "infrastructure": 0.47,
       "port": 0.0,
@@ -9369,7 +9809,9 @@
         "munitions": 0.2753,
         "infantry": 0.0005,
         "armour": 0.0028,
-        "artillery": 0.0175
+        "artillery": 0.0175,
+        "naval": 0.0,
+        "aircraft": 0.0039
       },
       "infrastructure": 0.475,
       "port": 0.0,
@@ -9417,7 +9859,9 @@
         "munitions": 0.2982,
         "infantry": 0.001,
         "armour": 0.0053,
-        "artillery": 0.0257
+        "artillery": 0.0257,
+        "naval": 0.0,
+        "aircraft": 0.0073
       },
       "infrastructure": 0.491,
       "port": 0.0,
@@ -9465,7 +9909,9 @@
         "munitions": 0.259,
         "infantry": 0.0002,
         "armour": 0.0015,
-        "artillery": 0.0116
+        "artillery": 0.0116,
+        "naval": 0.0,
+        "aircraft": 0.002
       },
       "infrastructure": 0.461,
       "port": 0.0,
@@ -9513,7 +9959,9 @@
         "munitions": 0.2381,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0041
+        "artillery": 0.0041,
+        "naval": 0.0,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.336,
       "port": 0.0,
@@ -9561,7 +10009,9 @@
         "munitions": 0.2643,
         "infantry": 0.0003,
         "armour": 0.0019,
-        "artillery": 0.0135
+        "artillery": 0.0135,
+        "naval": 0.0,
+        "aircraft": 0.0026
       },
       "infrastructure": 0.466,
       "port": 0.0,
@@ -9609,7 +10059,9 @@
         "munitions": 0.2578,
         "infantry": 0.0002,
         "armour": 0.0014,
-        "artillery": 0.0112
+        "artillery": 0.0112,
+        "naval": 0.0,
+        "aircraft": 0.0019
       },
       "infrastructure": 0.46,
       "port": 0.0,
@@ -9657,7 +10109,9 @@
         "munitions": 0.2395,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0046
+        "artillery": 0.0046,
+        "naval": 0.0,
+        "aircraft": 0.0005
       },
       "infrastructure": 0.338,
       "port": 0.0,
@@ -9705,7 +10159,9 @@
         "munitions": 0.2565,
         "infantry": 0.0002,
         "armour": 0.0013,
-        "artillery": 0.0179
+        "artillery": 0.0179,
+        "naval": 0.0098,
+        "aircraft": 0.0018
       },
       "infrastructure": 0.458,
       "port": 0.586,
@@ -9745,7 +10201,9 @@
         "munitions": 0.2377,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0066
+        "artillery": 0.0066,
+        "naval": 0.0041,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.435,
       "port": 0.669,
@@ -9777,7 +10235,9 @@
         "munitions": 0.242,
         "infantry": 0.0,
         "armour": 0.0004,
-        "artillery": 0.0091
+        "artillery": 0.0091,
+        "naval": 0.0047,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.442,
       "port": 0.545,
@@ -9817,7 +10277,9 @@
         "munitions": 0.2621,
         "infantry": 0.0003,
         "armour": 0.0043,
-        "artillery": 0.0212
+        "artillery": 0.0212,
+        "naval": 0.0119,
+        "aircraft": 0.0024
       },
       "infrastructure": 0.564,
       "port": 0.599,
@@ -9857,7 +10319,9 @@
         "munitions": 0.2457,
         "infantry": 0.0001,
         "armour": 0.0006,
-        "artillery": 0.0114
+        "artillery": 0.0114,
+        "naval": 0.0052,
+        "aircraft": 0.0009
       },
       "infrastructure": 0.447,
       "port": 0.487,
@@ -9901,7 +10365,9 @@
         "munitions": 0.2386,
         "infantry": 0.0,
         "armour": 0.0003,
-        "artillery": 0.0043
+        "artillery": 0.0043,
+        "naval": 0.0,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.437,
       "port": 0.0,
@@ -9949,7 +10415,9 @@
         "munitions": 0.2556,
         "infantry": 0.0002,
         "armour": 0.0031,
-        "artillery": 0.0104
+        "artillery": 0.0104,
+        "naval": 0.0,
+        "aircraft": 0.0017
       },
       "infrastructure": 0.558,
       "port": 0.0,
@@ -9997,7 +10465,9 @@
         "munitions": 0.2871,
         "infantry": 0.0007,
         "armour": 0.0101,
-        "artillery": 0.0362
+        "artillery": 0.0362,
+        "naval": 0.0243,
+        "aircraft": 0.0056
       },
       "infrastructure": 0.583,
       "port": 0.718,
@@ -10033,7 +10503,9 @@
         "munitions": 0.5387,
         "infantry": 0.0199,
         "armour": 0.1392,
-        "artillery": 0.187
+        "artillery": 0.187,
+        "naval": 0.1721,
+        "aircraft": 0.0771
       },
       "infrastructure": 0.689,
       "port": 0.983,
@@ -10069,7 +10541,9 @@
         "munitions": 0.3781,
         "infantry": 0.0047,
         "armour": 0.0175,
-        "artillery": 0.0907
+        "artillery": 0.0907,
+        "naval": 0.0594,
+        "aircraft": 0.0243
       },
       "infrastructure": 0.532,
       "port": 0.7,
@@ -10113,7 +10587,9 @@
         "munitions": 0.2502,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.0084
+        "artillery": 0.0084,
+        "naval": 0.0,
+        "aircraft": 0.0012
       },
       "infrastructure": 0.352,
       "port": 0.0,
@@ -10161,7 +10637,9 @@
         "munitions": 0.2805,
         "infantry": 0.0006,
         "armour": 0.0033,
-        "artillery": 0.0193
+        "artillery": 0.0193,
+        "naval": 0.0,
+        "aircraft": 0.0046
       },
       "infrastructure": 0.479,
       "port": 0.0,
@@ -10209,7 +10687,9 @@
         "munitions": 0.2489,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.008
+        "artillery": 0.008,
+        "naval": 0.0,
+        "aircraft": 0.0011
       },
       "infrastructure": 0.35,
       "port": 0.0,
@@ -10257,7 +10737,9 @@
         "munitions": 0.5862,
         "infantry": 0.0265,
         "armour": 0.1746,
-        "artillery": 0.1293
+        "artillery": 0.1293,
+        "naval": 0.0,
+        "aircraft": 0.0968
       },
       "infrastructure": 0.703,
       "port": 0.0,
@@ -10305,7 +10787,9 @@
         "munitions": 0.2646,
         "infantry": 0.0003,
         "armour": 0.0007,
-        "artillery": 0.0136
+        "artillery": 0.0136,
+        "naval": 0.0,
+        "aircraft": 0.0026
       },
       "infrastructure": 0.366,
       "port": 0.0,
@@ -10353,7 +10837,9 @@
         "munitions": 0.2385,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0042
+        "artillery": 0.0042,
+        "naval": 0.0,
+        "aircraft": 0.0004
       },
       "infrastructure": 0.337,
       "port": 0.0,
@@ -10401,7 +10887,9 @@
         "munitions": 0.2445,
         "infantry": 0.0001,
         "armour": 0.0002,
-        "artillery": 0.0064
+        "artillery": 0.0064,
+        "naval": 0.0,
+        "aircraft": 0.0008
       },
       "infrastructure": 0.345,
       "port": 0.0,
@@ -10449,7 +10937,9 @@
         "munitions": 0.252,
         "infantry": 0.0001,
         "armour": 0.0004,
-        "artillery": 0.0091
+        "artillery": 0.0091,
+        "naval": 0.0,
+        "aircraft": 0.0014
       },
       "infrastructure": 0.354,
       "port": 0.0,
@@ -10497,7 +10987,9 @@
         "munitions": 0.274,
         "infantry": 0.0005,
         "armour": 0.0027,
-        "artillery": 0.017
+        "artillery": 0.017,
+        "naval": 0.0,
+        "aircraft": 0.0038
       },
       "infrastructure": 0.474,
       "port": 0.0,
@@ -10545,7 +11037,9 @@
         "munitions": 0.2483,
         "infantry": 0.0001,
         "armour": 0.0003,
-        "artillery": 0.0129
+        "artillery": 0.0129,
+        "naval": 0.006,
+        "aircraft": 0.0011
       },
       "infrastructure": 0.35,
       "port": 0.494,
@@ -10589,7 +11083,9 @@
         "munitions": 0.3081,
         "infantry": 0.0014,
         "armour": 0.0065,
-        "artillery": 0.0488
+        "artillery": 0.0488,
+        "naval": 0.0279,
+        "aircraft": 0.009
       },
       "infrastructure": 0.497,
       "port": 0.612,
@@ -10633,7 +11129,9 @@
         "munitions": 0.3869,
         "infantry": 0.0053,
         "armour": 0.0479,
-        "artillery": 0.0576
+        "artillery": 0.0576,
+        "naval": 0.0,
+        "aircraft": 0.0266
       },
       "infrastructure": 0.636,
       "port": 0.0,
@@ -10681,7 +11179,9 @@
         "munitions": 0.2907,
         "infantry": 0.0008,
         "armour": 0.011,
-        "artillery": 0.023
+        "artillery": 0.023,
+        "naval": 0.0,
+        "aircraft": 0.0061
       },
       "infrastructure": 0.586,
       "port": 0.0,
@@ -10729,7 +11229,9 @@
         "munitions": 0.2427,
         "infantry": 0.0001,
         "armour": 0.0005,
-        "artillery": 0.0058
+        "artillery": 0.0058,
+        "naval": 0.0,
+        "aircraft": 0.0007
       },
       "infrastructure": 0.443,
       "port": 0.0,
@@ -10777,7 +11279,9 @@
         "munitions": 0.2359,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0055
+        "artillery": 0.0055,
+        "naval": 0.0023,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.333,
       "port": 0.451,
@@ -10821,7 +11325,9 @@
         "munitions": 0.2448,
         "infantry": 0.0001,
         "armour": 0.0006,
-        "artillery": 0.0108
+        "artillery": 0.0108,
+        "naval": 0.0063,
+        "aircraft": 0.0008
       },
       "infrastructure": 0.446,
       "port": 0.624,
@@ -10857,7 +11363,9 @@
         "munitions": 0.266,
         "infantry": 0.0003,
         "armour": 0.0051,
-        "artillery": 0.0235
+        "artillery": 0.0235,
+        "naval": 0.0134,
+        "aircraft": 0.0028
       },
       "infrastructure": 0.567,
       "port": 0.608,
@@ -10897,7 +11405,9 @@
         "munitions": 0.2371,
         "infantry": 0.0,
         "armour": 0.0002,
-        "artillery": 0.0038
+        "artillery": 0.0038,
+        "naval": 0.0,
+        "aircraft": 0.0003
       },
       "infrastructure": 0.435,
       "port": 0.0,
@@ -10945,7 +11455,9 @@
         "munitions": 0.252,
         "infantry": 0.0001,
         "armour": 0.001,
-        "artillery": 0.0152
+        "artillery": 0.0152,
+        "naval": 0.0072,
+        "aircraft": 0.0014
       },
       "infrastructure": 0.454,
       "port": 0.505,
@@ -10989,7 +11501,9 @@
         "munitions": 0.4006,
         "infantry": 0.0062,
         "armour": 0.0218,
-        "artillery": 0.1042
+        "artillery": 0.1042,
+        "naval": 0.0842,
+        "aircraft": 0.0303
       },
       "infrastructure": 0.541,
       "port": 0.863,
@@ -11025,7 +11539,9 @@
         "munitions": 0.257,
         "infantry": 0.0002,
         "armour": 0.0005,
-        "artillery": 0.0182
+        "artillery": 0.0182,
+        "naval": 0.01,
+        "aircraft": 0.0019
       },
       "infrastructure": 0.359,
       "port": 0.587,
@@ -11065,7 +11581,9 @@
         "munitions": 0.764,
         "infantry": 0.0592,
         "armour": 0.1328,
-        "artillery": 0.322
+        "artillery": 0.322,
+        "naval": 0.2986,
+        "aircraft": 0.184
       },
       "infrastructure": 0.648,
       "port": 0.991,
@@ -11109,7 +11627,9 @@
         "munitions": 1.0407,
         "infantry": 0.1358,
         "armour": 0.6456,
-        "artillery": 0.2927
+        "artillery": 0.2927,
+        "naval": 0.0,
+        "aircraft": 0.3577
       },
       "infrastructure": 1.0,
       "port": 0.0,
@@ -11157,7 +11677,9 @@
         "munitions": 0.4933,
         "infantry": 0.0146,
         "armour": 0.1082,
-        "artillery": 0.0959
+        "artillery": 0.0959,
+        "naval": 0.0,
+        "aircraft": 0.06
       },
       "infrastructure": 0.675,
       "port": 0.0,
@@ -11205,7 +11727,9 @@
         "munitions": 0.3678,
         "infantry": 0.0041,
         "armour": 0.0391,
-        "artillery": 0.0507
+        "artillery": 0.0507,
+        "naval": 0.0,
+        "aircraft": 0.0217
       },
       "infrastructure": 0.627,
       "port": 0.0,
@@ -11253,7 +11777,9 @@
         "munitions": 0.3095,
         "infantry": 0.0014,
         "armour": 0.0067,
-        "artillery": 0.0298
+        "artillery": 0.0298,
+        "naval": 0.0,
+        "aircraft": 0.0092
       },
       "infrastructure": 0.497,
       "port": 0.0,
@@ -11301,7 +11827,9 @@
         "munitions": 0.2916,
         "infantry": 0.0009,
         "armour": 0.0045,
-        "artillery": 0.0233
+        "artillery": 0.0233,
+        "naval": 0.0,
+        "aircraft": 0.0063
       },
       "infrastructure": 0.486,
       "port": 0.0,
@@ -11349,7 +11877,9 @@
         "munitions": 0.2842,
         "infantry": 0.0007,
         "armour": 0.0037,
-        "artillery": 0.0207
+        "artillery": 0.0207,
+        "naval": 0.0,
+        "aircraft": 0.0052
       },
       "infrastructure": 0.481,
       "port": 0.0,
@@ -11397,7 +11927,9 @@
         "munitions": 0.3494,
         "infantry": 0.0031,
         "armour": 0.0125,
-        "artillery": 0.0735
+        "artillery": 0.0735,
+        "naval": 0.0507,
+        "aircraft": 0.0173
       },
       "infrastructure": 0.519,
       "port": 0.737,
@@ -11437,7 +11969,9 @@
         "munitions": 0.4689,
         "infantry": 0.012,
         "armour": 0.0928,
-        "artillery": 0.1452
+        "artillery": 0.1452,
+        "naval": 0.1259,
+        "aircraft": 0.0514
       },
       "infrastructure": 0.667,
       "port": 0.927,
@@ -11473,7 +12007,9 @@
         "munitions": 0.3923,
         "infantry": 0.0056,
         "armour": 0.0505,
-        "artillery": 0.0993
+        "artillery": 0.0993,
+        "naval": 0.0729,
+        "aircraft": 0.028
       },
       "infrastructure": 0.638,
       "port": 0.785,
@@ -11513,7 +12049,9 @@
         "munitions": 0.2491,
         "infantry": 0.0001,
         "armour": 0.0008,
-        "artillery": 0.0134
+        "artillery": 0.0134,
+        "naval": 0.0071,
+        "aircraft": 0.0011
       },
       "infrastructure": 0.451,
       "port": 0.567,
@@ -11553,7 +12091,9 @@
         "munitions": 0.2418,
         "infantry": 0.0,
         "armour": 0.0004,
-        "artillery": 0.0091
+        "artillery": 0.0091,
+        "naval": 0.0052,
+        "aircraft": 0.0006
       },
       "infrastructure": 0.442,
       "port": 0.614,
@@ -11589,7 +12129,9 @@
         "munitions": 0.2897,
         "infantry": 0.0008,
         "armour": 0.0108,
-        "artillery": 0.0378
+        "artillery": 0.0378,
+        "naval": 0.0231,
+        "aircraft": 0.006
       },
       "infrastructure": 0.585,
       "port": 0.653,
@@ -11629,7 +12171,9 @@
         "munitions": 0.2612,
         "infantry": 0.0002,
         "armour": 0.0041,
-        "artillery": 0.0124
+        "artillery": 0.0124,
+        "naval": 0.0,
+        "aircraft": 0.0023
       },
       "infrastructure": 0.563,
       "port": 0.0,
@@ -11677,7 +12221,9 @@
         "munitions": 0.2509,
         "infantry": 0.0001,
         "armour": 0.0009,
-        "artillery": 0.0145
+        "artillery": 0.0145,
+        "naval": 0.0078,
+        "aircraft": 0.0013
       },
       "infrastructure": 0.453,
       "port": 0.572,
@@ -11717,7 +12263,9 @@
         "munitions": 0.2342,
         "infantry": 0.0,
         "armour": 0.0001,
-        "artillery": 0.0045
+        "artillery": 0.0045,
+        "naval": 0.003,
+        "aircraft": 0.0002
       },
       "infrastructure": 0.429,
       "port": 0.723,
@@ -11745,7 +12293,9 @@
         "munitions": 4.1797,
         "infantry": 3.202,
         "armour": 8.0921,
-        "artillery": 2.3692
+        "artillery": 2.3692,
+        "naval": 3.5481,
+        "aircraft": 4.4842
       },
       "infrastructure": 1.0,
       "port": 1.6,
@@ -11789,7 +12339,9 @@
         "munitions": 1.4881,
         "infantry": 0.326,
         "armour": 1.3011,
-        "artillery": 0.4536
+        "artillery": 0.4536,
+        "naval": 0.0,
+        "aircraft": 0.721
       },
       "infrastructure": 1.0,
       "port": 0.0,
@@ -11837,7 +12389,9 @@
         "munitions": 0.4726,
         "infantry": 0.0124,
         "armour": 0.0951,
-        "artillery": 0.0884
+        "artillery": 0.0884,
+        "naval": 0.0,
+        "aircraft": 0.0527
       },
       "infrastructure": 0.668,
       "port": 0.0,
@@ -11885,7 +12439,9 @@
         "munitions": 0.4211,
         "infantry": 0.0077,
         "armour": 0.0653,
-        "artillery": 0.1165
+        "artillery": 0.1165,
+        "naval": 0.0811,
+        "aircraft": 0.0362
       },
       "infrastructure": 0.649,
       "port": 0.743,
@@ -11929,7 +12485,9 @@
         "munitions": 0.2695,
         "infantry": 0.0004,
         "armour": 0.0023,
-        "artillery": 0.0256
+        "artillery": 0.0256,
+        "naval": 0.0147,
+        "aircraft": 0.0032
       },
       "infrastructure": 0.47,
       "port": 0.615,
@@ -11969,7 +12527,9 @@
         "munitions": 0.2567,
         "infantry": 0.0002,
         "armour": 0.0005,
-        "artillery": 0.018
+        "artillery": 0.018,
+        "naval": 0.0099,
+        "aircraft": 0.0018
       },
       "infrastructure": 0.359,
       "port": 0.587,
@@ -12009,7 +12569,9 @@
         "munitions": 0.3444,
         "infantry": 0.0028,
         "armour": 0.0117,
-        "artillery": 0.0706
+        "artillery": 0.0706,
+        "naval": 0.0529,
+        "aircraft": 0.0162
       },
       "infrastructure": 0.516,
       "port": 0.801,
@@ -12045,7 +12607,9 @@
         "munitions": 0.2811,
         "infantry": 0.0006,
         "armour": 0.0085,
-        "artillery": 0.0326
+        "artillery": 0.0326,
+        "naval": 0.0216,
+        "aircraft": 0.0047
       },
       "infrastructure": 0.579,
       "port": 0.707,
@@ -12081,7 +12645,9 @@
         "munitions": 0.287,
         "infantry": 0.0007,
         "armour": 0.01,
-        "artillery": 0.0361
+        "artillery": 0.0361,
+        "naval": 0.0243,
+        "aircraft": 0.0056
       },
       "infrastructure": 0.583,
       "port": 0.718,
@@ -12117,7 +12683,9 @@
         "munitions": 2.2956,
         "infantry": 0.8771,
         "armour": 2.8718,
-        "artillery": 1.24
+        "artillery": 1.24,
+        "naval": 1.857,
+        "aircraft": 1.5914
       },
       "infrastructure": 1.0,
       "port": 1.6,
@@ -12153,7 +12721,9 @@
         "munitions": 0.6633,
         "infantry": 0.0391,
         "armour": 0.2383,
-        "artillery": 0.2617
+        "artillery": 0.2617,
+        "naval": 0.2105,
+        "aircraft": 0.132
       },
       "infrastructure": 0.974,
       "port": 0.86,
@@ -12201,7 +12771,9 @@
         "munitions": 0.7124,
         "infantry": 0.0483,
         "armour": 0.2826,
-        "artillery": 0.2911
+        "artillery": 0.2911,
+        "naval": 0.2616,
+        "aircraft": 0.1566
       },
       "infrastructure": 0.986,
       "port": 0.96,
@@ -12245,7 +12817,9 @@
         "munitions": 0.5484,
         "infantry": 0.0212,
         "armour": 0.1462,
-        "artillery": 0.1928
+        "artillery": 0.1928,
+        "naval": 0.1787,
+        "aircraft": 0.081
       },
       "infrastructure": 0.692,
       "port": 0.99,
@@ -12281,7 +12855,9 @@
         "munitions": 0.6039,
         "infantry": 0.0292,
         "armour": 0.1886,
-        "artillery": 0.2261
+        "artillery": 0.2261,
+        "naval": 0.218,
+        "aircraft": 0.1045
       },
       "infrastructure": 0.708,
       "port": 1.03,
@@ -12317,7 +12893,9 @@
         "munitions": 0.7004,
         "infantry": 0.046,
         "armour": 0.2715,
-        "artillery": 0.2839
+        "artillery": 0.2839,
+        "naval": 0.2904,
+        "aircraft": 0.1505
       },
       "infrastructure": 0.983,
       "port": 1.093,

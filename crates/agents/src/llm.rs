@@ -774,7 +774,8 @@ happens. Respond with ONLY a single JSON object, no other text, matching this sc
 \"terms\": [{\"kind\": \"sign\", \"treaty\": <one of \"ceasefire\", \"non_aggression\", \"alliance\", \
 \"military_access\", \"port_access\", \"trade_agreement\">} | {\"kind\": \"withdraw\", \"region\": <region id \
 number>} | {\"kind\": \"cede\", \"region\": <region id number>} | {\"kind\": \"deliver\", \"good\": <one of \
-\"food\", \"energy\", \"steel\", \"machinery\", \"munitions\", \"infantry\", \"armour\", \"artillery\">, \"amount\": <number>}]}. \"terms\" is \
+\"food\", \"energy\", \"steel\", \"machinery\", \"munitions\", \"infantry\", \"armour\", \"artillery\", \"naval\", \
+\"aircraft\">, \"amount\": <number>}]}. \"terms\" is \
 your best-effort structured reading of what the proposal actually offers/asks, from the *proposing* faction's \
 side (e.g. \"I will withdraw from region 4\" is {\"kind\":\"withdraw\",\"region\":4} even though you are the one \
 receiving the offer); \"accept\" is your own faction's verdict on the deal as a whole.";

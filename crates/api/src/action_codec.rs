@@ -18,6 +18,7 @@ use archipelago_sim::diplomacy::{Treaty, TreatyTerm, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
+use archipelago_sim::military::Branch;
 use archipelago_sim::world::{Domain, Station};
 
 use crate::json::Value;
@@ -163,7 +164,17 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
                 None => Domain::Land,
                 Some(key) => Domain::from_key(key).ok_or_else(|| format!("unknown domain `{key}`"))?,
             };
-            Ok(Action::RecruitUnit { region, domain })
+            // Stage 11B (docs/phase11-spec.md §1): defaults to `Infantry`
+            // when absent, the same "missing means the old, single-branch
+            // default" convention `domain` above already established -
+            // an RL client/replay written before this stage that never sends
+            // `branch` at all keeps working unchanged, and `apply_recruit`
+            // only ever reads it for a `Domain::Land` recruit anyway.
+            let branch = match v.get("branch").and_then(Value::as_str) {
+                None => Branch::Infantry,
+                Some(key) => Branch::from_key(key).ok_or_else(|| format!("unknown branch `{key}`"))?,
+            };
+            Ok(Action::RecruitUnit { region, domain, branch })
         }
         "reinforce_unit" => Ok(Action::ReinforceUnit { unit: unit_id(v, "unit")? }),
         "set_conscription" => Ok(Action::SetConscription(f32_field(v, "value")?)),

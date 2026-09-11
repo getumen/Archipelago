@@ -426,19 +426,33 @@ impl Region {
     /// `agents::unit_cap`'s recruitment ceiling).
     ///
     /// **Deliberately not "every non-`Food` `Good`."** Stage 11A
-    /// (docs/phase11-spec.md §3) gives `Armour`/`Artillery` real,
-    /// region-varying capacity as data, but "部隊種別は入れない" - no unit
-    /// type draws on either stock yet. Blanket-iterating `ALL_GOODS` here
-    /// would let that not-yet-usable capacity inflate `unit_cap`/
-    /// `supply_source`/`value` the instant it existed, silently growing
-    /// every scenario's recruitable force and transport-network base with
-    /// no matching demand anywhere - exactly the kind of change Stage 11A's
-    /// own acceptance bar ("3 シナリオの結果が変わらない") forbids. Extend
-    /// this list, not `ALL_GOODS` itself, when Stage 11B actually wires a
-    /// land unit type to draw `Armour`/`Artillery`.
+    /// (docs/phase11-spec.md §3) gave `Armour`/`Artillery` real,
+    /// region-varying capacity as data before any unit type drew on either
+    /// stock ("部隊種別は入れない"), and this list deliberately excluded them
+    /// until that changed - blanket-iterating `ALL_GOODS` back then would
+    /// have inflated `unit_cap`/`supply_source`/`value` the instant the data
+    /// existed, with no matching demand anywhere, which Stage 11A's own
+    /// acceptance bar ("3 シナリオの結果が変わらない") forbade.
+    ///
+    /// Stage 11B wires up exactly that: `military::Branch` now draws
+    /// `Armour`/`Artillery` (`Branch::equipment_good`), and `Domain::Sea`/
+    /// `Domain::Air` now draw their own `Good::Naval`/`Good::Aircraft`
+    /// instead of sharing `Good::Infantry` (`Good`'s own module doc) - so
+    /// all five now genuinely equip or sustain a fielded unit, the same test
+    /// this list has always applied, and belong in the sum on identical
+    /// terms to `Good::Infantry`.
     pub fn industry_total(&self) -> f32 {
-        const INDUSTRY_GOODS: [Good; 5] =
-            [Good::Energy, Good::Steel, Good::Machinery, Good::Munitions, Good::Infantry];
+        const INDUSTRY_GOODS: [Good; 9] = [
+            Good::Energy,
+            Good::Steel,
+            Good::Machinery,
+            Good::Munitions,
+            Good::Infantry,
+            Good::Armour,
+            Good::Artillery,
+            Good::Naval,
+            Good::Aircraft,
+        ];
         INDUSTRY_GOODS.iter().map(|&good| self.effective_capacity(good)).sum()
     }
 

@@ -10,7 +10,7 @@ use archipelago_sim::diplomacy::{Stance, Treaty};
 use archipelago_sim::focus::{self, NationalFocus};
 use archipelago_sim::good::{Good, GOOD_COUNT};
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
-use archipelago_sim::military::{move_required, Movement, Unit};
+use archipelago_sim::military::{move_required, Branch, Movement, Unit};
 use archipelago_sim::observation::Observation;
 use archipelago_sim::scenario;
 use archipelago_sim::trade;
@@ -82,6 +82,7 @@ fn moving_unit_is_not_reissued_toward_same_destination() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(region),
+        branch: Some(Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -494,6 +495,7 @@ fn push_idle_land_units(world: &mut archipelago_sim::world::World, faction: Fact
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(region),
+            branch: Some(Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -578,28 +580,33 @@ fn heuristic_agent_disbands_when_over_extended() {
 /// past `unit_cap` must still shed its excess once the economy itself says
 /// it can't keep up, even at an overshoot small enough that the old flat
 /// head-count margin would have waved it through untouched. Uses mvp's
-/// untouched starting industry (`unit_cap` == 9.2, `3.0 + 31/5.0`) rather
-/// than zeroing it out, so the overshoot can be sized precisely: 10 units
-/// clears `cap` but sits under the old `cap * 1.25` (== 11.5) margin -
-/// exactly the 近畿府 shape, where the old trigger never fired because the
-/// head count never got *that* far past the cap, even though the economy
-/// was already failing to feed it.
+/// untouched starting industry rather than zeroing it out, so the overshoot
+/// can be sized precisely: enough units to clear `cap` but stay under the
+/// old `cap * 1.25` margin - exactly the 近畿府 shape, where the old trigger
+/// never fired because the head count never got *that* far past the cap,
+/// even though the economy was already failing to feed it.
+///
+/// Stage 11B (docs/phase11-spec.md §3): `unit_cap` reads `Region::
+/// industry_total`, which now includes Armour/Artillery/Naval/Aircraft
+/// capacity (that function's own doc) - mvp's faction 0 unit_cap rose from
+/// 9.2 to ~11.43, so the unit counts below are sized against the new
+/// figure, not the pre-Stage-11B one this test originally used.
 /// Checked this fails when broken: reverting the guard to
 /// `total <= cap * 1.25` (dropping the solvency check entirely) makes
-/// `disbands.len()` come back `0`, since `10.0 <= 11.5`.
+/// `disbands.len()` come back `0`, since `12.0 <= 14.29`.
 #[test]
 fn heuristic_agent_disbands_when_insolvent_even_within_old_head_count_margin() {
     let mut world = scenario::build_world();
     let faction = FactionId(0);
     let capital = world.faction(faction).capital;
 
-    // mvp's faction 0 starts with 3 units; + 7 fresh ones = 10. `unit_cap`
-    // sits at 9.2 off mvp's own starting industry (untouched here), so
-    // `10.0` clears `cap` but stays under the old `cap * 1.25` (== 11.5)
+    // mvp's faction 0 starts with 3 units; + 9 fresh ones = 12. `unit_cap`
+    // sits at ~11.43 off mvp's own starting industry (untouched here), so
+    // `12.0` clears `cap` but stays under the old `cap * 1.25` (== 14.29)
     // margin entirely.
-    push_idle_land_units(&mut world, faction, capital, 7);
+    push_idle_land_units(&mut world, faction, capital, 9);
     let total_before: usize = world.units.iter().filter(|u| u.owner == faction && u.alive).count();
-    assert_eq!(total_before, 10, "test setup: expected 3 starting + 7 fresh units");
+    assert_eq!(total_before, 12, "test setup: expected 3 starting + 9 fresh units");
 
     world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
     world.faction_mut(faction).supply_ratio = 0.365;
@@ -790,6 +797,7 @@ fn heuristic_agent_never_disbands_a_contested_unit() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(capital),
+        branch: Some(Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -1187,6 +1195,11 @@ fn air_floor_is_not_shed_while_the_navy_still_stands() {
                 arms_delivery_station: station,
                 experience: 0.0,
                 alive: true,
+                branch: if station.domain() == archipelago_sim::world::Domain::Land {
+                    Some(Branch::Infantry)
+                } else {
+                    None
+                },
             });
             ids.push(id);
         }
@@ -1438,6 +1451,7 @@ fn heuristic_agent_never_moves_a_unit_it_is_also_disbanding() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Airfield(stranded_airfield),
+        branch: None,
         experience: 0.0,
         alive: true,
     });

@@ -215,6 +215,113 @@ pub const UNIT_START_ORG_RATIO: f32 = 0.4;
 /// first, disclosed placeholder, not a tuned constant.
 pub const AIR_UNIT_MACHINERY_COST: f32 = 20.0;
 
+// ---------------------------------------------------------------------------
+// Stage 11B (docs/phase11-spec.md §1): the three land branches
+// (`military::Branch`) and how each differs - terrain and supply, never a
+// rock-paper-scissors matchup (§0: "戦闘の三すくみにはしない"). Every
+// multiplier below is justified by what the branch physically *is*, not
+// fitted to make any one scenario come out a particular way
+// (CLAUDE.md「繰り返し踏んだ欠陥」records three past constants that were
+// fitted to mvp's outcome instead and had to be reverted).
+// ---------------------------------------------------------------------------
+
+/// `military::branch_terrain_mult`'s per-terrain multiplier for
+/// `Branch::Infantry`, folded into `raw_power` the same multiplicative slot
+/// `Terrain::defense_bonus`/`combat_posture_mult` already occupy in
+/// `military::tick_combat` - not a new combat mechanism, a new per-unit term
+/// in the existing one.
+///
+/// Flat `1.0` on every terrain, deliberately: infantry is the generalist
+/// branch that fights adequately everywhere, on foot, with no equipment that
+/// terrain can specifically defeat - it is `Armour`'s own terrain-dependence
+/// (`ARMOUR_MOUNTAIN_MULT`'s doc) that produces the relative difference
+/// docs/phase11-spec.md's table calls infantry's "強い地形" (mountain/hill):
+/// infantry does not get *better* in the mountains, it simply isn't
+/// penalized there the way a vehicle-borne branch is, so at equal strength
+/// it comes out ahead precisely where armour's own multiplier falls below
+/// `1.0`. Infantry is this branch model's reference class - the same role
+/// it plays for `INFANTRY_SUPPLY_WEIGHT`/`INFANTRY_MOVE_MULT` below.
+pub const INFANTRY_MOUNTAIN_MULT: f32 = 1.00;
+pub const INFANTRY_HILL_MULT: f32 = 1.00;
+pub const INFANTRY_URBAN_MULT: f32 = 1.00;
+pub const INFANTRY_PLAIN_MULT: f32 = 1.00;
+
+/// `Branch::Armour`'s own per-terrain multiplier, read against Infantry's
+/// flat `1.0` reference above: armour's decisive edge is high-speed maneuver
+/// and long sightlines, which only open terrain gives it. A hill cuts
+/// sightlines and the number of cross-country routes a tracked formation can
+/// use; a mountain excludes armoured maneuver almost entirely; dense urban
+/// terrain traps vehicles at close range with no room to maneuver away from
+/// an ambush, historically armour's worst environment. On the open plain
+/// that same maneuver advantage is a real, positive edge over infantry, not
+/// just an absence of penalty.
+pub const ARMOUR_PLAIN_MULT: f32 = 1.30;
+pub const ARMOUR_HILL_MULT: f32 = 0.85;
+pub const ARMOUR_MOUNTAIN_MULT: f32 = 0.60;
+pub const ARMOUR_URBAN_MULT: f32 = 0.80;
+
+/// `Branch::Artillery`'s combat multiplier when its side is the *attacker*
+/// in this battle (`military::tick_combat`'s existing `defender` fact,
+/// already used by `combat_posture_mult` for `NationalFocus::
+/// DefensivePosture` - Artillery's own multiplier rides that same
+/// attacker/defender axis instead of inventing a second one, per
+/// docs/phase11-spec.md §1's "既存の係数のどれかに乗る形にする"). Artillery's
+/// decisive contribution is a preparatory bombardment that softens a
+/// position before friendly forces close in - a real advantage specifically
+/// for the side doing the attacking. It reads `1.0` (no bonus, and no
+/// penalty either) while defending: a dug-in defender's own firepower is
+/// already counted by `Terrain::defense_bonus`, and giving artillery a
+/// *second* defensive bonus on top of that would double-count the same
+/// terrain advantage under a different name instead of expressing a genuine
+/// branch difference.
+pub const ARTILLERY_ATTACK_MULT: f32 = 1.30;
+
+/// `military::Branch::supply_weight`'s per-branch multiplier on the
+/// Munitions upkeep term `logistics::unit_supply_demand` already computes
+/// (`manpower * SUPPLY_NEED_PER_MANPOWER`) - riding the exact same term
+/// `COMBAT_SUPPLY_MULT` already multiplies onto, never a new demand channel.
+/// This is what makes "a heavier branch demands more of the transport
+/// network at equal unit count" (docs/phase11-spec.md §6) literally true:
+/// the same manpower now asks the network for a different amount of daily
+/// throughput depending on what it's hauling to the front.
+///
+/// Infantry is this model's reference class, at exactly `1.0` - a rifle
+/// company's daily consumption (rations, small-arms ammunition, foot-mobile
+/// equipment) is the logistics footprint every other branch is measured
+/// against, and the same footprint a unit-of-manpower already cost before
+/// branches existed, so an all-Infantry force sees no change in how hard it
+/// leans on the transport network.
+/// Armour is the heaviest: fuel for tracked engines, ammunition for
+/// main guns, and spare parts for a mechanically complex vehicle fleet are
+/// all real, continuous daily draws with no infantry equivalent.
+/// Artillery sits in between: it burns through shells at a high rate
+/// whenever it fires, but (per docs/phase11-spec.md §1's "遅い") it moves
+/// rarely and carries no vehicle fleet of its own to fuel and maintain the
+/// way Armour's does.
+pub const INFANTRY_SUPPLY_WEIGHT: f32 = 1.00;
+pub const ARMOUR_SUPPLY_WEIGHT: f32 = 1.60;
+pub const ARTILLERY_SUPPLY_WEIGHT: f32 = 1.25;
+
+/// `military::move_required`'s per-branch multiplier (docs/phase11-spec.md
+/// §1's "移動" column), applied at `action::apply_move`'s land arm and
+/// `military::tick_recovery`'s land retreat branch alongside the existing
+/// `hostile`/terrain terms - never a second movement mechanism, the same
+/// multiplicative slot `hostile`'s `1.5` already occupies inside
+/// `move_required`.
+///
+/// Armour is built around road/rail-independent speed - the same maneuver
+/// advantage `ARMOUR_PLAIN_MULT` rewards in combat carries over to how fast
+/// it can redeploy, so it needs *less* than a full march's worth of days.
+/// Artillery is towed or self-propelled but always slower to displace than
+/// a marching rifle company - breaking down a firing position, moving the
+/// pieces and their ammunition train, and resiting is the slowest thing a
+/// land branch does, so it needs *more* days for the same trip. Infantry is
+/// the reference branch neither multiplier is measured against - it reads
+/// `1.0`, "not slow" (docs/phase11-spec.md §1) rather than fast or slow.
+pub const INFANTRY_MOVE_MULT: f32 = 1.00;
+pub const ARMOUR_MOVE_MULT: f32 = 0.75;
+pub const ARTILLERY_MOVE_MULT: f32 = 1.40;
+
 /// Stage 10B (docs/phase10-spec.md "2. 制空権"): how far an airfield's own
 /// committed air power reaches, measured as straight-line geographic
 /// distance between `world::Region::position`s - never through the

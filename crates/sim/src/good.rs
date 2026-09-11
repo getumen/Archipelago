@@ -21,17 +21,31 @@
 //! never meant "every branch's equipment" *and* "just infantry's" at once
 //! in this codebase, and it still doesn't after the rename).
 //!
-//! `Armour` and `Artillery` are genuinely new: Stage 11A gives every
-//! scenario region-varying production capacity for them (see
+//! `Armour` and `Artillery` were genuinely new in Stage 11A: every scenario
+//! got region-varying production capacity for them (see
 //! `tools/hexmap/build_scenario.py` and `scenarios/mvp.json`/`japan47.json`)
-//! so the data exists and differs region to region, but **no unit type
-//! draws on either stock yet** ("部隊種別は入れない" - that is Stage 11B).
-//! Their production (`economy::tick_economy`) is deliberately decoupled
-//! from the Machinery/Steel input `Infantry` already fully claims, so
-//! introducing them cannot perturb a single existing number - see
-//! `economy::tick_economy`'s own doc for why, and
-//! `Region::industry_total`'s doc for the matching reason its own sum
-//! excludes them for now.
+//! so the data existed and differed region to region, but no unit type drew
+//! on either stock yet ("部隊種別は入れない" - Stage 11B). Stage 11B
+//! (docs/phase11-spec.md §1) is what wires them up: `military::Branch`
+//! (Infantry/Armour/Artillery) maps 1:1 onto `Good::Infantry`/`Good::Armour`/
+//! `Good::Artillery` via `Branch::equipment_good`, and `Region::industry_total`
+//! now includes both (see that function's own doc for why it didn't before).
+//!
+//! `Naval` and `Aircraft` are Stage 11B's other half - finishing what 11A
+//! deliberately deferred. Until this stage, `Domain::Sea`/`Domain::Air` units
+//! drew `Good::Infantry` for their own equipment (11A's own doc used to
+//! record this here), sharing a stock with land's infantry-branch equipment
+//! even though a warship and a rifle have nothing to do with each other
+//! industrially. That is exactly the single-scalar-pool shape
+//! `docs/future-work.md`'s "単一プールの実測" measured and this whole phase
+//! exists to break: every domain now draws its own commodity, with no
+//! fallback to a shared one. `naval::sea_demand`/`naval::apply_fleet_supply`/
+//! `action::apply_recruit`'s `Domain::Sea` arm read `Good::Naval`;
+//! `air::air_demand`/`air::apply_air_supply`/`apply_recruit`'s `Domain::Air`
+//! arm read `Good::Aircraft`. Neither gets a recipe of its own any more than
+//! `Armour`/`Artillery` do (`economy::tick_economy`'s own doc) - produced
+//! straight from capacity, so introducing them doesn't perturb the existing
+//! Steel/Machinery/Infantry chain.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Good {
     Food,
@@ -45,9 +59,15 @@ pub enum Good {
     Infantry,
     Armour,
     Artillery,
+    /// Stage 11B: a fleet's own equipment commodity (`military::Domain::Sea`).
+    Naval,
+    /// Stage 11B: an air squadron's own equipment commodity, on top of the
+    /// airframe `Good::Machinery` cost `action::apply_recruit` already
+    /// charges a `Domain::Air` recruit (`balance::AIR_UNIT_MACHINERY_COST`).
+    Aircraft,
 }
 
-pub const GOOD_COUNT: usize = 8;
+pub const GOOD_COUNT: usize = 10;
 
 /// Every `Good`, in the fixed order that matches `Good::index()` and the
 /// `[f32; GOOD_COUNT]` layout. Iterate this instead of hand-rolling a
@@ -61,6 +81,8 @@ pub const ALL_GOODS: [Good; GOOD_COUNT] = [
     Good::Infantry,
     Good::Armour,
     Good::Artillery,
+    Good::Naval,
+    Good::Aircraft,
 ];
 
 impl Good {
@@ -74,6 +96,8 @@ impl Good {
             Good::Infantry => 5,
             Good::Armour => 6,
             Good::Artillery => 7,
+            Good::Naval => 8,
+            Good::Aircraft => 9,
         }
     }
 
@@ -88,6 +112,8 @@ impl Good {
             Good::Infantry => "歩兵装備",
             Good::Armour => "機甲装備",
             Good::Artillery => "砲兵装備",
+            Good::Naval => "艦艇装備",
+            Good::Aircraft => "航空装備",
         }
     }
 
@@ -102,6 +128,8 @@ impl Good {
             Good::Infantry => "infantry",
             Good::Armour => "armour",
             Good::Artillery => "artillery",
+            Good::Naval => "naval",
+            Good::Aircraft => "aircraft",
         }
     }
 }

@@ -447,7 +447,8 @@ pub fn instantaneous_fleet_arms_delivery(world: &World, unit_id: UnitId) -> (f32
 
     let faction_ref = &world.factions[faction.index()];
     let w_munitions = faction_ref.logistics_priority[Good::Munitions.index()].max(0.0);
-    let w_arms = faction_ref.logistics_priority[Good::Infantry.index()].max(0.0);
+    // Stage 11B: a fleet's own equipment commodity, not `Good::Infantry`.
+    let w_arms = faction_ref.logistics_priority[Good::Naval.index()].max(0.0);
     let w_sum = w_munitions + w_arms;
     let share_arms_frac = if w_sum > 0.0 { w_arms / w_sum } else { 0.5 };
     let share_arms = avail * share_arms_frac;

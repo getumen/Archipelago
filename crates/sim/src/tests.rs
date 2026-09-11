@@ -102,6 +102,7 @@ fn supply_corridor_cut() {
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(region),
+            branch: Some(military::Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -140,6 +141,7 @@ fn supply_corridor_cut() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(minami_tohoku),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -354,6 +356,7 @@ fn disband_rejected_under_enemy_contact() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(contested_region),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -404,6 +407,7 @@ fn over_extended_faction_recovers_solvency_by_disbanding() {
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(capital),
+            branch: Some(military::Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -1278,6 +1282,7 @@ fn devastation_reduces_supply_throughput() {
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
                 arms_delivery_station: Station::Region(region1),
+                branch: Some(military::Branch::Infantry),
                 experience: 0.0,
                 alive: true,
             });
@@ -1805,7 +1810,7 @@ fn recruit_fleet_at_a_struck_port_is_rejected_until_repaired() {
     );
 
     let units_before = world.units.len();
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea, branch: military::Branch::Infantry });
     assert_eq!(result, Err(ActionError::NoPort), "a struck port must not let a faction launch a new fleet from it");
     assert_eq!(world.units.len(), units_before, "a rejected recruit must not have raised anything");
 
@@ -1817,7 +1822,7 @@ fn recruit_fleet_at_a_struck_port_is_rejected_until_repaired() {
         world.transport_node(port).condition.get() > NODE_OPERATIONAL_THRESHOLD,
         "passive repair alone must eventually reopen the port"
     );
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea, branch: military::Branch::Infantry });
     assert_eq!(result, Ok(()), "once the port repairs past the threshold, recruiting there must succeed again");
     assert_eq!(world.units.len(), units_before + 1, "exactly one unit must have been raised once the port reopened");
 }
@@ -1897,6 +1902,7 @@ fn logistics_priority_splits_delivery() {
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
                 arms_delivery_station: Station::Region(region),
+                branch: Some(military::Branch::Infantry),
                 experience: 0.0,
                 alive: true,
             });
@@ -2180,6 +2186,7 @@ fn land_unit_reinforces_after_moving_into_previously_empty_region() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(capital),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -2249,6 +2256,7 @@ fn repeated_land_reinforce_after_move_cannot_exceed_daily_delivery() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(capital), // stale - forces the same on-the-spot recompute
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -2359,6 +2367,7 @@ fn simultaneous_arrivals_share_one_ticks_allocation_not_n_times_it() {
         arms_delivery: 0.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(capital), // stale - simulates a same-day arrival
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     };
@@ -2522,7 +2531,7 @@ fn damaged_fleet_at_undegarrisoned_port_can_reinforce() {
 
     world.faction_mut(faction).manpower = 1_000.0;
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1_000.0;
-    action::apply_action(&mut world, faction, Action::RecruitUnit { region: port_region, domain: Domain::Sea })
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region: port_region, domain: Domain::Sea, branch: military::Branch::Infantry })
         .unwrap();
     let fleet_id = world.units.last().unwrap().id;
     assert_eq!(world.unit(fleet_id).station.domain(), Domain::Sea);
@@ -2717,6 +2726,7 @@ fn sea_control_throttles_strait() {
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
                 arms_delivery_station: Station::Region(RegionId(1)),
+                branch: Some(military::Branch::Infantry),
                 experience: 0.0,
                 alive: true,
             });
@@ -2918,7 +2928,7 @@ fn fleet_cannot_enter_land() {
     action::apply_action(
         &mut world,
         faction,
-        Action::RecruitUnit { region: port_region, domain: Domain::Sea },
+        Action::RecruitUnit { region: port_region, domain: Domain::Sea, branch: military::Branch::Infantry },
     )
     .unwrap();
     let fleet_id = world.units.last().unwrap().id;
@@ -3812,6 +3822,7 @@ fn garrison_slows_but_does_not_stop_separatism() {
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
                 arms_delivery_station: Station::Region(region_id),
+                branch: Some(military::Branch::Infantry),
                 experience: 0.0,
                 alive: true,
             });
@@ -3952,6 +3963,7 @@ fn overextended_faction_sheds_unaffordable_territory_via_separatism() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(garrisoned_region),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -5110,15 +5122,15 @@ const MINI_VALID_SCENARIO: &str = r#"
 {
   "regions": [
     { "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] },
     { "id": "b", "name": "B", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [1.0, 0.0],
       "links": [ { "to": "a", "kind": "rail" }, { "to": "c", "kind": "rail" } ] },
     { "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] }
   ],
@@ -5182,7 +5194,7 @@ fn invalid_scenario_is_rejected() {
         .replacen(
             r#"{ "id": "c", "name": "C""#,
             r#"{ "id": "d", "name": "D", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [3.0, 0.0], "links": [] },
     { "id": "c", "name": "C""#,
             1,
@@ -5302,6 +5314,280 @@ fn shipped_scenarios_have_region_varying_branch_capacity() {
     }
 }
 
+/// Stage 11B: the same region-varying-capacity bar `shipped_scenarios_have_
+/// region_varying_branch_capacity` already holds Armour/Artillery to,
+/// applied to Naval/Aircraft - `good::Good`'s own module doc: giving Sea/Air
+/// their own commodities is the entire point of finishing what 11A deferred,
+/// and a flat, uniform split across every region would make that only
+/// nominally true.
+#[test]
+fn shipped_scenarios_have_region_varying_naval_aircraft_capacity() {
+    for path in ["../../scenarios/mvp.json", "../../scenarios/japan47.json", "../../scenarios/japan_hex.json"] {
+        let text = std::fs::read_to_string(path).expect("shipped scenario must be readable");
+        let world = scenario::load_str(&text).expect("shipped scenario must be valid");
+
+        let ratios: Vec<f32> = world
+            .regions
+            .iter()
+            .filter(|r| r.capacity[Good::Aircraft.index()] > 0.0)
+            .map(|r| r.capacity[Good::Naval.index()] / r.capacity[Good::Aircraft.index()])
+            .collect();
+        assert!(
+            ratios.len() > 1,
+            "{path}: need more than one region with nonzero Aircraft capacity to compare a ratio at all"
+        );
+        let min = ratios.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = ratios.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max / min.max(1e-6) > 1.2,
+            "{path}: Naval/Aircraft capacity ratio spread across regions is too narrow (min={min}, max={max}) - \
+             every region splitting its equipment capacity in the same fixed ratio would make giving Sea/Air their \
+             own commodity only nominally true (docs/phase11-spec.md §6)"
+        );
+    }
+}
+
+/// Stage 11B acceptance criterion (docs/phase11-spec.md §6): "兵科ごとに得意
+/// な地形が実際に違う。同じ地形で同じ戦力なら、適した兵科のほうが強い" - at
+/// equal manpower/equipment/organization/morale/supply/experience, the
+/// branch favored by a terrain must actually come out ahead in real combat
+/// resolution, not just in the raw coefficient table.
+///
+/// A single-unit-per-side battle isolates the branch as the only variable,
+/// but which side's *casualties* actually carry the signal is not the
+/// obvious one: `tick_combat` computes a side's own casualties from the
+/// *enemy's* power (`dmg_side = enemy_power * COMBAT_DAMAGE`), then splits
+/// that total across the side's own units by each unit's *share* of that
+/// side's total power - with exactly one unit per side, a defender's own
+/// `branch_terrain_mult` cancels out of its own casualties entirely (`share
+/// == 1.0` regardless of the unit's absolute power). It shows up instead in
+/// how much damage the defender *deals*, i.e. the *attacker's* casualties -
+/// so this measures those, holding the attacker's own branch (Infantry)
+/// fixed and varying only the defender's.
+///
+/// Confirmed this can fail: temporarily made `branch_terrain_mult` return
+/// `1.0` unconditionally (as if Stage 11B had never wired branches into
+/// combat at all) and re-ran - both terrains produced byte-identical
+/// attacker casualties regardless of the defender's branch (0.034756623 in
+/// both cases, same as this test's own first, wrongly-designed draft that
+/// measured the *defender's* casualties by mistake and always read
+/// identical values for the same underlying reason). Reverted before
+/// committing.
+#[test]
+fn branch_is_stronger_on_its_own_terrain_at_equal_strength() {
+    use crate::military::Branch;
+
+    /// Casualties suffered by a lone, identically-equipped attacker facing a
+    /// lone `defender_branch` defender, in a region of the given `terrain`.
+    fn attacker_casualties(terrain: crate::world::Terrain, defender_branch: Branch) -> f32 {
+        let mut world = scenario::build_world();
+        let region = RegionId(0);
+        world.region_mut(region).terrain = terrain;
+        // Both factions' existing starting units elsewhere must not also
+        // fight this tick - strip every other unit so only this test's own
+        // two combatants are ever present anywhere.
+        for u in world.units.iter_mut() {
+            u.alive = false;
+        }
+        let defender_faction = FactionId(0);
+        let attacker_faction = FactionId(1);
+        world.region_mut(region).owner = defender_faction;
+
+        let make_unit = |id: UnitId, owner: FactionId, branch: Branch| military::Unit {
+            id,
+            owner,
+            name: "Test Unit".to_string(),
+            station: Station::Region(region),
+            movement: None,
+            manpower: UNIT_MANPOWER,
+            equipment: UNIT_EQUIPMENT,
+            organization: UNIT_ORG,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+            branch: Some(branch),
+        };
+        world.units.push(make_unit(UnitId(world.units.len() as u32), defender_faction, defender_branch));
+        // The attacker's own branch is held fixed (Infantry) across both
+        // calls, so the only thing that ever changes between the two
+        // `attacker_casualties` calls below is the *defender's* branch.
+        world.units.push(make_unit(UnitId(world.units.len() as u32), attacker_faction, Branch::Infantry));
+
+        let mut rng = Rng::new(1);
+        let mut events = Vec::new();
+        let report = military::tick_combat(&mut world, &mut rng, &mut events);
+        report.casualties[attacker_faction.index()]
+    }
+
+    // Mountain: Infantry reads flat 1.0 there (the generalist reference
+    // class - `balance::INFANTRY_MOUNTAIN_MULT`'s own doc), Armour reads
+    // `ARMOUR_MOUNTAIN_MULT` (0.6, a real penalty) - so an Infantry defender
+    // deals *more* damage back (higher effective power) than an Armour
+    // defender would, at equal input strength on the exact same ground.
+    let vs_infantry_mountain = attacker_casualties(crate::world::Terrain::Mountain, Branch::Infantry);
+    let vs_armour_mountain = attacker_casualties(crate::world::Terrain::Mountain, Branch::Armour);
+    assert!(
+        vs_infantry_mountain > vs_armour_mountain,
+        "attacking a Mountain-terrain Infantry defender should cost more casualties than attacking an \
+         equal-strength Armour defender there: vs_infantry={vs_infantry_mountain}, vs_armour={vs_armour_mountain}"
+    );
+
+    // Plain: Armour reads `ARMOUR_PLAIN_MULT` (1.3, a real bonus) against
+    // Infantry's same flat 1.0 - so on this terrain the *same* comparison
+    // flips: an Armour defender must now deal more damage back than an
+    // Infantry one.
+    let vs_infantry_plain = attacker_casualties(crate::world::Terrain::Plain, Branch::Infantry);
+    let vs_armour_plain = attacker_casualties(crate::world::Terrain::Plain, Branch::Armour);
+    assert!(
+        vs_armour_plain > vs_infantry_plain,
+        "attacking a Plain-terrain Armour defender should cost more casualties than attacking an equal-strength \
+         Infantry defender there: vs_infantry={vs_infantry_plain}, vs_armour={vs_armour_plain}"
+    );
+}
+
+/// Stage 11B acceptance criterion (docs/phase11-spec.md §6): "兵科ごとに補給
+/// の重さが違う。同じ部隊数なら、重い兵科のほうが輸送網を食う" -
+/// `logistics::unit_supply_demand` is the single per-unit formula both
+/// `region_demand` (sizing the transport-flow model's own demand sink) and
+/// the `instantaneous_*_grant` functions read, so checking it directly
+/// checks the actual mechanism the network sees, not a duplicated formula.
+///
+/// Confirmed this can fail: temporarily hardcoded `branch_weight = 1.0` in
+/// `unit_supply_demand` (as if Stage 11B's supply-weight differentiation had
+/// never been wired in) and re-ran - `infantry_munitions`/`armour_munitions`
+/// came back byte-identical (1.0 both, `UNIT_MANPOWER * SUPPLY_NEED_PER_
+/// MANPOWER` with every multiplier at 1.0), failing the `>` assertion below
+/// outright. Reverted before committing.
+#[test]
+fn heavier_branch_demands_more_of_the_transport_network_at_equal_unit_count() {
+    use crate::military::Branch;
+
+    let region = RegionId(0);
+    let make_unit = |branch: Branch| military::Unit {
+        id: UnitId(0),
+        owner: FactionId(0),
+        name: "Test Unit".to_string(),
+        station: Station::Region(region),
+        movement: None,
+        manpower: UNIT_MANPOWER,
+        equipment: UNIT_EQUIPMENT,
+        organization: UNIT_ORG,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: Station::Region(region),
+        experience: 0.0,
+        alive: true,
+        branch: Some(branch),
+    };
+
+    let (infantry_munitions, infantry_arms) = logistics::unit_supply_demand(&make_unit(Branch::Infantry), false);
+    let (armour_munitions, armour_arms) = logistics::unit_supply_demand(&make_unit(Branch::Armour), false);
+    let (artillery_munitions, artillery_arms) = logistics::unit_supply_demand(&make_unit(Branch::Artillery), false);
+
+    // Equipment-delivery demand is branch-independent (every branch shares
+    // the same `UNIT_EQUIPMENT`/`ARMS_SUPPLY_NEED_PER_GAP` formula - only the
+    // *stock* it draws from differs by branch, not this figure) - the
+    // Munitions/upkeep term is where "heavier" actually lives.
+    assert_eq!(infantry_arms, armour_arms, "sanity: equipment-delivery demand does not vary by branch");
+    assert_eq!(infantry_arms, artillery_arms, "sanity: equipment-delivery demand does not vary by branch");
+
+    assert!(
+        armour_munitions > infantry_munitions,
+        "Armour (heavy) must demand more transport-network throughput than Infantry (reference) at equal \
+         manpower: infantry={infantry_munitions}, armour={armour_munitions}"
+    );
+    assert!(
+        artillery_munitions > infantry_munitions,
+        "Artillery (medium) must demand more transport-network throughput than Infantry (reference) at equal \
+         manpower: infantry={infantry_munitions}, artillery={artillery_munitions}"
+    );
+    assert!(
+        armour_munitions > artillery_munitions,
+        "Armour (heavy) must demand more transport-network throughput than Artillery (medium) at equal \
+         manpower: artillery={artillery_munitions}, armour={armour_munitions}"
+    );
+    // Exact ratios, tying the measured numbers directly to the named
+    // constants rather than just their relative order.
+    assert!((armour_munitions / infantry_munitions - crate::balance::ARMOUR_SUPPLY_WEIGHT).abs() < 1e-4);
+    assert!((artillery_munitions / infantry_munitions - crate::balance::ARTILLERY_SUPPLY_WEIGHT).abs() < 1e-4);
+}
+
+/// Stage 11B acceptance criterion (docs/phase11-spec.md §6): "単一プールに
+/// 戻っていない。ある兵科の装備が尽きても、別の兵科は動ける" - an Infantry
+/// unit and an Armour unit sharing a region and a faction, with the
+/// faction's `Good::Infantry` stock at zero but `Good::Armour` abundant: the
+/// Infantry unit must get nothing, the Armour unit must still be reinforced
+/// in full, through the exact same `Action::ReinforceUnit` path a real game
+/// uses.
+///
+/// Confirmed this can fail: temporarily hardcoded `apply_reinforce`'s
+/// `equipment_good` to always `Good::Infantry` (the pre-Stage-11B single-pool
+/// behavior) and re-ran - the Armour unit's `equipment` stayed at 5.0
+/// (0.0 delivered) instead of reaching `UNIT_EQUIPMENT` (20.0), failing the
+/// "Armour must be fully reinforced" assertion below (`left: 5.0, right:
+/// 20.0`). Reverted before committing.
+#[test]
+fn one_branch_out_of_equipment_does_not_stop_another_branch_from_reinforcing() {
+    use crate::military::Branch;
+
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.faction(faction).capital;
+
+    let make_unit = |id: UnitId, branch: Branch| military::Unit {
+        id,
+        owner: faction,
+        name: "Test Unit".to_string(),
+        station: Station::Region(region),
+        movement: None,
+        manpower: UNIT_MANPOWER,
+        equipment: 5.0, // a real gap against UNIT_EQUIPMENT (20.0)
+        organization: UNIT_ORG,
+        morale: 1.0,
+        supply: 1.0,
+        // A fully-open, freshly-stamped delivery ratio for both units - this
+        // test is about the *stock* gate in `apply_reinforce`, not the
+        // network-ratio gate `arms_delivery` already covers elsewhere
+        // (`arms_delivery_limits_reinforcement`).
+        arms_delivery: 1.0,
+        arms_budget: UNIT_EQUIPMENT,
+        arms_delivery_station: Station::Region(region),
+        experience: 0.0,
+        alive: true,
+        branch: Some(branch),
+    };
+    let infantry_id = UnitId(world.units.len() as u32);
+    world.units.push(make_unit(infantry_id, Branch::Infantry));
+    let armour_id = UnitId(world.units.len() as u32);
+    world.units.push(make_unit(armour_id, Branch::Armour));
+
+    world.faction_mut(faction).stock[Good::Infantry.index()] = 0.0;
+    world.faction_mut(faction).stock[Good::Armour.index()] = 1_000_000.0;
+    world.faction_mut(faction).manpower = 1_000.0;
+
+    action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: infantry_id }).unwrap();
+    action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: armour_id }).unwrap();
+
+    assert_eq!(
+        world.unit(infantry_id).equipment, 5.0,
+        "an Infantry unit must get zero equipment when Good::Infantry stock is exhausted"
+    );
+    assert_eq!(
+        world.unit(armour_id).equipment, UNIT_EQUIPMENT,
+        "an Armour unit sharing the same faction/region must still be fully reinforced from Good::Armour's own \
+         abundant stock - Infantry's exhaustion must not stop it"
+    );
+    // And the stocks themselves stayed properly separated.
+    assert_eq!(world.faction(faction).stock[Good::Infantry.index()], 0.0);
+    assert!(world.faction(faction).stock[Good::Armour.index()] < 1_000_000.0, "the Armour unit must have actually drawn down Good::Armour's own stock");
+}
+
 // ---------------------------------------------------------------------------
 // Scenario-scoped starting diplomacy (docs/future-work.md "japan47 が 720 日
 // で決着しない"): every scenario must declare its own starting `diplomacy`
@@ -5377,15 +5663,15 @@ const BLOC_SCENARIO: &str = r#"
 {
   "regions": [
     { "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] },
     { "id": "b", "name": "B", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [1.0, 0.0],
       "links": [ { "to": "a", "kind": "rail" }, { "to": "c", "kind": "rail" } ] },
     { "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] }
   ],
@@ -5908,6 +6194,7 @@ fn japan47_chokepoints_still_bind() {
                 arms_delivery: 1.0,
                 arms_budget: 0.0,
                 arms_delivery_station: Station::Region(region),
+                branch: Some(military::Branch::Infantry),
                 experience: 0.0,
                 alive: true,
             });
@@ -5948,6 +6235,7 @@ fn japan47_chokepoints_still_bind() {
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(region),
+            branch: Some(military::Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -6176,23 +6464,23 @@ const BRANCH_SCENARIO: &str = r#"
 {
   "regions": [
     { "id": "source", "name": "Source", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1000.0,"machinery":1000.0,"munitions":1000.0,"infantry":1000.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1000.0,"machinery":1000.0,"munitions":1000.0,"infantry":1000.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [0.0, 0.0],
       "links": [ { "to": "hub", "kind": "rail" } ] },
     { "id": "hub", "name": "Hub", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [1.0, 0.0],
       "links": [ { "to": "source", "kind": "rail" }, { "to": "left", "kind": "rail" }, { "to": "right", "kind": "rail" }, { "to": "enemy_home", "kind": "rail" } ] },
     { "id": "left", "name": "Left", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [2.0, 1.0],
       "links": [ { "to": "hub", "kind": "rail" } ] },
     { "id": "right", "name": "Right", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [2.0, -1.0],
       "links": [ { "to": "hub", "kind": "rail" } ] },
     { "id": "enemy_home", "name": "Enemy Home", "terrain": "plain", "population": 1.0,
-      "capacity": {"food":0.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":0.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.0, "port": 0.0, "position": [1.0, 2.0],
       "links": [ { "to": "hub", "kind": "rail" } ] }
   ],
@@ -6241,6 +6529,7 @@ fn station_units(world: &mut World, region: RegionId, count: usize) {
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(region),
+            branch: Some(military::Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -6482,23 +6771,23 @@ const CROSS_SCENARIO: &str = r#"
 {
   "regions": [
     { "id": "east", "name": "East", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [0.0, 0.0],
       "links": [ {"to":"west","kind":"rail"}, {"to":"filler","kind":"rail"} ] },
     { "id": "west", "name": "West", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [1.0, 0.0],
       "links": [ {"to":"east","kind":"rail"}, {"to":"west_producer","kind":"rail"} ] },
     { "id": "west_producer", "name": "WestProducer", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":500.0,"machinery":500.0,"munitions":500.0,"infantry":500.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":500.0,"machinery":500.0,"munitions":500.0,"infantry":500.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [2.0, 0.0],
       "links": [ {"to":"west","kind":"rail"}, {"to":"east_producer","kind":"rail"} ] },
     { "id": "east_producer", "name": "EastProducer", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":500.0,"machinery":500.0,"munitions":500.0,"infantry":500.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":500.0,"machinery":500.0,"munitions":500.0,"infantry":500.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [3.0, 0.0],
       "links": [ {"to":"west_producer","kind":"rail"}, {"to":"filler","kind":"rail"} ] },
     { "id": "filler", "name": "Filler", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":0.0,"steel":0.0,"machinery":0.0,"munitions":0.0,"infantry":0.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 1.0, "port": 0.0, "position": [1.5, 1.0],
       "links": [ {"to":"east_producer","kind":"rail"}, {"to":"east","kind":"rail"} ] }
   ],
@@ -6633,6 +6922,7 @@ fn transport_line_condition_recovers_after_damage_stops() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(hub),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -6726,6 +7016,7 @@ fn supply_route_reconstruction_matches_logistics() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(kita_tohoku),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -6799,6 +7090,7 @@ fn chokepoint_is_flagged_when_saturated() {
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(kyushu),
+            branch: Some(military::Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -7194,7 +7486,7 @@ fn action_layer_samples() -> Vec<(Action, Layer)> {
         (Action::HoldUnit { unit }, Layer::Military),
         (Action::DisbandUnit { unit }, Layer::Military),
         (Action::ReinforceUnit { unit }, Layer::Military),
-        (Action::RecruitUnit { region, domain: Domain::Land }, Layer::Military),
+        (Action::RecruitUnit { region, domain: Domain::Land, branch: military::Branch::Infantry }, Layer::Military),
         (Action::Build { region, project: Project::Infrastructure }, Layer::Economy),
         (Action::CancelBuild { region }, Layer::Economy),
         (Action::SetConscription(0.2), Layer::Economy),
@@ -7286,7 +7578,7 @@ fn target_unit_identifies_exactly_the_unit_orders() {
         (Action::HoldUnit { unit: ordered_unit }, Some(ordered_unit)),
         (Action::DisbandUnit { unit: ordered_unit }, Some(ordered_unit)),
         (Action::ReinforceUnit { unit: ordered_unit }, Some(ordered_unit)),
-        (Action::RecruitUnit { region, domain: Domain::Land }, None),
+        (Action::RecruitUnit { region, domain: Domain::Land, branch: military::Branch::Infantry }, None),
         (Action::SetConscription(0.5), None),
         (Action::SetNationalFocus(NationalFocus::Technocracy), None),
         (Action::ProposeTreaty { to: faction, treaty: Treaty::Ceasefire }, None),
@@ -7463,10 +7755,10 @@ fn port_node_without_region_port_is_rejected() {
 fn region_port_without_port_node_is_rejected() {
     let phantom_region_port = MINI_VALID_SCENARIO.replacen(
         r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [0.0, 0.0],"#,
         r#"{ "id": "a", "name": "A", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 5.0, "position": [0.0, 0.0],"#,
         1,
     );
@@ -7798,16 +8090,16 @@ fn scenario_with_enemy_owned_line() -> String {
     MINI_VALID_SCENARIO
         .replacen(
             r#"{ "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" } ] }
   ],"#,
             r#"{ "id": "c", "name": "C", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [2.0, 0.0],
       "links": [ { "to": "b", "kind": "rail" }, { "to": "d", "kind": "rail" } ] },
     { "id": "d", "name": "D", "terrain": "plain", "population": 10.0,
-      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0},
+      "capacity": {"food":1.0,"energy":1.0,"steel":1.0,"machinery":1.0,"munitions":1.0,"infantry":1.0,"armour":0.0,"artillery":0.0,"naval":0.0,"aircraft":0.0},
       "infrastructure": 0.5, "port": 0.0, "position": [3.0, 0.0],
       "links": [ { "to": "c", "kind": "rail" } ] }
   ],"#,
@@ -8020,6 +8312,7 @@ fn interdict_line_naval_reach_is_sufficient_with_no_land_or_air_force() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Sea(touching_zone),
+        branch: None,
         experience: 0.0,
         alive: true,
     });
@@ -8212,6 +8505,7 @@ fn station_foreign_unit(world: &mut World, owner: FactionId, region: RegionId) -
         arms_delivery: 0.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Region(region),
+        branch: Some(military::Branch::Infantry),
         experience: 0.0,
         alive: true,
     });
@@ -8541,6 +8835,7 @@ fn two_fleets_facing_one_port_share_its_capacity() {
             arms_delivery: 0.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Sea(zone),
+            branch: None,
             experience: 0.0,
             alive: true,
         });
@@ -8648,6 +8943,7 @@ fn fleet_reinforces_after_moving_into_previously_empty_zone() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Sea(old_zone),
+        branch: None,
         experience: 0.0,
         alive: true,
     });
@@ -8712,6 +9008,7 @@ fn repeated_fleet_reinforce_cannot_exceed_daily_delivery() {
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Sea(old_zone), // stale - forces the same on-the-spot recompute
+        branch: None,
         experience: 0.0,
         alive: true,
     });
@@ -8756,11 +9053,17 @@ fn repeated_fleet_reinforce_cannot_exceed_daily_delivery() {
 
 /// docs/phase10-spec.md "4. 生産": recruiting a `Domain::Air` unit costs
 /// `Good::Machinery` (`balance::AIR_UNIT_MACHINERY_COST`) on top of the same
-/// `UNIT_MANPOWER`/`Good::Infantry` cost every other domain already pays, and
-/// bases the new unit at the region's own `TransportNodeKind::Airfield`
-/// node - never a `Region`/`SeaZone`, and never a second, independently
-/// tracked "does this region have an airfield" fact (`transport::
-/// TransportNodeKind::Airfield`'s own doc).
+/// `UNIT_MANPOWER` cost every other domain already pays, and bases the new
+/// unit at the region's own `TransportNodeKind::Airfield` node - never a
+/// `Region`/`SeaZone`, and never a second, independently tracked "does this
+/// region have an airfield" fact (`transport::TransportNodeKind::Airfield`'s
+/// own doc).
+///
+/// Stage 11B: the equipment cost itself now debits `Good::Aircraft`, not
+/// `Good::Infantry` - finishing what 11A deferred (`good::Good`'s own module
+/// doc). This test also checks `Good::Infantry` is left completely untouched
+/// by an air recruit, which is exactly the "no domain shares a pool"
+/// property Stage 11B exists to establish.
 #[test]
 fn recruit_air_unit_costs_machinery_and_arms_and_bases_it_at_the_airfield() {
     let mut world = scenario::build_world();
@@ -8773,23 +9076,27 @@ fn recruit_air_unit_costs_machinery_and_arms_and_bases_it_at_the_airfield() {
 
     world.faction_mut(faction).manpower = 1000.0;
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Aircraft.index()] = 1000.0;
     world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
 
     let manpower_before = world.faction(faction).manpower;
-    let arms_before = world.faction(faction).stock[Good::Infantry.index()];
+    let infantry_before = world.faction(faction).stock[Good::Infantry.index()];
+    let aircraft_before = world.faction(faction).stock[Good::Aircraft.index()];
     let machinery_before = world.faction(faction).stock[Good::Machinery.index()];
     let units_before = world.units.len();
 
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry });
     assert_eq!(result, Ok(()));
 
     assert_eq!(world.units.len(), units_before + 1, "exactly one unit must be raised");
     let unit = world.units.last().expect("just pushed");
     assert_eq!(unit.station, Station::Airfield(airfield), "an air recruit must be based at the region's own airfield node, not a Region/Sea station");
     assert_eq!(unit.station.domain(), Domain::Air);
+    assert_eq!(unit.branch, None, "an air unit carries no land branch");
 
     assert_eq!(world.faction(faction).manpower, manpower_before - UNIT_MANPOWER, "an air unit still costs the same UNIT_MANPOWER every domain pays");
-    assert_eq!(world.faction(faction).stock[Good::Infantry.index()], arms_before - UNIT_EQUIPMENT, "an air unit's Arms cost matches the land baseline (no focus discount)");
+    assert_eq!(world.faction(faction).stock[Good::Aircraft.index()], aircraft_before - UNIT_EQUIPMENT, "an air unit's equipment cost is priced in Good::Aircraft (Stage 11B)");
+    assert_eq!(world.faction(faction).stock[Good::Infantry.index()], infantry_before, "an air recruit must not touch Good::Infantry at all - no shared pool");
     assert_eq!(
         world.faction(faction).stock[Good::Machinery.index()],
         machinery_before - AIR_UNIT_MACHINERY_COST,
@@ -8820,7 +9127,7 @@ fn recruit_air_unit_without_airfield_is_rejected() {
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1000.0;
     world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
 
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry });
     assert_eq!(result, Err(ActionError::NoAirfield));
 }
 
@@ -8845,7 +9152,7 @@ fn recruit_air_unit_without_machinery_is_rejected() {
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1000.0;
     world.faction_mut(faction).stock[Good::Machinery.index()] = 0.0;
 
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry });
     assert_eq!(result, Err(ActionError::InsufficientMachinery));
 }
 
@@ -8898,7 +9205,7 @@ fn air_unit_is_supplied_through_the_shared_transport_flow() {
     world.faction_mut(faction).manpower = 1000.0;
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1000.0;
     world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
-    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry })
         .expect("recruiting the air unit for this test must itself succeed");
     let unit_id = world.units.last().expect("just recruited").id;
     // A fresh recruit starts at full equipment (`apply_recruit`), so give it
@@ -8985,6 +9292,7 @@ fn unreachable_airfield_supplies_no_air_unit() {
         arms_delivery: 0.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Airfield(airfield_id),
+        branch: None,
         experience: 0.0,
         alive: true,
     });
@@ -9042,7 +9350,7 @@ fn disbanding_an_air_unit_returns_its_airframe() {
         world.faction_mut(faction).stock[Good::Infantry.index()] = 1e6;
         world.faction_mut(faction).manpower = 1e6;
 
-        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry })
             .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
         let unit = world.units.iter().find(|u| u.alive && matches!(u.station, Station::Airfield(_))).expect("just recruited").id;
         world.unit_mut(unit).equipment = UNIT_EQUIPMENT * equipment_ratio;
@@ -9124,6 +9432,7 @@ fn two_air_units_at_one_airfield_share_its_capacity() {
                 arms_delivery: 0.0,
                 arms_budget: 0.0,
                 arms_delivery_station: Station::Airfield(airfield_id),
+                branch: None,
                 experience: 0.0,
                 alive: true,
             });
@@ -9184,7 +9493,7 @@ fn damage_reinforce_disband_cycle_cannot_create_machinery() {
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1e6;
     world.faction_mut(faction).manpower = 1e6;
 
-    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry })
         .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
     let unit_id = world
         .units
@@ -9265,7 +9574,7 @@ fn repeated_air_reinforce_cannot_exceed_one_ticks_machinery_stock() {
     world.faction_mut(faction).manpower = 1e6;
     world.faction_mut(faction).stock[Good::Machinery.index()] = AIR_UNIT_MACHINERY_COST; // exactly enough to recruit, nothing left over.
 
-    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry })
         .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
     let unit_id = world
         .units
@@ -9343,7 +9652,7 @@ fn air_reinforcement_without_machinery_delivers_nothing() {
     world.faction_mut(faction).manpower = 1e6;
     world.faction_mut(faction).stock[Good::Machinery.index()] = AIR_UNIT_MACHINERY_COST;
 
-    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air })
+    action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry })
         .expect("mvp's regions all carry an airfield node, so an air unit is recruitable here");
     let unit_id = world
         .units
@@ -9409,6 +9718,7 @@ fn push_full_strength_air_unit(world: &mut World, faction: FactionId, airfield: 
         arms_delivery: 1.0,
         arms_budget: 0.0,
         arms_delivery_station: Station::Airfield(airfield),
+        branch: None,
         experience: 0.0,
         alive: true,
     });
@@ -9656,6 +9966,7 @@ fn push_garrison(world: &mut World, region: RegionId, owner: FactionId) {
             arms_delivery: 1.0,
             arms_budget: 0.0,
             arms_delivery_station: Station::Region(region),
+            branch: Some(military::Branch::Infantry),
             experience: 0.0,
             alive: true,
         });
@@ -10470,7 +10781,7 @@ fn a_region_keeps_working_while_any_node_of_that_kind_stands() {
     world.faction_mut(faction).stock[Good::Infantry.index()] = 1000.0;
     world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
     assert_eq!(
-        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air }),
+        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry }),
         Ok(()),
         "a squadron must still be raisable at the region's surviving airfield"
     );
@@ -10498,7 +10809,7 @@ fn recruit_air_unit_at_a_struck_airfield_is_rejected_until_repaired() {
     );
 
     let units_before = world.units.len();
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry });
     assert_eq!(result, Err(ActionError::NoAirfield), "a struck airfield must not let a faction raise a new air unit there");
     assert_eq!(world.units.len(), units_before, "a rejected recruit must not have raised anything");
 
@@ -10510,7 +10821,7 @@ fn recruit_air_unit_at_a_struck_airfield_is_rejected_until_repaired() {
         world.transport_node(airfield).condition.get() > NODE_OPERATIONAL_THRESHOLD,
         "passive repair alone must eventually reopen the airfield"
     );
-    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air });
+    let result = action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry });
     assert_eq!(result, Ok(()), "once the airfield repairs past the threshold, recruiting there must succeed again");
     assert_eq!(world.units.len(), units_before + 1, "exactly one unit must have been raised once the airfield reopened");
 }

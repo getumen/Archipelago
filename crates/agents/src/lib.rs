@@ -21,7 +21,7 @@ use archipelago_sim::focus::{self, NationalFocus};
 use archipelago_sim::good::Good;
 use archipelago_sim::group::Group;
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, UnitId};
-use archipelago_sim::military::Unit;
+use archipelago_sim::military::{self, Unit};
 use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::transport::{TransportNode, TransportNodeKind};
@@ -645,7 +645,22 @@ fn choose_opening_focus(faction: FactionId, world: &World) -> NationalFocus {
     }
 
     let industry_total: f32 = own_regions.iter().map(|&r| world.region(r).industry_total()).sum::<f32>().max(0.01);
-    let arms: f32 = own_regions.iter().map(|&r| world.region(r).effective_capacity(Good::Infantry)).sum();
+    // Stage 11B: "how militarized is this economy" now sums every equipment
+    // good (Infantry/Armour/Artillery/Naval/Aircraft), not `Good::Infantry`
+    // alone - the same broadening `politics::tick_politics`'s own
+    // `arms_stock` signal got, for the same reason (Stage 11A/11B split a
+    // single pool into five, so reading only one slice understates it).
+    let arms: f32 = own_regions
+        .iter()
+        .map(|&r| {
+            let region = world.region(r);
+            region.effective_capacity(Good::Infantry)
+                + region.effective_capacity(Good::Armour)
+                + region.effective_capacity(Good::Artillery)
+                + region.effective_capacity(Good::Naval)
+                + region.effective_capacity(Good::Aircraft)
+        })
+        .sum();
     let machinery: f32 = own_regions
         .iter()
         .map(|&r| world.region(r).effective_capacity(Good::Machinery))
@@ -1638,11 +1653,23 @@ fn reinforce(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 fn recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let cap = unit_cap(faction, obs);
-    if own_unit_count(obs, Domain::Land) as f32 >= cap {
+    let land_units = own_unit_count(obs, Domain::Land);
+    if land_units as f32 >= cap {
         return;
     }
+    // Stage 11B (docs/phase11-spec.md §1): which land branch this recruit
+    // would raise, decided *before* the stock gate below so that gate checks
+    // the commodity this specific recruit would actually spend - never
+    // `Good::Infantry` unconditionally, or a faction sitting on abundant
+    // Armour but zero Infantry (or vice versa) would never recruit at all.
+    // `choose_land_branch`'s own doc has the reasoning; this is a minimal,
+    // terrain-led default, not the full supply-aware doctrine
+    // docs/phase11-spec.md §4 reserves for Stage 11C.
+    let region = recruit_region(faction, obs);
+    let branch = region.map(|r| choose_land_branch(&obs.world, r, land_units));
+    let equipment_good = branch.map(military::Branch::equipment_good).unwrap_or(Good::Infantry);
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[equipment_good.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
     {
         return;
     }
@@ -1696,24 +1723,60 @@ fn recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation,
         return;
     }
 
-    let capital = f.capital;
-    let region = if is_safe_own_region(faction, obs, capital) {
-        Some(capital)
-    } else {
-        safe_own_regions(faction, obs)
-            .into_iter()
-            .fold(None, |best: Option<(RegionId, f32)>, r| {
-                let industry = obs.world.region(r).industry_total();
-                match best {
-                    Some((_, best_industry)) if industry <= best_industry => best,
-                    _ => Some((r, industry)),
-                }
-            })
-            .map(|(r, _)| r)
-    };
+    if let (Some(region), Some(branch)) = (region, branch) {
+        actions.push(Action::RecruitUnit { region, domain: Domain::Land, branch });
+    }
+}
 
-    if let Some(region) = region {
-        actions.push(Action::RecruitUnit { region, domain: Domain::Land });
+/// The region a new land recruit would be raised in: the capital if it's
+/// currently safe, otherwise the safest, most industrious region held.
+/// Extracted from `recruit` so `choose_land_branch` can be asked about the
+/// same region the stock gate above needs to already know about, before any
+/// `RecruitUnit` is actually queued.
+fn recruit_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    let capital = obs.world.faction(faction).capital;
+    if is_safe_own_region(faction, obs, capital) {
+        return Some(capital);
+    }
+    safe_own_regions(faction, obs)
+        .into_iter()
+        .fold(None, |best: Option<(RegionId, f32)>, r| {
+            let industry = obs.world.region(r).industry_total();
+            match best {
+                Some((_, best_industry)) if industry <= best_industry => best,
+                _ => Some((r, industry)),
+            }
+        })
+        .map(|(r, _)| r)
+}
+
+/// Stage 11B minimal default (docs/phase11-spec.md §4 reserves the full
+/// terrain *and* supply-aware doctrine for Stage 11C - out of this stage's
+/// scope, which only has to make the branches real, not make the AI clever
+/// about them - CLAUDE.md's own record of the Phase 9D/10D shape this stage
+/// must not repeat: a new layer the AI never touches is effectively dead
+/// code in every AI-vs-AI game).
+///
+/// Every third recruit is Artillery regardless of terrain: its own
+/// differentiator is posture (the attacking side's firepower,
+/// `military::branch_terrain_mult`'s own doc), not terrain, so there is no
+/// terrain signal to rotate it in by - a fixed cadence is the simplest way
+/// to actually field some. The other two of three go to whichever of
+/// Infantry/Armour reads stronger on `region`'s own terrain, using the exact
+/// multiplier real combat resolves with (`military::branch_terrain_mult`)
+/// rather than an independently-invented "is this good tank country" guess
+/// that could silently drift from what combat actually rewards.
+fn choose_land_branch(world: &World, region: RegionId, existing_land_units: usize) -> military::Branch {
+    if existing_land_units % 3 == 2 {
+        return military::Branch::Artillery;
+    }
+    let terrain = world.region(region).terrain;
+    let infantry = military::branch_terrain_mult(military::Branch::Infantry, terrain, false);
+    let armour = military::branch_terrain_mult(military::Branch::Armour, terrain, false);
+    if armour > infantry {
+        military::Branch::Armour
+    } else {
+        military::Branch::Infantry
     }
 }
 
@@ -1977,8 +2040,10 @@ fn naval_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observ
     if own_unit_count(obs, Domain::Sea) as f32 >= NAVY_MIN_FLEETS {
         return;
     }
+    // Stage 11B: a fleet's own equipment commodity, not `Good::Infantry`
+    // (`good::Good`'s own module doc - finishing what 11A deferred).
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Naval.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
     {
         return;
     }
@@ -2001,7 +2066,7 @@ fn naval_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observ
         return;
     }
     if let Some(region) = best_own_port_region(faction, obs) {
-        actions.push(Action::RecruitUnit { region, domain: Domain::Sea });
+        actions.push(Action::RecruitUnit { region, domain: Domain::Sea, branch: military::Branch::Infantry });
     }
 }
 
@@ -2138,8 +2203,9 @@ fn air_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observat
     if own_unit_count(obs, Domain::Air) as f32 >= AIR_MIN_SQUADRONS {
         return;
     }
+    // Stage 11B: an air unit's own equipment commodity, not `Good::Infantry`.
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
-        || f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
+        || f.stock[Good::Aircraft.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
         || f.stock[Good::Machinery.index()] < AIR_UNIT_MACHINERY_COST * RECRUIT_STOCK_MARGIN
     {
         return;
@@ -2162,7 +2228,7 @@ fn air_recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observat
         return;
     }
     if let Some(region) = best_own_airfield_region(faction, obs) {
-        actions.push(Action::RecruitUnit { region, domain: Domain::Air });
+        actions.push(Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry });
     }
 }
 

@@ -189,6 +189,7 @@ mod tests {
 
     use archipelago_sim::action::{Action, ActionError};
     use archipelago_sim::ids::FactionId;
+    use archipelago_sim::military::Branch;
     use archipelago_sim::scenario;
     use archipelago_sim::world::{Domain, Station};
 
@@ -229,7 +230,7 @@ mod tests {
         let mut world = World::new();
         let mut sim = SimRes(SimDriver::new_with_player(scenario::build_world(), 1, Some(FactionId(0)), None));
         let kanto = sim.0.world().faction(FactionId(0)).capital;
-        sim.0.push_human_action(Action::RecruitUnit { region: kanto, domain: Domain::Air });
+        sim.0.push_human_action(Action::RecruitUnit { region: kanto, domain: Domain::Air, branch: Branch::Infantry });
         sim.0.tick();
         assert!(sim.0.last_human_action_errors().is_empty(), "recruiting a squadron at the player's own capital must succeed: {:?}", sim.0.last_human_action_errors());
         let squadron = sim
@@ -336,7 +337,7 @@ mod tests {
         let mut world = World::new();
         let mut sim = SimRes(SimDriver::new_with_player(scenario::build_world(), 1, Some(FactionId(0)), None));
         let kanto = sim.0.world().faction(FactionId(0)).capital;
-        sim.0.push_human_action(Action::RecruitUnit { region: kanto, domain: Domain::Air });
+        sim.0.push_human_action(Action::RecruitUnit { region: kanto, domain: Domain::Air, branch: Branch::Infantry });
         sim.0.tick();
         let squadron = sim
             .0

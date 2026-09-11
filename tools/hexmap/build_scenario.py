@@ -519,7 +519,9 @@ def artillery_coastal_factor(is_coastal: bool) -> float:
     return constants.ARTILLERY_COASTAL_FACTOR_COASTAL if is_coastal else constants.ARTILLERY_COASTAL_FACTOR_INLAND
 
 
-def solve_capacity_coefficients(hexes: dict, population: dict, weight: dict, coastal: dict, log=print) -> dict:
+def solve_capacity_coefficients(
+    hexes: dict, population: dict, weight: dict, coastal: dict, ports: dict, log=print
+) -> dict:
     """Solves every `*_COEF` so the resulting national total exactly hits
     this module's docstring targets (`constants.TARGET_INDUSTRY_TOTAL` split
     by `CAPACITY_SHARE_*`, `constants.TARGET_FOOD_CAPACITY_MULT`) - see
@@ -539,6 +541,10 @@ def solve_capacity_coefficients(hexes: dict, population: dict, weight: dict, coa
         for hid in hexes
     )
     sum_artillery_w = sum(population[hid] * artillery_coastal_factor(coastal[hid]) for hid in hexes)
+    # Stage 11B: same independent-of-the-pie treatment, own weight shapes -
+    # see `constants.TARGET_NAVAL_TOTAL`'s own doc.
+    sum_naval_w = sum(population[hid] * ports[hid] for hid in hexes)
+    sum_aircraft_w = sum(population[hid] ** constants.MACHINERY_DENSITY_EXPONENT for hid in hexes)
 
     total = constants.TARGET_INDUSTRY_TOTAL
     energy_target = total * constants.CAPACITY_SHARE_ENERGY
@@ -560,6 +566,8 @@ def solve_capacity_coefficients(hexes: dict, population: dict, weight: dict, coa
         infantry=total * constants.CAPACITY_SHARE_INFANTRY / sum_infantry_w,
         armour=constants.TARGET_ARMOUR_TOTAL / sum_armour_w,
         artillery=constants.TARGET_ARTILLERY_TOTAL / sum_artillery_w,
+        naval=constants.TARGET_NAVAL_TOTAL / sum_naval_w,
+        aircraft=constants.TARGET_AIRCRAFT_TOTAL / sum_aircraft_w,
     )
     log(f"  capacity coefficients solved against national targets: "
         f"food={food_target:.2f} energy={energy_target:.2f} "
@@ -569,11 +577,14 @@ def solve_capacity_coefficients(hexes: dict, population: dict, weight: dict, coa
         f"pop-scaled {munitions_pop_target:.2f}) "
         f"infantry={total*constants.CAPACITY_SHARE_INFANTRY:.2f} (industry_total={total:.2f}) "
         f"armour={constants.TARGET_ARMOUR_TOTAL:.2f} artillery={constants.TARGET_ARTILLERY_TOTAL:.2f} "
-        f"(both independent of industry_total, Stage 11A)")
+        f"naval={constants.TARGET_NAVAL_TOTAL:.2f} aircraft={constants.TARGET_AIRCRAFT_TOTAL:.2f} "
+        f"(all four independent of industry_total, Stage 11A/11B)")
     return coef
 
 
-def build_capacities(hexes: dict, population: dict, weight: dict, coastal: dict, coef: dict) -> dict:
+def build_capacities(
+    hexes: dict, population: dict, weight: dict, coastal: dict, ports: dict, coef: dict
+) -> dict:
     capacities = {}
     for hid, h in hexes.items():
         pop = population[hid]
@@ -586,6 +597,8 @@ def build_capacities(hexes: dict, population: dict, weight: dict, coastal: dict,
             infantry=coef["infantry"] * (pop ** constants.INFANTRY_DENSITY_EXPONENT),
             armour=coef["armour"] * (pop ** constants.ARMOUR_DENSITY_EXPONENT) * armour_terrain_factor(h["terrain"]),
             artillery=coef["artillery"] * pop * artillery_coastal_factor(coastal[hid]),
+            naval=coef["naval"] * pop * ports[hid],
+            aircraft=coef["aircraft"] * (pop ** constants.MACHINERY_DENSITY_EXPONENT),
         )
     return capacities
 
@@ -769,7 +782,7 @@ def build_scenario_json(
             "name": name,
             "terrain": terrain_final[hid].value,
             "population": round(population[hid], 3),
-            "capacity": {g: round(cap[g], 4) for g in ("food", "energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery")},
+            "capacity": {g: round(cap[g], 4) for g in ("food", "energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery", "naval", "aircraft")},
             "infrastructure": round(infra[hid], 3),
             "port": round(ports[hid], 3),
             "links": links_json,
@@ -882,8 +895,15 @@ def main():
     pref_of = assign_prefectures(hexes)
     population, weight = distribute_population(hexes, pref_of, log=print)
     coastal, sea_dir_count = coastal_info(hexes)
-    coef = solve_capacity_coefficients(hexes, population, weight, coastal, log=print)
-    capacities = build_capacities(hexes, population, weight, coastal, coef)
+    # Stage 11B: `ports` now has to exist before `solve_capacity_
+    # coefficients`/`build_capacities` - Naval's own weight shape reads each
+    # hex's already-solved port magnitude (`constants.TARGET_NAVAL_TOTAL`'s
+    # own doc). `build_ports` depends only on `hexes`/`population`/`coastal`/
+    # `sea_dir_count`, never on `capacities`, so moving it earlier changes
+    # nothing about what it computes - only when.
+    ports = build_ports(hexes, population, coastal, sea_dir_count)
+    coef = solve_capacity_coefficients(hexes, population, weight, coastal, ports, log=print)
+    capacities = build_capacities(hexes, population, weight, coastal, ports, coef)
     terrain_final = apply_urban_override(hexes, population, log=print)
     final_counts: dict = {}
     for t in terrain_final.values():
@@ -892,7 +912,6 @@ def main():
     for t in Terrain:
         n = final_counts.get(t, 0)
         print(f"  {t.value:8s} {n:4d} ({100.0*n/len(hexes):.1f}%)")
-    ports = build_ports(hexes, population, coastal, sea_dir_count)
     infra = build_infrastructure(hexes, population, terrain_final)
     remapped_link_zones = remap_zones_to_real_seas(zones, pref_of, log=print)
 
@@ -905,14 +924,17 @@ def main():
 
     total_pop = sum(population.values())
     print(f"national population: {total_pop:.1f}万人 (target {prefecture_population.TOTAL_POPULATION:.1f}万人)")
-    for good in ("food", "energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery"):
+    for good in ("food", "energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery", "naval", "aircraft"):
         total = sum(capacities[hid][good] for hid in hexes)
         print(f"national capacity[{good}]: {total:.2f}")
-    # Mirrors `Region::industry_total`'s own explicit good list
-    # (crates/sim/src/world.rs) - deliberately not `Armour`/`Artillery`
-    # (Stage 11A, no unit type draws either yet - see that function's doc).
+    # Stage 11B: mirrors `Region::industry_total`'s own explicit good list
+    # (crates/sim/src/world.rs) - now includes Armour/Artillery/Naval/
+    # Aircraft too, since Stage 11B wires real unit types to draw all four
+    # (that function's own doc has the full account of why the list grew).
     industry_total_national = sum(
-        capacities[hid][g] for hid in hexes for g in ("energy", "steel", "machinery", "munitions", "infantry")
+        capacities[hid][g]
+        for hid in hexes
+        for g in ("energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery", "naval", "aircraft")
     )
     print(f"national industry_total (non-food): {industry_total_national:.2f}")
     starting_munitions_need = (
@@ -926,7 +948,11 @@ def main():
     region_by_id = {r["id"]: r for r in scenario["regions"]}
     for fac in scenario["factions"]:
         fac_regions = [region_by_id[rid] for rid in fac["regions"]]
-        it = sum(r["capacity"][g] for r in fac_regions for g in ("energy", "steel", "machinery", "munitions", "infantry"))
+        it = sum(
+            r["capacity"][g]
+            for r in fac_regions
+            for g in ("energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery", "naval", "aircraft")
+        )
         pop = sum(r["population"] for r in fac_regions)
         mun = sum(r["capacity"]["munitions"] for r in fac_regions)
         eff_breakeven = starting_munitions_need / mun if mun > 0 else float("inf")

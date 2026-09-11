@@ -37,9 +37,12 @@
 //!    into `Faction::shortage` the same way.
 //! 7. `Infantry` equipment (Stage 11A's renamed `Arms`, `good::Good`'s own
 //!    doc) is capped by what's left of the `Machinery` and `Steel` stock.
-//! 8. `Armour`/`Artillery` (Stage 11A, no unit type draws either yet) are
-//!    produced straight from capacity like `Food`/`Energy` - no recipe, no
-//!    interaction with any step above.
+//! 8. `Armour`/`Artillery`/`Naval`/`Aircraft` are produced straight from
+//!    capacity like `Food`/`Energy` - no recipe, no interaction with any
+//!    step above. Stage 11B now wires real land branches and Sea/Air
+//!    recruits to draw all four, but their *production* stays exactly the
+//!    no-input shape Stage 11A gave Armour/Artillery, so none of them
+//!    contends with `Infantry` for the shared Machinery/Steel budget above.
 
 use crate::balance::{
     INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
@@ -350,6 +353,18 @@ pub fn tick_economy(world: &mut World) {
         // real unit type creates real demand to balance it against.
         stock[Good::Armour.index()] += pot[Good::Armour.index()];
         stock[Good::Artillery.index()] += pot[Good::Artillery.index()];
+
+        // Stage 11B (docs/phase11-spec.md §2 "海軍と航空の装備"): `Naval`/
+        // `Aircraft` get the exact same no-recipe treatment as `Armour`/
+        // `Artillery` just above - produced straight from region capacity,
+        // with no Machinery/Steel input to contend with `Infantry` over.
+        // Sea/Air recruits now draw these instead of `Good::Infantry`
+        // (`action::apply_recruit`), so unlike Armour/Artillery's Stage 11A
+        // introduction this *does* change existing scenarios' outcomes -
+        // that's this stage's entire point (the single-pool measurement
+        // `docs/future-work.md` records), not a regression to guard against.
+        stock[Good::Naval.index()] += pot[Good::Naval.index()];
+        stock[Good::Aircraft.index()] += pot[Good::Aircraft.index()];
 
         faction.shortage = food_shortage.max(energy_shortage).max(machinery_shortage);
         // External code review fix (Stage 2C): keep each commodity's own

@@ -101,7 +101,23 @@ pub fn tick_politics(
         }
     }
 
-    let arms_stock: Vec<f32> = world.factions.iter().map(|f| f.stock[Good::Infantry.index()]).collect();
+    // Stage 11B: "reserves are ample" (docs/phase3-spec.md: "stock[Arms] が
+    // 潤沢") now reads the sum of every equipment commodity a faction can
+    // hold, not `Good::Infantry` alone - a military reading its own war
+    // stocks as ample cares about total matériel on hand, not just its
+    // infantry-branch slice of the five equipment goods Stage 11A/11B split
+    // out of the historical single `Arms` pool.
+    let arms_stock: Vec<f32> = world
+        .factions
+        .iter()
+        .map(|f| {
+            f.stock[Good::Infantry.index()]
+                + f.stock[Good::Armour.index()]
+                + f.stock[Good::Artillery.index()]
+                + f.stock[Good::Naval.index()]
+                + f.stock[Good::Aircraft.index()]
+        })
+        .collect();
     let machinery_ratio: Vec<f32> = world.factions.iter().map(|f| f.machinery_output_ratio).collect();
 
     for f_idx in 0..n {

@@ -66,6 +66,7 @@ use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
+use archipelago_sim::military::Branch;
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
 use super::chrome;
@@ -316,9 +317,9 @@ impl RegionActionKind {
 
     fn to_action(self, region: RegionId, active_good: Good) -> Action {
         match self {
-            RegionActionKind::RecruitLand => Action::RecruitUnit { region, domain: Domain::Land },
-            RegionActionKind::RecruitSea => Action::RecruitUnit { region, domain: Domain::Sea },
-            RegionActionKind::RecruitAir => Action::RecruitUnit { region, domain: Domain::Air },
+            RegionActionKind::RecruitLand => Action::RecruitUnit { region, domain: Domain::Land, branch: Branch::Infantry },
+            RegionActionKind::RecruitSea => Action::RecruitUnit { region, domain: Domain::Sea, branch: Branch::Infantry },
+            RegionActionKind::RecruitAir => Action::RecruitUnit { region, domain: Domain::Air, branch: Branch::Infantry },
             RegionActionKind::BuildInfra => Action::Build { region, project: Project::Infrastructure },
             RegionActionKind::BuildPort => Action::Build { region, project: Project::Port },
             RegionActionKind::BuildCapacity => Action::Build { region, project: Project::Capacity(active_good) },
@@ -375,7 +376,21 @@ fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain) -> Optio
     if f.manpower < UNIT_MANPOWER {
         return Some(action_error_ja(ActionError::InsufficientManpower));
     }
-    if f.stock[Good::Infantry.index()] < UNIT_EQUIPMENT {
+    // Stage 11B: which equipment good `apply_recruit` will actually charge
+    // for this domain - `Good::Infantry` for `Domain::Land` (the panel's own
+    // `RecruitLand` button always raises `Branch::Infantry`; branch choice
+    // isn't exposed in this UI yet, Stage 11C's job), `Good::Naval`/
+    // `Good::Aircraft` for Sea/Air (`good::Good`'s own module doc - Stage
+    // 11B gave them their own commodity instead of sharing `Good::Infantry`).
+    // Checking the wrong good here would let this button read "enabled"
+    // right up until the simulation actually rejects the order, or "disabled"
+    // while the domain it would actually spend from is perfectly solvent.
+    let equipment_good = match domain {
+        Domain::Land => Good::Infantry,
+        Domain::Sea => Good::Naval,
+        Domain::Air => Good::Aircraft,
+    };
+    if f.stock[equipment_good.index()] < UNIT_EQUIPMENT {
         return Some(action_error_ja(ActionError::InsufficientEquipment));
     }
     // Stage 10 follow-up: `action::apply_recruit`'s `Domain::Air` arm also
@@ -2020,6 +2035,7 @@ mod tests {
             arms_delivery_station: Station::Airfield(airfield),
             experience: 0.0,
             alive: true,
+            branch: None,
         });
         id
     }
@@ -2162,7 +2178,7 @@ mod tests {
 
         let mut sim = world.resource_mut::<SimRes>();
         sim.0.tick();
-        assert_eq!(sim.0.last_human_actions(), &[Action::RecruitUnit { region: capital, domain: Domain::Land }], "the click must have queued exactly one RecruitUnit(Land) for the player's capital");
+        assert_eq!(sim.0.last_human_actions(), &[Action::RecruitUnit { region: capital, domain: Domain::Land, branch: Branch::Infantry }], "the click must have queued exactly one RecruitUnit(Land) for the player's capital");
         assert!(sim.0.last_human_action_errors().is_empty(), "a legal recruit order must not be rejected: {:?}", sim.0.last_human_action_errors());
         let units_after = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0)).count();
         assert_eq!(units_after, units_before + 1, "the recruited unit must actually exist in the world after the tick");
@@ -2198,7 +2214,7 @@ mod tests {
     /// to raise a squadron, not just watch the AI fly one): a click on the
     /// region panel's new `RecruitAir` button, at the player's own capital
     /// (every mvp region has an operational airfield node - `docs/design.md`
-    /// scenario data), must enqueue `RecruitUnit { domain: Domain::Air }` and
+    /// scenario data), must enqueue `RecruitUnit { domain: Domain::Air, branch: Branch::Infantry }` and
     /// that action must actually create a living squadron once applied -
     /// mirrors `region_action_click_enqueues_recruit_for_the_players_own_region`
     /// exactly, for the one domain that test doesn't cover.
@@ -2207,7 +2223,7 @@ mod tests {
     /// `RegionActionKind::to_action`'s match (falling through to a
     /// compile error is the honest failure mode for an exhaustive match, but
     /// to get a *runtime* red instead, swapped its arm to build
-    /// `Action::RecruitUnit { region, domain: Domain::Land }`) - the first
+    /// `Action::RecruitUnit { region, domain: Domain::Land, branch: Branch::Infantry }`) - the first
     /// assertion below then failed (got a `Domain::Land` recruit instead of
     /// `Domain::Air`). Reverted before committing.
     #[test]
@@ -2228,7 +2244,7 @@ mod tests {
         sim.0.tick();
         assert_eq!(
             sim.0.last_human_actions(),
-            &[Action::RecruitUnit { region: capital, domain: Domain::Air }],
+            &[Action::RecruitUnit { region: capital, domain: Domain::Air, branch: Branch::Infantry }],
             "the click must have queued exactly one RecruitUnit(Air) for the player's capital"
         );
         assert!(sim.0.last_human_action_errors().is_empty(), "a legal air recruit order must not be rejected: {:?}", sim.0.last_human_action_errors());
