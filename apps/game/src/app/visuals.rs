@@ -30,6 +30,26 @@ use super::{
     SeaZoneCenters, SeaZoneMarker, SelectedRegion, SimRes, UnitMarker,
 };
 
+/// The camera's current orthographic scale - the one number both the unit
+/// markers' size and `input::map_click_select`'s hit radius are multiplied
+/// by, so what is clickable is exactly what is drawn.
+///
+/// `codex review` (P2): the two used to derive it separately, and when the
+/// markers were made screen-space constant the hit test stayed in world
+/// units. Zoomed out to the whole-map fit, visible markers were unclickable.
+/// Sharing one function means a future change to either cannot silently
+/// desynchronise them.
+///
+/// Falls back to `1.0` on the one frame before `camera_fit::
+/// fit_camera_to_map` has run - the same fallback `sync_supply_overlay`
+/// uses, for the same reason (a wrong size for one frame beats a panic).
+pub(super) fn camera_zoom(camera: &Query<&Projection, With<MainCamera>>) -> f32 {
+    match camera.single() {
+        Ok(Projection::Orthographic(ortho)) => ortho.scale,
+        _ => 1.0,
+    }
+}
+
 /// Scorched-earth tone `sync_region_visuals` mixes a devastated region's
 /// fill toward - dull, dark, faintly brown, never pure black (a fully-
 /// devastated region should still read as *whose* wreckage it is, so its
@@ -222,11 +242,28 @@ fn ring_offset(index: usize, count: usize, radius: f32) -> Vec2 {
 /// silhouette) - three shapes a glance at the map can tell apart, the same
 /// "discoverable, not just present" bar the region panel's `[branch]`
 /// suffix meets one level up.
+///
+/// Defect fix: these local-mesh radii used to be the *only* factor in a
+/// marker's on-screen size, with no camera-zoom compensation - fine on a
+/// sparse map at typical zoom, but on `japan_hex` (289 regions) at the
+/// default whole-map fitted zoom (`camera_fit::fit_camera_to_map`, `ortho.
+/// scale` around 3.3, `visuals::LABEL_ZOOM_THRESHOLD`'s own doc) a 6-9
+/// world-unit shape renders at only a couple of screen pixels - sub-pixel
+/// enough that a triangle, a square and a circle are all indistinguishable
+/// blobs. `sync_unit_visuals` now applies the exact same screen-space-
+/// constant treatment `setup::CHOKEPOINT_MARKER_RADIUS`'s own doc
+/// established for the supply overlay's chokepoint marker (multiplying
+/// `Transform::scale` by the camera's current `Projection::scale`, which
+/// exactly cancels that same factor in Bevy's world-to-screen mapping) -
+/// see that system's own doc for the full reasoning. These radii are this
+/// marker's *screen*-pixel size now, not a world size, and are picked a
+/// little larger than the chokepoint marker's own `6.0` (a status dot only
+/// has to be findable; a shape has to be told apart from two others).
 fn unit_marker_mesh(meshes: &mut Assets<Mesh>, branch: Option<Branch>) -> Handle<Mesh> {
     match branch {
-        Some(Branch::Armour) => meshes.add(Rectangle::new(9.0, 9.0)),
-        Some(Branch::Artillery) => meshes.add(Circle::new(6.0)),
-        Some(Branch::Infantry) | None => meshes.add(RegularPolygon::new(6.0, 3)),
+        Some(Branch::Armour) => meshes.add(Rectangle::new(10.0, 10.0)),
+        Some(Branch::Artillery) => meshes.add(Circle::new(7.0)),
+        Some(Branch::Infantry) | None => meshes.add(RegularPolygon::new(7.5, 3)),
     }
 }
 
@@ -237,9 +274,22 @@ pub(super) fn sync_unit_visuals(
     sim: Res<SimRes>,
     layout: Res<RegionLayout>,
     sea_centers: Res<SeaZoneCenters>,
+    camera: Query<&Projection, With<MainCamera>>,
     mut existing: Query<(&UnitMarker, &mut Transform, &mut Visibility, &MeshMaterial2d<ColorMaterial>)>,
 ) {
     let world = sim.0.world();
+
+    // Defect fix (`unit_marker_mesh`'s own doc): the same zoom-cancelling
+    // trick `overlay::sync_supply_overlay` uses for its chokepoint/cut-line
+    // markers, applied to every unit marker's own size *and* to how far
+    // apart `ring_offset` fans out several units sharing one station -
+    // without also compensating the spread, markers at a legible fixed
+    // pixel size would still collapse onto nearly the same screen point at
+    // a dense map's default zoomed-out fit, hiding all but the topmost one.
+    // Falls back to `1.0` on the one frame before `camera_fit::
+    // fit_camera_to_map` has run - same fallback `sync_supply_overlay`
+    // uses, same reasoning (a wrong size for one frame beats a panic).
+    let zoom = camera_zoom(&camera);
 
     let mut known = std::collections::HashSet::new();
     for (marker, _, _, _) in &existing {
@@ -288,11 +338,22 @@ pub(super) fn sync_unit_visuals(
         *visibility = Visibility::Visible;
         let [cx, cy] = station_position(world, unit.station, &layout.0, &sea_centers.0);
         let (slot, count) = slot_of.get(&marker.0.0).copied().unwrap_or((0, 1));
-        let offset = ring_offset(slot, count, 14.0);
+        // `* zoom` keeps this ring's own screen-pixel radius constant too
+        // (`sync_unit_visuals`'s own doc) - otherwise several units sharing
+        // one region would still visually stack on top of each other at a
+        // dense map's fitted-out zoom even once each marker's own shape is
+        // individually legible.
+        let offset = ring_offset(slot, count, 14.0) * zoom;
         transform.translation.x = cx + offset.x;
         transform.translation.y = cy + offset.y;
         let strength = ((unit.manpower / UNIT_MANPOWER) + (unit.equipment / UNIT_EQUIPMENT)) / 2.0;
-        transform.scale = Vec3::splat(strength.clamp(0.4, 1.3));
+        // Narrowed from the pre-fix `0.4..=1.3`: at this marker's new
+        // legible baseline size, the low end of that range would still
+        // shrink a badly damaged unit's shape back down past the point a
+        // player can tell it apart from the other two branches - the whole
+        // defect this pass exists to fix. `* zoom` is the same screen-
+        // space-constant treatment as `unit_marker_mesh`'s own local size.
+        transform.scale = Vec3::splat(strength.clamp(0.6, 1.25) * zoom);
         if let Some(mut mat) = materials.get_mut(&material_handle.0) {
             let base = faction_color(unit.owner.index());
             mat.color =
@@ -476,5 +537,45 @@ mod tests {
 
         run(&mut world, sync_owner_border);
         assert_eq!(material_color(&world, &handle), faction_color(owner.index()), "the border must match the region's current owner color");
+    }
+
+    /// What is clickable must be what is drawn (`codex review`, P2).
+    ///
+    /// `sync_unit_visuals` cancels the camera's zoom so a marker holds a
+    /// constant screen size; `input::map_click_select` multiplies
+    /// `UNIT_CLICK_RADIUS` by the very same `camera_zoom`. When the markers
+    /// were first made screen-space constant the hit test was left in world
+    /// units, so at the ~3.3 whole-map fit a player could see a marker and
+    /// not click it.
+    ///
+    /// Pinned as a *shared derivation*, not two matching numbers: this
+    /// asserts the drawn scale and the click radius move together across
+    /// zooms, which is only true while both go through `camera_zoom`.
+    ///
+    /// **Confirmed this test can fail.** Reverting `map_click_select` to a
+    /// fixed world-space `UNIT_CLICK_RADIUS` (dropping the multiply) makes
+    /// the ratio at zoom 3.3 come out 14.0 instead of 46.2, tripping the
+    /// assertion below.
+    #[test]
+    fn the_unit_click_radius_tracks_the_drawn_marker_size() {
+        for zoom in [0.5f32, 1.0, 3.3, 8.0] {
+            let mut world = World::new();
+            world.spawn((MainCamera, Projection::Orthographic(OrthographicProjection { scale: zoom, ..OrthographicProjection::default_2d() })));
+            let mut q = world.query_filtered::<&Projection, With<MainCamera>>();
+            let seen = {
+                let q: Query<&Projection, With<MainCamera>> = q.query(&world);
+                camera_zoom(&q)
+            };
+            assert!(
+                (seen - zoom).abs() < 1e-5,
+                "camera_zoom must report the camera's own orthographic scale: expected {zoom}, got {seen}"
+            );
+            let click_radius = crate::app::input::UNIT_CLICK_RADIUS * seen;
+            assert!(
+                (click_radius - 14.0 * zoom).abs() < 1e-4,
+                "the click radius must scale with zoom exactly as the marker does: at zoom {zoom} expected {}, got {click_radius}",
+                14.0 * zoom
+            );
+        }
     }
 }

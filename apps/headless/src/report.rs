@@ -58,16 +58,43 @@ pub fn print_header(args_seed: u64, args_days: u32, args_report: u32) {
     );
 }
 
+/// Defect fix (this event's own defect write-up in `event::BattleSide`'s
+/// doc): a tank push and an infantry-only assault used to narrate
+/// identically here - `Event::Battle` carried no branch data at all. Per
+/// side, per branch, how much manpower each branch actually lost -
+/// mirrors `apps/game`'s `event_text::battle_sides_ja` (this function's own
+/// doc has the "kept in sync by hand" reasoning). Empty string when
+/// `sides` is empty (a battle whose sides never entered the damage loop -
+/// `event::BattleSide`'s own doc).
+fn battle_sides_ja(world: &World, sides: &[archipelago_sim::event::BattleSide]) -> String {
+    if sides.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = sides
+        .iter()
+        .map(|side| {
+            let branch_parts: Vec<String> = side
+                .branches
+                .iter()
+                .map(|b| format!("{}損耗{:.2}万人", b.branch.label(), b.casualties))
+                .collect();
+            format!("{}: {}", world.faction(side.faction).name, branch_parts.join("/"))
+        })
+        .collect();
+    format!(" [兵科内訳: {}]", parts.join("、"))
+}
+
 pub fn print_event(world: &World, day: u32, event: &Event) {
     let line = match event {
-        Event::Battle { region, factions, casualties } => {
+        Event::Battle { region, factions, casualties, sides } => {
             let region_name = &world.region(*region).name;
             let names: Vec<&str> = factions.iter().map(|f| world.faction(*f).name.as_str()).collect();
             format!(
-                "戦闘: {} で {} が交戦 (損耗 {:.2}万人)",
+                "戦闘: {} で {} が交戦 (損耗 {:.2}万人){}",
                 region_name,
                 names.join(" vs "),
-                casualties
+                casualties,
+                battle_sides_ja(world, sides),
             )
         }
         Event::NavalBattle { zone, factions, casualties } => {

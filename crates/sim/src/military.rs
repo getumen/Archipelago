@@ -506,22 +506,29 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         // now the real sum of exactly the per-unit numbers the damage-sharing
         // loop below uses, computed once here rather than twice.
         let mut power: Vec<f32> = Vec::with_capacity(factions_present.len());
-        let mut side_units: Vec<Vec<(UnitId, f32)>> = Vec::with_capacity(factions_present.len());
+        // `Branch` alongside each unit's own already-computed effective
+        // power - captured here (rather than re-read from `world` later)
+        // so `BranchEngagement`'s per-branch composition (below) is built
+        // from the exact same numbers the damage-sharing loop uses, not a
+        // second, potentially-diverging lookup. `units_in` only ever yields
+        // land units, which always carry `Some(branch)` - see `Unit::
+        // branch`'s own doc.
+        let mut side_units: Vec<Vec<(UnitId, Branch, f32)>> = Vec::with_capacity(factions_present.len());
         for (i, &f) in factions_present.iter().enumerate() {
             let is_defender = f == defender;
             let terrain_mult = if is_defender { defense_bonus } else { 1.0 };
-            let units: Vec<(UnitId, f32)> = world
+            let units: Vec<(UnitId, Branch, f32)> = world
                 .units_in(region_id)
                 .filter(|u| u.owner == f)
                 .map(|u| {
-                    let branch_mult = u
-                        .branch
-                        .map(|b| branch_terrain_mult(b, region_terrain, is_defender))
-                        .unwrap_or(1.0);
-                    (u.id, u.combat_power() * terrain_mult * side_mult[i] * branch_mult)
+                    let branch = u.branch.expect(
+                        "units_in only yields land units, which always carry Some(branch) - see Unit::branch's own doc",
+                    );
+                    let branch_mult = branch_terrain_mult(branch, region_terrain, is_defender);
+                    (u.id, branch, u.combat_power() * terrain_mult * side_mult[i] * branch_mult)
                 })
                 .collect();
-            let side_power = units.iter().fold(0.0, |acc, &(_, p)| acc + p);
+            let side_power = units.iter().fold(0.0, |acc, &(_, _, p)| acc + p);
             power.push(side_power);
             side_units.push(units);
         }
@@ -532,6 +539,12 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         // destruction that feeds `Region::devastation`, independent of the
         // manpower/equipment casualties it also causes.
         let mut region_damage = 0.0f32;
+        // Defect fix (`event::BattleSide`'s own doc): one entry per side
+        // that actually enters the damage loop below, carried straight into
+        // `Event::Battle::sides` so the event log/newspaper/headless
+        // report/API can narrate *what kind* of fighting this was, not just
+        // that manpower was lost.
+        let mut sides: Vec<crate::event::BattleSide> = Vec::with_capacity(factions_present.len());
         for (side_idx, &side_faction) in factions_present.iter().enumerate() {
             // Stage 3B: only power from sides actually at war with this one
             // counts as its "enemy" - a faction present but at peace with
@@ -556,7 +569,26 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                 continue;
             }
 
-            for &(unit_id, raw_power) in &side_units[side_idx] {
+            // This side's branch composition, in `ALL_BRANCHES` order,
+            // computed from the same `side_units` power figures the
+            // damage-sharing loop below reads - only branches this side
+            // actually fielded here (`power > 0.0`) get an entry.
+            let mut branch_stats: Vec<crate::event::BranchEngagement> = ALL_BRANCHES
+                .into_iter()
+                .filter_map(|branch| {
+                    let branch_power: f32 = side_units[side_idx]
+                        .iter()
+                        .filter(|&&(_, b, _)| b == branch)
+                        .fold(0.0, |acc, &(_, _, p)| acc + p);
+                    (branch_power > 0.0).then(|| crate::event::BranchEngagement {
+                        branch,
+                        power: branch_power,
+                        casualties: 0.0,
+                    })
+                })
+                .collect();
+
+            for &(unit_id, branch, raw_power) in &side_units[side_idx] {
                 fought[unit_id.index()] = true;
                 let unit = world.unit_mut(unit_id);
                 let share = raw_power / side_power;
@@ -577,7 +609,13 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                 casualties[side_faction.index()] += manpower_loss;
                 battle_casualties += manpower_loss;
                 world.faction_mut(side_faction).casualties += manpower_loss;
+
+                if let Some(entry) = branch_stats.iter_mut().find(|e| e.branch == branch) {
+                    entry.casualties += manpower_loss;
+                }
             }
+
+            sides.push(crate::event::BattleSide { faction: side_faction, branches: branch_stats });
         }
 
         let devastated = world.region_mut(region_id);
@@ -588,6 +626,7 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
             region: region_id,
             factions: factions_present.clone(),
             casualties: battle_casualties,
+            sides,
         });
     }
 

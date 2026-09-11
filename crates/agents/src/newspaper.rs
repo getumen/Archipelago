@@ -63,6 +63,21 @@ systemic collapse or the fruit of poor leadership. Write 2-4 short sentences of 
 events for this faction's readers. Output nothing but the article text itself - no JSON, no headline markup, no \
 preamble.";
 
+/// ", armour/infantry" style English suffix for `event_line`'s `Battle`
+/// case - which branches this fight actually involved (`event::
+/// battle_branch_totals`'s own doc), in `military::ALL_BRANCHES` order.
+/// Empty string when `sides` is empty (a battle whose sides never entered
+/// the damage loop - `event::BattleSide`'s own doc), so a caller can splice
+/// this straight into a sentence without a dangling separator.
+fn branch_summary_en(sides: &[archipelago_sim::event::BattleSide]) -> String {
+    let totals = archipelago_sim::event::battle_branch_totals(sides);
+    if totals.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<&str> = totals.iter().map(|t| t.branch.key()).collect();
+    format!(", {}", parts.join("/"))
+}
+
 /// A short, human-readable line for one `Event`, used by both the LLM
 /// prompt and the mechanical template - falls back to `Event`'s own
 /// `Display` (id-based) for any variant not specifically named here.
@@ -74,9 +89,15 @@ fn event_line(world: &World, event: &Event) -> String {
             world.faction(*to).name,
             world.faction(*from).name,
         ),
-        Event::Battle { region, factions, casualties } => {
+        Event::Battle { region, factions, casualties, sides } => {
             let names: Vec<&str> = factions.iter().map(|f| world.faction(*f).name.as_str()).collect();
-            format!("battle at {}: {} ({:.1} manpower lost)", world.region(*region).name, names.join(" vs "), casualties)
+            format!(
+                "battle at {}: {} ({:.1} manpower lost{})",
+                world.region(*region).name,
+                names.join(" vs "),
+                casualties,
+                branch_summary_en(sides),
+            )
         }
         Event::TreatySigned { a, b, treaty } => {
             format!("{} and {} signed a {}", world.faction(*a).name, world.faction(*b).name, treaty.key())
@@ -151,7 +172,12 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
     // appear in is the deterministic order their location was first seen in
     // `events`, matching this project's "no iteration-order dependence"
     // discipline (docs/phase4-spec.md "共通の制約").
-    let mut own_battles: Vec<(String, u32, f32)> = Vec::new();
+    // Fourth element: per-`Branch` manpower lost, tallied the same way as
+    // the total (`tally_battle`'s own doc) - always empty for a naval
+    // engagement (`event_line`'s `NavalBattle` arm has no branch data to
+    // give; naval isn't split into branches, `military::Branch`'s own
+    // module doc).
+    let mut own_battles: Vec<(String, u32, f32, Vec<(archipelago_sim::military::Branch, f32)>)> = Vec::new();
     let mut own_treaties: Vec<String> = Vec::new();
     let mut own_wars: Vec<String> = Vec::new();
     let mut own_unrest: Vec<&str> = Vec::new();
@@ -184,11 +210,21 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
                     ));
                 }
             }
-            Event::Battle { region, factions, casualties } if factions.contains(&faction) => {
-                tally_battle(&mut own_battles, format!("{}での戦闘", world.region(*region).name), *casualties);
+            Event::Battle { region, factions, casualties, sides } if factions.contains(&faction) => {
+                let branch_casualties: Vec<(archipelago_sim::military::Branch, f32)> =
+                    archipelago_sim::event::battle_branch_totals(sides)
+                        .into_iter()
+                        .map(|e| (e.branch, e.casualties))
+                        .collect();
+                tally_battle(
+                    &mut own_battles,
+                    format!("{}での戦闘", world.region(*region).name),
+                    *casualties,
+                    &branch_casualties,
+                );
             }
             Event::NavalBattle { zone, factions, casualties } if factions.contains(&faction) => {
-                tally_battle(&mut own_battles, format!("{}沖での海戦", world.sea_zone(*zone).name), *casualties);
+                tally_battle(&mut own_battles, format!("{}沖での海戦", world.sea_zone(*zone).name), *casualties, &[]);
             }
             Event::TreatySigned { a, b, treaty } if *a == faction || *b == faction => {
                 let other = if *a == faction { *b } else { *a };
@@ -313,11 +349,20 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
         if !own_battles.is_empty() {
             let lines: Vec<String> = own_battles
                 .iter()
-                .map(|(label, count, casualties)| {
-                    if *count > 1 {
-                        format!("{label}が{count}回 (損耗合計 {casualties:.1}万人)")
+                .map(|(label, count, casualties, branch_casualties)| {
+                    let branch_note = if branch_casualties.is_empty() {
+                        String::new()
                     } else {
-                        format!("{label} (損耗 {casualties:.1}万人)")
+                        let parts: Vec<String> = branch_casualties
+                            .iter()
+                            .map(|(branch, lost)| format!("{}{:.1}万人", branch.label(), lost))
+                            .collect();
+                        format!("、内訳 {}", parts.join("/"))
+                    };
+                    if *count > 1 {
+                        format!("{label}が{count}回 (損耗合計 {casualties:.1}万人{branch_note})")
+                    } else {
+                        format!("{label} (損耗 {casualties:.1}万人{branch_note})")
                     }
                 })
                 .collect();
@@ -371,15 +416,30 @@ fn template_summary(world: &World, faction: FactionId, events: &[Event], period_
 }
 
 /// Adds one `Battle`/`NavalBattle` occurrence to `tally`'s running per-
-/// location count and casualty total, appending a fresh entry if `label`
-/// hasn't been seen yet in this period - see `own_battles`' doc for why this
-/// is a linear `Vec` scan rather than a `HashMap`.
-fn tally_battle(tally: &mut Vec<(String, u32, f32)>, label: String, casualties: f32) {
-    if let Some(entry) = tally.iter_mut().find(|(l, _, _)| *l == label) {
+/// location count, casualty total, and per-branch casualty breakdown
+/// (`branch_casualties` - empty for a naval engagement), appending a fresh
+/// entry if `label` hasn't been seen yet in this period - see
+/// `own_battles`' doc for why this is a linear `Vec` scan rather than a
+/// `HashMap`. Same linear-scan merge for the per-branch breakdown - never
+/// more than 3 entries (`military::ALL_BRANCHES`), so a nested `HashMap`
+/// would be pure overhead for no benefit.
+fn tally_battle(
+    tally: &mut Vec<(String, u32, f32, Vec<(archipelago_sim::military::Branch, f32)>)>,
+    label: String,
+    casualties: f32,
+    branch_casualties: &[(archipelago_sim::military::Branch, f32)],
+) {
+    if let Some(entry) = tally.iter_mut().find(|(l, _, _, _)| *l == label) {
         entry.1 += 1;
         entry.2 += casualties;
+        for &(branch, lost) in branch_casualties {
+            match entry.3.iter_mut().find(|(b, _)| *b == branch) {
+                Some(e) => e.1 += lost,
+                None => entry.3.push((branch, lost)),
+            }
+        }
     } else {
-        tally.push((label, 1, casualties));
+        tally.push((label, 1, casualties, branch_casualties.to_vec()));
     }
 }
 
@@ -519,7 +579,7 @@ mod tests {
         let battle_region = RegionId(1); // 北東北, owned by faction 0
         let events = vec![
             Event::RegionCaptured { region: captured_region, from: FactionId(1), to: faction },
-            Event::Battle { region: battle_region, factions: vec![faction, FactionId(1)], casualties: 3.5 },
+            Event::Battle { region: battle_region, factions: vec![faction, FactionId(1)], casualties: 3.5, sides: vec![] },
         ];
 
         let busy = generate_article(&backend, &world, faction, &events, 0);

@@ -79,8 +79,17 @@ const PINCH_ZOOM_SENSITIVITY: f32 = 1.0;
 /// click from being swallowed as an accidental drag.
 const CLICK_DRAG_TOLERANCE: f32 = 4.0;
 
-/// World-space click radius around a unit marker's rendered position.
-const UNIT_CLICK_RADIUS: f32 = 14.0;
+/// Click radius around a unit marker's rendered position, **in the same
+/// screen-space units the marker itself is drawn at**.
+///
+/// `codex review` (P2): `visuals::sync_unit_visuals` cancels the camera's
+/// zoom so a marker stays a constant number of screen pixels at any zoom
+/// (`unit_marker_mesh`'s own doc). Leaving this radius in world units made
+/// the hit box diverge from the thing the player can see: zoomed out to the
+/// ~3.3 whole-map fit, visible markers were unclickable; zoomed in, a large
+/// invisible area around each marker swallowed clicks. Multiplied by the
+/// same zoom below, so what is clickable is exactly what is drawn.
+pub(super) const UNIT_CLICK_RADIUS: f32 = 14.0;
 
 const CONSCRIPTION_STEP: f32 = 0.05;
 const CIVILIAN_RATION_STEP: f32 = 0.05;
@@ -774,6 +783,7 @@ pub(super) fn map_click_select(
     radii: Res<RegionRadii>,
     sea_centers: Res<SeaZoneCenters>,
     units: Query<(&UnitMarker, &Transform)>,
+    unit_marker_camera: Query<&Projection, With<MainCamera>>,
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
     mut selected_region: ResMut<SelectedRegion>,
@@ -792,6 +802,9 @@ pub(super) fn map_click_select(
     // 1. Unit hit test - only the player's own living units are selectable.
     if let Some(player_faction) = player.0 {
         let mut hit: Option<(u32, f32)> = None;
+        // The very function the markers' own size is scaled by, not a second
+        // copy of the same expression - see `UNIT_CLICK_RADIUS`'s doc.
+        let click_radius = UNIT_CLICK_RADIUS * super::visuals::camera_zoom(&unit_marker_camera);
         for (marker, transform) in &units {
             let Some(unit) = sim.0.world().units.get(marker.0.index()) else { continue };
             if !unit.alive || unit.owner != player_faction {
@@ -799,7 +812,7 @@ pub(super) fn map_click_select(
             }
             let pos = transform.translation.truncate();
             let d = pos.distance(world_pos);
-            if d <= UNIT_CLICK_RADIUS && hit.is_none_or(|(_, best)| d < best) {
+            if d <= click_radius && hit.is_none_or(|(_, best)| d < best) {
                 hit = Some((marker.0.0, d));
             }
         }

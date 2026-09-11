@@ -5449,6 +5449,103 @@ fn branch_is_stronger_on_its_own_terrain_at_equal_strength() {
     );
 }
 
+/// Defect fix (`event::BattleSide`'s own doc has the full write-up): before
+/// `Event::Battle` carried `sides`, a tank push and an infantry-only fight
+/// narrated byte-identically - only `region`/`factions`/`casualties`
+/// existed, none of which say anything about *what fought*. This checks
+/// both ends: the structured `sides` data names exactly the branch each
+/// side fielded, and the event's own `Display` text actually changes when
+/// the branch mix changes (a struct field nobody reads through `Display`
+/// or a consumer would be exactly the same defect wearing a new type).
+///
+/// Confirmed this can fail: temporarily reverted `military::tick_combat`'s
+/// `sides` push to `Vec::new()` (i.e. `Event::Battle { ..., sides: Vec::
+/// new() }`, discarding the real data the same way the pre-fix code path
+/// never captured it at all) and re-ran - `text_ii` and `text_ia` came back
+/// byte-identical ("battle in region 0 between factions [0, 1]: 0.03
+/// manpower lost" both times, no branch mentioned in either), failing the
+/// `assert_ne!` below, and the `sides.len() == 2` assertion failed outright
+/// (`0 == 2`). Reverted before committing.
+#[test]
+fn battle_narrates_branch_composition() {
+    use crate::military::Branch;
+
+    /// The lone `Event::Battle` produced by a single-unit-per-side fight
+    /// where the defender fields `defender_branch` and the attacker fields
+    /// `attacker_branch` - `branch_is_stronger_on_its_own_terrain_at_equal_
+    /// strength`'s own `attacker_casualties` helper, generalized to vary
+    /// both sides' branches instead of holding the attacker's fixed.
+    fn battle_event(defender_branch: Branch, attacker_branch: Branch) -> Event {
+        let mut world = scenario::build_world();
+        let region = RegionId(0);
+        for u in world.units.iter_mut() {
+            u.alive = false;
+        }
+        let defender_faction = FactionId(0);
+        let attacker_faction = FactionId(1);
+        world.region_mut(region).owner = defender_faction;
+
+        let make_unit = |id: UnitId, owner: FactionId, branch: Branch| military::Unit {
+            id,
+            owner,
+            name: "Test Unit".to_string(),
+            station: Station::Region(region),
+            movement: None,
+            manpower: UNIT_MANPOWER,
+            equipment: UNIT_EQUIPMENT,
+            organization: UNIT_ORG,
+            morale: 1.0,
+            supply: 1.0,
+            arms_delivery: 1.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+            branch: Some(branch),
+        };
+        world.units.push(make_unit(UnitId(world.units.len() as u32), defender_faction, defender_branch));
+        world.units.push(make_unit(UnitId(world.units.len() as u32), attacker_faction, attacker_branch));
+
+        let mut rng = Rng::new(1);
+        let mut events = Vec::new();
+        military::tick_combat(&mut world, &mut rng, &mut events);
+        events
+            .into_iter()
+            .find(|e| matches!(e, Event::Battle { .. }))
+            .expect("two factions at war sharing a region must produce exactly one Battle event")
+    }
+
+    let infantry_vs_infantry = battle_event(Branch::Infantry, Branch::Infantry);
+    let infantry_vs_armour = battle_event(Branch::Infantry, Branch::Armour);
+
+    let text_ii = infantry_vs_infantry.to_string();
+    let text_ia = infantry_vs_armour.to_string();
+    assert_ne!(
+        text_ii, text_ia,
+        "an attacker fielding armour must narrate differently from one fielding infantry against the exact same \
+         defender - Event::Battle's own Display text must actually change: {text_ii:?} vs {text_ia:?}"
+    );
+    assert!(text_ia.contains("armour"), "the mixed battle's own text must name the branch that actually fought: {text_ia}");
+    assert!(!text_ii.contains("armour"), "the all-infantry battle must not spuriously mention armour: {text_ii}");
+
+    // And the structured data itself, not just the rendered text - each
+    // side must carry exactly the one branch it fielded here.
+    let Event::Battle { sides, .. } = &infantry_vs_armour else {
+        unreachable!("already matched as Event::Battle above")
+    };
+    assert_eq!(sides.len(), 2, "both the attacker and the defender fought, so both must appear: {sides:?}");
+    for side in sides {
+        let expected = if side.faction == FactionId(0) { Branch::Infantry } else { Branch::Armour };
+        let branches: Vec<Branch> = side.branches.iter().map(|b| b.branch).collect();
+        assert_eq!(
+            branches,
+            vec![expected],
+            "faction {:?} fielded exactly one branch ({expected:?}) - side.branches must say so: {branches:?}",
+            side.faction
+        );
+    }
+}
+
 /// Stage 11B acceptance criterion (docs/phase11-spec.md §6): "兵科ごとに補給
 /// の重さが違う。同じ部隊数なら、重い兵科のほうが輸送網を食う" -
 /// `logistics::unit_supply_demand` is the single per-unit formula both

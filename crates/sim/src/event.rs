@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::diplomacy::{Treaty, TreatyTerm};
 use crate::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
+use crate::military::Branch;
 use crate::transport::TransportNodeKind;
 use crate::world::Station;
 
@@ -26,12 +27,80 @@ pub enum StrikeOutcome {
     AlreadyDown,
 }
 
+/// One `Branch`'s part in a `BattleSide` - what it fielded and what that
+/// cost it this tick.
+///
+/// Defect fix: before this existed, `Event::Battle` carried only aggregate
+/// `factions`/`casualties` - a tank push and an infantry-only assault
+/// narrated identically everywhere this event is read (event log,
+/// newspaper, headless report, the API's event text), even though
+/// `military::branch_terrain_mult` already makes branch choice change the
+/// outcome (a playtest measured 0.096 casualties/region-gained for
+/// terrain-matched play vs 0.204 for infantry-only). The mechanic worked
+/// and nothing ever said so.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BranchEngagement {
+    pub branch: Branch,
+    /// This branch's own effective combat power fielded by this side this
+    /// tick (`military::tick_combat`'s `terrain_mult * side_mult *
+    /// branch_mult`-adjusted power) - what actually decided how large a
+    /// share of the fight this branch carried, not a raw unit count.
+    pub power: f32,
+    /// Manpower this branch alone lost this tick. Always `<=` this side's
+    /// own share of `Event::Battle::casualties`.
+    pub casualties: f32,
+}
+
+/// One faction's participation in a `Battle` - captured live inside
+/// `military::tick_combat` where the fight is actually resolved, not
+/// reconstructed afterward: a branch that took 100% losses leaves no
+/// surviving unit to re-derive its composition from once the tick ends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BattleSide {
+    pub faction: FactionId,
+    /// In `military::ALL_BRANCHES` order, one entry per branch this side
+    /// actually fielded here - a branch it holds no units of at this
+    /// region simply doesn't appear, so this is never longer than 3.
+    pub branches: Vec<BranchEngagement>,
+}
+
+/// Total `power`/`casualties` per `Branch` across every `BattleSide` of one
+/// `Battle`, in `military::ALL_BRANCHES` order - the aggregate shape every
+/// text consumer (event log, newspaper, headless report) actually wants:
+/// "how much of this fight was armour", not "which faction fielded what".
+/// Shared here rather than duplicated per consumer - see `BattleSide`'s own
+/// doc for why the per-side detail can't be reconstructed later, which
+/// applies equally to this aggregate.
+pub fn battle_branch_totals(sides: &[BattleSide]) -> Vec<BranchEngagement> {
+    crate::military::ALL_BRANCHES
+        .into_iter()
+        .filter_map(|branch| {
+            let mut power = 0.0;
+            let mut casualties = 0.0;
+            for side in sides {
+                if let Some(engagement) = side.branches.iter().find(|e| e.branch == branch) {
+                    power += engagement.power;
+                    casualties += engagement.casualties;
+                }
+            }
+            (power > 0.0).then_some(BranchEngagement { branch, power, casualties })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub enum Event {
     Battle {
         region: RegionId,
         factions: Vec<FactionId>,
         casualties: f32,
+        /// Stage 11B addendum (`BattleSide`'s own doc has the defect this
+        /// exists to fix): one entry per side that actually took part in
+        /// the fight this tick - a side present in `factions` but not at
+        /// war with anyone else here (peaceful coexistence, see
+        /// `military::tick_combat`'s own "any_war" check) never enters the
+        /// damage loop, so it never appears here either.
+        sides: Vec<BattleSide>,
     },
     /// Stage 2D (docs/phase2-spec.md "3. 海戦"): the sea-domain counterpart
     /// of `Battle`, kept as its own variant rather than reusing `Battle`'s
@@ -222,6 +291,7 @@ impl fmt::Display for Event {
                 region,
                 factions,
                 casualties,
+                sides,
             } => {
                 let ids: Vec<String> = factions.iter().map(|f| f.0.to_string()).collect();
                 write!(
@@ -230,7 +300,22 @@ impl fmt::Display for Event {
                     region.0,
                     ids.join(", "),
                     casualties
-                )
+                )?;
+                if !sides.is_empty() {
+                    let side_strs: Vec<String> = sides
+                        .iter()
+                        .map(|side| {
+                            let branch_strs: Vec<String> = side
+                                .branches
+                                .iter()
+                                .map(|b| format!("{} {:.1}pow/{:.2}lost", b.branch.key(), b.power, b.casualties))
+                                .collect();
+                            format!("faction {} [{}]", side.faction.0, branch_strs.join(", "))
+                        })
+                        .collect();
+                    write!(f, " ({})", side_strs.join("; "))?;
+                }
+                Ok(())
             }
             Event::NavalBattle {
                 zone,

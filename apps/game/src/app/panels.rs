@@ -338,13 +338,13 @@ impl RegionActionKind {
     /// Mirrors `action::apply_recruit`/`apply_build`/`apply_cancel_build`'s
     /// own visible preconditions - see this module's own doc, "Disabled,
     /// with a reason". Read-only; never mutates `world`.
-    fn reason(self, world: &SimWorld, faction: FactionId, region_id: RegionId, active_branch: Branch) -> Option<&'static str> {
+    fn reason(self, world: &SimWorld, faction: FactionId, region_id: RegionId, active_branch: Branch) -> Option<String> {
         let region = world.regions.get(region_id.index())?;
         if region.owner != faction {
-            return Some(action_error_ja(ActionError::RegionNotOwned));
+            return Some(action_error_ja(ActionError::RegionNotOwned).to_string());
         }
         if world.has_enemy_units(region_id, faction) {
-            return Some(action_error_ja(ActionError::RegionContested));
+            return Some(action_error_ja(ActionError::RegionContested).to_string());
         }
         match self {
             // Stage 11C: the button must read "enabled"/"disabled" against
@@ -355,26 +355,26 @@ impl RegionActionKind {
             RegionActionKind::RecruitLand => recruit_reason(world, faction, Domain::Land, active_branch.equipment_good()),
             RegionActionKind::RecruitSea => {
                 if region.port <= 0.0 {
-                    return Some(action_error_ja(ActionError::NoPort));
+                    return Some(action_error_ja(ActionError::NoPort).to_string());
                 }
                 recruit_reason(world, faction, Domain::Sea, Good::Naval)
             }
             RegionActionKind::RecruitAir => {
                 if !world.airfield_node_operational(region_id) {
-                    return Some(action_error_ja(ActionError::NoAirfield));
+                    return Some(action_error_ja(ActionError::NoAirfield).to_string());
                 }
                 recruit_reason(world, faction, Domain::Air, Good::Aircraft)
             }
             RegionActionKind::BuildInfra | RegionActionKind::BuildPort | RegionActionKind::BuildCapacity | RegionActionKind::Repair => {
                 if region.construction.is_some() {
-                    Some(action_error_ja(ActionError::AlreadyBuilding))
+                    Some(action_error_ja(ActionError::AlreadyBuilding).to_string())
                 } else {
                     None
                 }
             }
             RegionActionKind::CancelBuild => {
                 if region.construction.is_none() {
-                    Some(action_error_ja(ActionError::NoConstruction))
+                    Some(action_error_ja(ActionError::NoConstruction).to_string())
                 } else {
                     None
                 }
@@ -392,13 +392,21 @@ impl RegionActionKind {
 /// Checking the wrong good here would let this button read "enabled" right
 /// up until the simulation actually rejects the order, or "disabled" while
 /// the commodity it would actually spend from is perfectly solvent.
-fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain, equipment_good: Good) -> Option<&'static str> {
+fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain, equipment_good: Good) -> Option<String> {
     let f = world.faction(faction);
     if f.manpower < UNIT_MANPOWER {
-        return Some(action_error_ja(ActionError::InsufficientManpower));
+        return Some(action_error_ja(ActionError::InsufficientManpower).to_string());
     }
     if f.stock[equipment_good.index()] < UNIT_EQUIPMENT {
-        return Some(action_error_ja(ActionError::InsufficientEquipment));
+        // Defect fix: `action_error_ja(ActionError::InsufficientEquipment)`
+        // is one fixed string for all three land branches plus Sea/Air, so
+        // with (say) infantry equipment in stock and armour equipment at
+        // zero, tabbing to 機甲 and clicking recruit used to give a reason
+        // that never named armour - the button's own `[機甲]` label
+        // (`RegionActionKind::label`) only partly mitigated it. This
+        // already knows exactly which `Good` the sim would actually charge
+        // (`equipment_good`, threaded in by every caller below), so name it.
+        return Some(format!("{}が不足している", equipment_good.label()));
     }
     // Stage 10 follow-up: `action::apply_recruit`'s `Domain::Air` arm also
     // spends `Good::Machinery` (`balance::AIR_UNIT_MACHINERY_COST`) - the
@@ -406,7 +414,7 @@ fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain, equipmen
     // squadron the sim would reject as `InsufficientMachinery` never shows
     // as an enabled button in the first place.
     if domain == Domain::Air && f.stock[Good::Machinery.index()] < AIR_UNIT_MACHINERY_COST {
-        return Some(action_error_ja(ActionError::InsufficientMachinery));
+        return Some(action_error_ja(ActionError::InsufficientMachinery).to_string());
     }
     None
 }
@@ -543,7 +551,7 @@ pub(super) fn sync_region_action_buttons(
         }
         for (r, mut text) in &mut reasons {
             if r.0 == kind {
-                text.0 = reason.unwrap_or("").to_string();
+                text.0 = reason.clone().unwrap_or_default();
             }
         }
     }
@@ -2329,6 +2337,51 @@ mod tests {
         let mut sim = world.resource_mut::<SimRes>();
         sim.0.tick();
         assert!(sim.0.last_human_actions().is_empty(), "a click on a region the player doesn't own must never be queued, but got {:?}", sim.0.last_human_actions());
+    }
+
+    /// Defect fix: `recruit_reason`'s `InsufficientEquipment` case used to
+    /// return `action_error_ja(ActionError::InsufficientEquipment)` - one
+    /// fixed string ("装備が不足している") regardless of which of the three
+    /// land branches (or Sea/Air) was actually short. With infantry
+    /// equipment fully stocked and armour equipment exhausted, tabbing to
+    /// 機甲 and reading the button's own disabled reason never named armour
+    /// - the button's `[機甲]` label (`RegionActionKind::label`) only
+    /// partly mitigated it. This checks the reason now names the specific
+    /// commodity (`Good::Armour.label()`, "機甲装備") that is actually
+    /// short, and that the still-fully-stocked infantry branch stays
+    /// enabled - proving this is a branch-specific check, not a blanket
+    /// "something is low" one.
+    ///
+    /// Checked this fails when broken: temporarily reverted `recruit_
+    /// reason`'s `InsufficientEquipment` arm to `action_error_ja(ActionError::
+    /// InsufficientEquipment).to_string()` (the pre-fix behaviour) - the
+    /// `reason.contains(Good::Armour.label())` assertion below then failed
+    /// (`"装備が不足している"` does not contain `"機甲装備"`). Reverted
+    /// before committing.
+    #[test]
+    fn insufficient_equipment_reason_names_the_short_branch() {
+        let mut sim_world = scenario::build_world();
+        sim_world.faction_mut(FactionId(0)).stock[Good::Armour.index()] = 0.0;
+        assert!(
+            sim_world.faction(FactionId(0)).stock[Good::Infantry.index()] >= UNIT_EQUIPMENT,
+            "this test needs infantry equipment in stock so the shortage below is armour-specific, not blanket"
+        );
+        let capital = sim_world.faction(FactionId(0)).capital;
+        let sim = SimRes(SimDriver::new_with_player(sim_world, 1, Some(FactionId(0)), None));
+
+        let reason = RegionActionKind::RecruitLand.reason(sim.0.world(), FactionId(0), capital, Branch::Armour);
+        let reason = reason.expect("armour equipment is exhausted, so RecruitLand must read as disabled while 機甲 is the active branch");
+        assert!(
+            reason.contains(Good::Armour.label()),
+            "the reason must name the specific branch/commodity that is actually short (機甲装備), not a generic \
+             'insufficient equipment' message: {reason}"
+        );
+
+        let infantry_reason = RegionActionKind::RecruitLand.reason(sim.0.world(), FactionId(0), capital, Branch::Infantry);
+        assert!(
+            infantry_reason.is_none(),
+            "infantry equipment is still fully stocked, so recruiting infantry must stay enabled: {infantry_reason:?}"
+        );
     }
 
     /// Stage 10 follow-up (this task's own ask: a human player must be able
