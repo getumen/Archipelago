@@ -20,6 +20,19 @@ fn take_value<I: Iterator<Item = String>>(iter: &mut I, flag: &str) -> String {
     })
 }
 
+/// Playtest defect fix ("/reset's scenario field lies"): the identity a
+/// `--scenario <path>` server reports as `scenario.id` in `GET /schema` and
+/// checks `POST /reset`'s own optional `scenario` field against
+/// (`session::SessionManager::scenario_id`'s doc) - the file's stem (no
+/// directory, no `.json`), e.g. `scenarios/japan_hex.json` -> `"japan_hex"`.
+/// Matches this codebase's own naming convention for scenario files
+/// (`mvp`/`japan47`/`japan_hex`, per CLAUDE.md's own "3 つの地図" table), so
+/// it's the string an operator or a client reading the docs would actually
+/// guess.
+fn scenario_stem(path: &str) -> String {
+    std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
+}
+
 fn main() {
     let mut bind_addr = "127.0.0.1:8080".to_string();
     let mut idle_timeout_secs: u64 = 1800;
@@ -52,7 +65,13 @@ fn main() {
                 eprintln!("error: could not load --scenario {path}: {e}");
                 std::process::exit(1);
             });
-            archipelago_api::serve_background_with_scenario(&bind_addr, idle_timeout, sweep_interval, scenario)
+            archipelago_api::serve_background_with_scenario(
+                &bind_addr,
+                idle_timeout,
+                sweep_interval,
+                scenario,
+                scenario_stem(path),
+            )
         }
     }
     .unwrap_or_else(|e| {

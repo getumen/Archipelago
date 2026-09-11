@@ -261,6 +261,40 @@ fn invalid_action_rejected() {
     assert_eq!(sim.world.unit(unit_id).movement, before_movement);
 }
 
+/// Playtest defect fix: `Action::DeclareWar` against a faction already at
+/// `Stance::War` must name that specific situation (`ActionError::
+/// AlreadyAtWar`), not the generic `InvalidValue` a malformed or
+/// out-of-range `to` also produces - a player (or an RL agent reading
+/// `rejected[]`'s reason) can't tell those apart otherwise.
+/// `scenarios/mvp.json`'s factions start at unconditional war
+/// (`"diplomacy": {"blocs": []}`), so faction 0 and 1 are already at war
+/// with no setup needed.
+///
+/// Confirmed this can actually fail: temporarily reverted `apply_declare_war`
+/// to its old two-branch shape (`stance != Stance::Ceasefire =>
+/// InvalidValue`, no `AlreadyAtWar` check) and re-ran - the assertion below
+/// failed, getting `InvalidValue` back instead. Reverted before committing.
+#[test]
+fn declare_war_on_an_existing_war_names_the_situation() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+    assert!(world.diplomacy.is_at_war(a, b), "sanity: mvp's factions start at unconditional war");
+
+    let err = action::apply_action(&mut world, a, Action::DeclareWar { to: b }).unwrap_err();
+    assert_eq!(
+        err,
+        ActionError::AlreadyAtWar,
+        "declaring war on a faction already at war must name that situation, not the generic InvalidValue"
+    );
+
+    // The generic InvalidValue must still cover the other malformed/
+    // out-of-range shapes DeclareWar always rejected - this fix only adds a
+    // more specific reason for the "already at war" case, it doesn't change
+    // what happens for a self-targeted or nonexistent faction.
+    assert_eq!(action::apply_action(&mut world, a, Action::DeclareWar { to: a }).unwrap_err(), ActionError::InvalidValue);
+}
+
 /// The disband defect's most basic fix: `Action::DisbandUnit` removes the
 /// unit and shrinks its owner's living force by exactly one - the mechanic
 /// this codebase had no answer for at all until now. Also checks the
@@ -4392,6 +4426,76 @@ fn proposal_requires_acceptance() {
     assert!(
         world.diplomacy.find_pending(a, b).is_none(),
         "an unanswered proposal should expire rather than stay pending forever"
+    );
+}
+
+/// Playtest defect fix: an unanswered proposal used to expire for free - no
+/// cooldown at all - so `a` could immediately propose the exact same treaty
+/// to `b` again the instant it timed out, and again, forever. This is the
+/// mechanism behind "the same Ceasefire offered 30+ times over 120 days" -
+/// `HeuristicAgent::diplomacy_ai` re-evaluates "should I propose this" from
+/// scratch every `period` days with nothing to stop it from repeating an
+/// offer nobody ever answered.
+///
+/// Confirmed this can actually fail: temporarily reverted `tick_diplomacy`'s
+/// expiry loop to skip the `set_cooldown` call it now makes for each expired
+/// proposal, and re-ran - `cooldown(a, b, Ceasefire)` read back `0` and the
+/// immediate re-propose below succeeded, instead of being rejected. Reverted
+/// before committing.
+#[test]
+fn expired_proposal_spends_a_cooldown_before_it_can_be_repeated() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire }).unwrap();
+    assert_eq!(world.diplomacy.cooldown(a, b, Treaty::Ceasefire), 0, "sanity: no cooldown before the proposal expires");
+
+    // Nobody ever answers it - let it expire (PROPOSAL_TTL_DAYS == 3, so 5
+    // ticks is comfortably past that).
+    let mut events = Vec::new();
+    for _ in 0..5 {
+        diplomacy::tick_diplomacy(&mut world, &mut events);
+    }
+    assert!(world.diplomacy.find_pending(a, b).is_none(), "sanity: the proposal has expired");
+
+    assert!(
+        world.diplomacy.cooldown(a, b, Treaty::Ceasefire) > 0,
+        "an expired proposal must spend a real cooldown, not leave the pair free to re-propose immediately"
+    );
+    assert_eq!(
+        action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire }),
+        Err(ActionError::InvalidValue),
+        "re-proposing the identical treaty while its cooldown is still running must be rejected, exactly like \
+         re-proposing straight after a break/DeclareWar already is"
+    );
+}
+
+/// The same guard for an explicit answer: rejecting a proposal outright must
+/// spend the identical cooldown an expiry does (`reject`'s own doc) - a
+/// proposer can't get a *faster* retry by having the target explicitly say
+/// no than by simply being ignored.
+///
+/// Confirmed this can actually fail: temporarily reverted `diplomacy::reject`
+/// to skip its `set_cooldown` call and re-ran - the immediate re-propose
+/// below succeeded instead of being rejected. Reverted before committing.
+#[test]
+fn rejected_proposal_spends_a_cooldown_before_it_can_be_repeated() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let b = FactionId(1);
+
+    action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire }).unwrap();
+    action::apply_action(&mut world, b, Action::RejectTreaty { from: a, treaty: Treaty::Ceasefire }).unwrap();
+
+    assert!(
+        world.diplomacy.cooldown(a, b, Treaty::Ceasefire) > 0,
+        "an explicit rejection must spend a real cooldown before the same treaty can be re-proposed"
+    );
+    assert_eq!(
+        action::apply_action(&mut world, a, Action::ProposeTreaty { to: b, treaty: Treaty::Ceasefire }),
+        Err(ActionError::InvalidValue),
+        "re-proposing immediately after an explicit rejection must be refused while the cooldown is running"
     );
 }
 

@@ -218,6 +218,30 @@ fn interdict_line_action_round_trips_through_the_http_codec() {
     assert_eq!(status, 200, "the session must still be usable after both requests");
 }
 
+/// Playtest defect fix (smallest): `declare_war` against a faction already
+/// at war used to come back as the generic `"invalid_value"` - the same
+/// reason a self-targeted or nonexistent faction gets - telling a client
+/// nothing about *why*. `scenarios/mvp.json`'s factions start at
+/// unconditional war, so faction 0 and faction 1 are already at war with no
+/// setup needed.
+#[test]
+fn declare_war_on_an_existing_war_reports_a_specific_reason() {
+    let handle = start(Duration::from_secs(3600), Duration::from_secs(3600));
+    let reset_body = reset(handle.addr, 1, &[0]);
+    let session_id = reset_body.get("session_id").and_then(Value::as_str).unwrap().to_string();
+
+    let body = format!(r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"declare_war","to":1}}]}}"#);
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&body)));
+    assert_eq!(status, 200);
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(rejected.len(), 1, "{response:?}");
+    assert_eq!(
+        rejected[0].get("reason").and_then(Value::as_str),
+        Some("already_at_war"),
+        "declaring war on an existing war must name that specific situation, not \"invalid_value\": {rejected:?}"
+    );
+}
+
 /// Stage 10D: air-relevant actions must actually reach the simulation
 /// through the real HTTP/JSON codec, not just compile against
 /// `action_codec.rs` in isolation - `StrikeNode` landed in Stage 10C but this
@@ -474,6 +498,181 @@ fn action_for_uncontrolled_faction_is_refused() {
     assert!(response.get("accepted").and_then(Value::as_array).is_some_and(|a| !a.is_empty()), "{response:?}");
 }
 
+/// Playtest defect fix (the API used to be all-or-nothing per faction):
+/// a client that takes only `Layer::Economy` for faction 0 must have every
+/// other layer - `Layer::Military` above all - still driven by that
+/// faction's own built-in `Agent`, exactly like an entirely uncontrolled
+/// faction. Before this fix, `Session::advance_one_day` skipped a
+/// controlled faction's `Agent` *entirely*, so a faction driven only through
+/// its economy never moved a unit, never fought, and never took a casualty,
+/// no matter how long the run went on.
+///
+/// This test never submits a single `Layer::Military` action for faction 0 -
+/// the built-in `Agent` is the *only* thing that could possibly move its
+/// units - and plays 300 days of `scenarios/mvp.json`'s unconditional
+/// starting war (every faction already at war with every other, per
+/// `interdict_line_action_round_trips_through_the_http_codec`'s own doc), so
+/// combat has every opportunity to happen if faction 0's army is actually
+/// fighting.
+///
+/// Confirmed this can actually fail: temporarily changed `server::
+/// build_default_agents` to route zero AI layers whenever a faction has
+/// *any* controlled layer (the old all-or-nothing shape) and re-ran - a
+/// purely passive faction 0 still absorbs a little combat just by being
+/// attacked (`regions_before=4, regions_after=4, casualties=0.31`, measured
+/// directly), but the territorial-growth assertion below failed outright
+/// (`regions_after` never exceeded `regions_before`). That measurement is
+/// exactly why this test checks conquered territory, not casualties alone -
+/// see the assertion's own comment. Reverted before committing.
+#[test]
+fn partially_controlled_faction_still_has_its_military_driven_by_the_ai() {
+    let handle = start(Duration::from_secs(3600), Duration::from_secs(3600));
+    let reset_body_json = r#"{"seed":1,"controlled":[{"faction":0,"layers":["economy"]}]}"#;
+    let (status, reset_body) = json_body(request(handle.addr, "POST", "/reset", Some(reset_body_json)));
+    assert_eq!(status, 200, "{reset_body:?}");
+    let session_id = reset_body.get("session_id").and_then(Value::as_str).unwrap().to_string();
+
+    // The wire shape round-trips: /reset reports exactly one controlled
+    // layer for faction 0, and it's the one asked for.
+    let layers_0 = reset_body
+        .get("controlled_layers")
+        .and_then(|c| c.get("0"))
+        .and_then(Value::as_array)
+        .expect("controlled_layers.0 present");
+    assert_eq!(layers_0, &vec![Value::str("economy")], "{reset_body:?}");
+    assert_eq!(
+        reset_body.get("controlled").and_then(Value::as_array).map(|a| a.len()),
+        Some(1),
+        "faction 0 must still be listed in `controlled` (it does control at least one layer): {reset_body:?}"
+    );
+
+    let (_, state0) = state(handle.addr, &session_id);
+    let home_region = state0.get("regions").and_then(Value::as_array).unwrap()[0].get("id").unwrap().as_u64().unwrap();
+    let owned_regions = |body: &Value| -> usize {
+        body.get("regions")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("owner").and_then(Value::as_u64) == Some(0))
+            .count()
+    };
+    let regions_before = owned_regions(&state0);
+
+    // A Layer::Military action must be rejected as out-of-scope - not
+    // silently accepted, and not the whole-faction 403
+    // `action_for_uncontrolled_faction_is_refused` covers (faction 0 *does*
+    // control something here, just not this layer).
+    let military_body = format!(
+        r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"recruit_unit","region":{home_region},"domain":"land"}}]}}"#
+    );
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&military_body)));
+    assert_eq!(status, 200, "an out-of-scope layer must be reported in rejected[], not a hard failure: {response:?}");
+    let rejected = response.get("rejected").and_then(Value::as_array).expect("rejected[] present");
+    assert_eq!(rejected.len(), 1, "{response:?}");
+    assert!(
+        rejected[0].get("reason").and_then(Value::as_str).is_some_and(|r| r.contains("layer")),
+        "the rejection reason should name the layer problem: {rejected:?}"
+    );
+
+    // An Economy action, by contrast, must still be accepted directly.
+    let economy_body =
+        format!(r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"set_conscription","value":0.4}}]}}"#);
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&economy_body)));
+    assert_eq!(status, 200, "{response:?}");
+    assert!(response.get("accepted").and_then(Value::as_array).is_some_and(|a| !a.is_empty()), "{response:?}");
+
+    // Never another /action call for faction 0 from here on - Military,
+    // Diplomacy and GrandStrategy are entirely the built-in Agent's.
+    const DAYS: u32 = 300;
+    let (status, _) = step(handle.addr, &session_id, DAYS);
+    assert_eq!(status, 200);
+
+    let (status, state_body) = state(handle.addr, &session_id);
+    assert_eq!(status, 200);
+    let faction0 = &state_body.get("factions").and_then(Value::as_array).unwrap()[0];
+    let casualties = faction0.get("casualties").and_then(Value::as_f64).unwrap_or(0.0);
+    let regions_after = owned_regions(&state_body);
+
+    // A purely *passive* defender - one whose own Agent never issues a
+    // single order, because nothing routes to it at all - can still take
+    // some casualties from being attacked (combat resolves off unit
+    // position, not off whether the owner acted today), but it can never
+    // gain territory: capturing a region requires actively marching a unit
+    // into it, which only `offensive()`/`advance_interior` (`Layer::
+    // Military`) ever do. So territorial growth is the decisive signal here,
+    // not casualties alone - measured directly: under the old all-or-nothing
+    // bug (reproduced by temporarily routing zero AI layers whenever a
+    // faction has *any* controlled layer), this exact setup plateaus at
+    // regions_before=4/regions_after=4 and casualties=0.31 by day 300; with
+    // the fix, regions_after reaches 7 and casualties reach 5.6. Reverted
+    // before committing.
+    assert!(
+        regions_after > regions_before,
+        "faction 0's own built-in Agent must still be free to conquer territory over {DAYS} days even though the \
+         client only ever controls Layer::Economy and never issued a single military order - a purely passive \
+         defender never gains territory: regions_before={regions_before}, regions_after={regions_after}"
+    );
+    assert!(
+        casualties > 1.0,
+        "faction 0's own built-in Agent must still be fighting an active war, not just absorbing the occasional \
+         defensive skirmish a passive faction takes for free: casualties={casualties}"
+    );
+}
+
+/// Playtest defect fix ("/reset's scenario field lies"): `POST /reset`'s
+/// `scenario` field must be checked against whatever this server actually
+/// loaded (`session::SessionManager::scenario_id`), not two hardcoded
+/// literals - passing the server's real loaded identity must succeed, and
+/// passing a name that merely *looks* plausible (the old `"mvp"` literal)
+/// while a different scenario is running must be rejected outright, never
+/// silently reset the caller onto whatever's actually loaded.
+///
+/// Confirmed this can actually fail: temporarily restored `handle_reset`'s
+/// old two-literal check (`scenario_name != "default" && scenario_name !=
+/// "mvp"`) and re-ran - the first `POST /reset` below (naming the server's
+/// real identity, `"totally_custom_id"`) came back `400` instead of `200`.
+/// Reverted before committing.
+#[test]
+fn reset_scenario_field_is_honest_not_silently_substituted() {
+    let scenario = archipelago_sim::scenario::build_world();
+    let handle = server::serve_background_with_scenario(
+        "127.0.0.1:0",
+        Duration::from_secs(3600),
+        Duration::from_secs(3600),
+        scenario,
+        "totally_custom_id".to_string(),
+    )
+    .expect("bind ephemeral port");
+
+    // GET /schema must expose the real identity, so a client has something
+    // honest to discover and pass back.
+    let (status, schema) = json_body(request(handle.addr, "GET", "/schema", None));
+    assert_eq!(status, 200);
+    assert_eq!(
+        schema.get("scenario").and_then(|s| s.get("id")).and_then(Value::as_str),
+        Some("totally_custom_id"),
+        "{schema:?}"
+    );
+
+    // Naming the real, actually-loaded scenario must succeed.
+    let (status, body) =
+        json_body(request(handle.addr, "POST", "/reset", Some(r#"{"seed":1,"scenario":"totally_custom_id"}"#)));
+    assert_eq!(status, 200, "{body:?}");
+
+    // Naming a plausible-but-wrong literal must be rejected outright, not
+    // silently reset the caller onto the scenario that's actually running.
+    let (status, body) = json_body(request(handle.addr, "POST", "/reset", Some(r#"{"seed":1,"scenario":"mvp"}"#)));
+    assert_eq!(status, 400, "\"mvp\" must be refused, not silently substituted, while a different scenario is running: {body:?}");
+    assert!(
+        body.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("totally_custom_id")),
+        "the rejection should name the scenario that's actually loaded: {body:?}"
+    );
+
+    // Omitting the field entirely must still work, exactly as before.
+    let (status, body) = json_body(request(handle.addr, "POST", "/reset", Some(r#"{"seed":1}"#)));
+    assert_eq!(status, 200, "{body:?}");
+}
+
 /// A2: `Value::as_u64`/`as_u32` must not silently truncate a non-integer
 /// number - `{"seed":1.9}` is not "close enough" to `1`, it's a materially
 /// different request than the caller asked for. Exercises the three wire
@@ -538,7 +737,7 @@ fn lagging_watcher_drops_events_not_connection() {
     let sim = archipelago_sim::sim::Simulation::new(1);
     let agents: Vec<Box<dyn archipelago_sim::agent::Agent + Send>> =
         (0..sim.world.factions.len()).map(|i| Box::new(archipelago_agents::default_heuristic_agent(i)) as _).collect();
-    let session_id = manager.create(sim, agents, Vec::new(), 1, 720);
+    let session_id = manager.create(sim, agents, crate::session::ControlledLayers::new(), 1, 720);
 
     // Subscribe, but never drain the receiver - its bounded channel fills
     // up from ordinary `/step` event traffic.

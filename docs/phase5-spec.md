@@ -67,6 +67,17 @@ pub struct Session {
 - `SESSION_IDLE_TIMEOUT` を過ぎたセッションは破棄する。
   さもなくば長時間動かすサーバがメモリを食い潰す
 
+**プレイテスト欠陥修正（`Layer` 単位の制御）**: 上の `controlled: Vec<FactionId>`
+は「勢力を丸ごと制御するか、しないか」の二択しか表現できず、経済だけ動かし
+たいクライアントが軍事もまとめて止めてしまう欠陥があった（`Session::
+advance_one_day` が controlled 勢力の内蔵 `Agent` を丸ごとスキップしていた
+ため）。`crates/api/src/session.rs` の実装は現在 `controlled: BTreeMap<
+FactionId, BTreeSet<Layer>>` を持ち、`POST /reset` の `controlled` 配列は
+整数（従来どおり全レイヤー制御）と `{"faction":<id>,"layers":[...]}`（指定
+レイヤーのみ制御、残りは内蔵 `CompositeAgent`（§18 で導入済みの `Layer` 分割
+routing）が担う）の両方を受け付ける。`GET /schema` の `reset`/`objects.
+controlled_entry` にワイヤ形式を記載する。
+
 ### 決定論の保証
 
 **同じ seed と同じ行動列なら、API 経由でも headless と完全に同じ結果になること。**

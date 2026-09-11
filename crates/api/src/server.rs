@@ -2,12 +2,15 @@
 //! turns one HTTP (or WebSocket-upgrade) request into a `Response` against
 //! a `SessionManager`, with every endpoint from the spec's table.
 
+use std::collections::BTreeSet;
 use std::io::BufReader;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use archipelago_agents::CompositeAgent;
+use archipelago_sim::action::{Layer, ALL_LAYERS};
 use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::{
@@ -21,7 +24,7 @@ use crate::action_codec::{self, MAX_ACTIONS_PER_REQUEST};
 use crate::http::{self, ReadError, Request, Response};
 use crate::json::Value;
 use crate::reward::RewardBasis;
-use crate::session::{Session, SessionManager, DEFAULT_MAX_DAYS};
+use crate::session::{ControlledLayers, Session, SessionManager, DEFAULT_MAX_DAYS};
 use crate::state;
 use crate::ws;
 
@@ -52,14 +55,33 @@ pub fn serve_background(bind_addr: &str, idle_timeout: Duration, sweep_interval:
 /// the embedded default - Stage 6A `archipelago-api --scenario <path>`
 /// (docs/phase6-spec.md "Stage 6A"). `scenario` must already be loaded and
 /// validated (`archipelago_sim::scenario::load_file`) - this never falls
-/// back to the default on its own.
+/// back to the default on its own. `scenario_id` is `scenario`'s real
+/// identity (`bin/main.rs`'s `scenario_stem` of the `--scenario` path) -
+/// `POST /reset`'s own `scenario` field is checked against exactly this, not
+/// a fixed literal (`session::SessionManager::scenario_id`'s own doc).
+///
+/// **`codex review` raises the added parameter as a breaking change to an
+/// exported API and asks for a four-argument compatibility wrapper; declined,
+/// and recorded here so it is not re-litigated.** `archipelago-api` is not
+/// published (`version.workspace`, no registry release), and every caller is
+/// inside this workspace - `bin/main.rs` and `tests.rs`, both updated. A
+/// wrapper would buy compatibility for consumers that do not exist, at the
+/// price of a second entry point that can silently drift from this one. That
+/// is the shape CLAUDE.md records this project hitting repeatedly (one name
+/// meaning two things; the same lookup answered in two places); the
+/// compiler's refusal is the point, not a cost.
 pub fn serve_background_with_scenario(
     bind_addr: &str,
     idle_timeout: Duration,
     sweep_interval: Duration,
     scenario: archipelago_sim::world::World,
+    scenario_id: String,
 ) -> std::io::Result<ServerHandle> {
-    serve_background_with_manager(bind_addr, SessionManager::with_scenario(idle_timeout, scenario), sweep_interval)
+    serve_background_with_manager(
+        bind_addr,
+        SessionManager::with_scenario(idle_timeout, scenario, scenario_id),
+        sweep_interval,
+    )
 }
 
 fn serve_background_with_manager(bind_addr: &str, manager: Arc<SessionManager>, sweep_interval: Duration) -> std::io::Result<ServerHandle> {
@@ -242,6 +264,12 @@ fn handle_schema(manager: &SessionManager) -> Value {
         ),
     ]);
     let scenario_value = Value::obj(vec![
+        // Playtest defect fix: the scenario's real identity, so a client can
+        // discover the exact string `POST /reset`'s own `scenario` field
+        // will actually accept for this server, rather than guessing at
+        // literals that might silently be substituted for something else
+        // (`session::SessionManager::scenario_id`'s own doc).
+        ("id", Value::str(manager.scenario_id.clone())),
         ("faction_count", Value::num(faction_count as f64)),
         ("region_count", Value::num(region_count as f64)),
         ("sea_zone_count", Value::num(sea_zone_count as f64)),
@@ -258,9 +286,33 @@ fn handle_schema(manager: &SessionManager) -> Value {
     Value::Object(merged)
 }
 
-fn build_default_agents(manager: &SessionManager) -> Vec<Box<dyn Agent + Send>> {
+/// Builds one `Agent` per faction, each already scoped to exactly the
+/// `Layer`s this session's client does *not* claim for it - see
+/// `session::Session::agents`'s own doc for why this is where the whole
+/// per-layer-control defect fix actually lives. A faction absent from
+/// `controlled` (or mapped to an empty set) gets every `Layer` routed to its
+/// `HeuristicAgent`, byte-identical to the old "one plain agent per faction"
+/// construction (`api_run_matches_headless` pins this); a faction mapped to
+/// every `Layer` gets a zero-route `CompositeAgent` that never even
+/// constructs a `HeuristicAgent` for it (`decide()` always returns nothing) -
+/// today's exact "fully client-controlled" behavior, just no longer expressed
+/// as a special case in `Session::advance_one_day` itself.
+fn build_default_agents(manager: &SessionManager, controlled: &ControlledLayers) -> Vec<Box<dyn Agent + Send>> {
     (0..faction_count(manager))
-        .map(|i| Box::new(archipelago_agents::default_heuristic_agent(i)) as Box<dyn Agent + Send>)
+        .map(|i| {
+            let faction = FactionId(i as u32);
+            let claimed = controlled.get(&faction);
+            let ai_layers: Vec<Layer> =
+                ALL_LAYERS.into_iter().filter(|l| !claimed.is_some_and(|c| c.contains(l))).collect();
+            let mut composite = CompositeAgent::new(faction);
+            if !ai_layers.is_empty() {
+                composite = composite.route(
+                    ai_layers,
+                    Box::new(archipelago_agents::default_heuristic_agent(i)) as Box<dyn Agent + Send + Sync>,
+                );
+            }
+            Box::new(composite) as Box<dyn Agent + Send>
+        })
         .collect()
 }
 
@@ -272,11 +324,26 @@ fn handle_reset(request: &Request, manager: &SessionManager) -> Response {
     let Some(seed) = body.get("seed").and_then(Value::as_u64) else {
         return Response::error(400, "`seed` must be a non-negative integer");
     };
-    if let Some(scenario_name) = body.get("scenario").and_then(Value::as_str)
-        && scenario_name != "default"
-        && scenario_name != "mvp"
-    {
-        return Response::error(400, "unknown scenario (only the default MVP map exists)");
+    // Playtest defect fix: this used to accept only the two literals
+    // "default"/"mvp" regardless of what the server actually loaded via
+    // `--scenario <path>` - so the real running scenario's own name was
+    // rejected, and "mvp" against a different loaded scenario silently
+    // reset to that scenario instead of the one asked for. Checked against
+    // `manager.scenario_id` (the real loaded identity) instead - "default"
+    // survives only as a legacy alias for the embedded scenario specifically
+    // (`scenario_id == "mvp"`), never a stand-in for whatever else might be
+    // running (docs/conventions.md §3: no silent substitution).
+    if let Some(scenario_name) = body.get("scenario").and_then(Value::as_str) {
+        let is_default_alias = scenario_name == "default" && manager.scenario_id == "mvp";
+        if scenario_name != manager.scenario_id && !is_default_alias {
+            return Response::error(
+                400,
+                &format!(
+                    "unknown scenario `{scenario_name}` - this server is running `{}` (see GET /schema's scenario.id)",
+                    manager.scenario_id
+                ),
+            );
+        }
     }
     let max_days = match body.get("max_days") {
         Some(v) => match v.as_u32() {
@@ -297,46 +364,91 @@ fn handle_reset(request: &Request, manager: &SessionManager) -> Response {
     // so the whole server (not just this one session) runs the map it was
     // actually launched with.
     let sim = Simulation::with_world(manager.scenario.clone(), seed);
-    let agents = build_default_agents(manager);
-    let session_id = manager.create(sim, agents, controlled.clone(), seed, max_days);
+    let agents = build_default_agents(manager, &controlled);
+    let session_id = manager.create(sim, agents, controlled, seed, max_days);
 
     manager
         .with_session(&session_id, |session| reset_response(session, &session_id))
         .unwrap_or_else(|| Response::error(500, "session vanished immediately after creation"))
 }
 
-/// Reads an optional `controlled` array of faction ids out of a `/reset`
-/// body - docs/phase5-spec.md's own JSON sketch omits this field, but the
-/// `Session` shape it specifies right below ("controlled に含まれない勢力
-/// は内蔵 AI が動かす") has no other way to be populated from the wire, so
-/// `/reset` accepts it as an optional extension: omitted or `[]` means
-/// every faction is AI-driven (the configuration `api_run_matches_headless`
-/// exercises, since it must reproduce a plain headless run exactly).
-fn parse_controlled(body: &Value, manager: &SessionManager) -> Result<Vec<FactionId>, Response> {
+/// Reads an optional `controlled` array out of a `/reset` body -
+/// docs/phase5-spec.md's own JSON sketch omits this field, but the `Session`
+/// shape it specifies right below ("controlled に含まれない勢力は内蔵 AI が
+/// 動かす") has no other way to be populated from the wire, so `/reset`
+/// accepts it as an optional extension: omitted or `[]` means every faction
+/// is AI-driven (the configuration `api_run_matches_headless` exercises,
+/// since it must reproduce a plain headless run exactly).
+///
+/// Playtest defect fix (per-layer control): each entry is now *either* a
+/// plain integer faction id - full control of every `Layer`, exactly what
+/// this field always meant before, so every existing caller keeps working
+/// unchanged - *or* an object `{"faction":<id>,"layers":[<layer key>,...]}`
+/// naming only the `Layer`s (from `enums.layer` in `GET /schema`) this
+/// session's client takes for that faction; every other `Layer` for that
+/// faction is then decided by its own built-in `Agent`
+/// (`build_default_agents`). A faction named more than once (in either
+/// shape, or a mix) has its claimed layers unioned across every entry naming
+/// it, rather than one entry silently overriding another.
+fn parse_controlled(body: &Value, manager: &SessionManager) -> Result<ControlledLayers, Response> {
     let Some(v) = body.get("controlled") else {
-        return Ok(Vec::new());
+        return Ok(ControlledLayers::new());
     };
     let Some(items) = v.as_array() else {
-        return Err(Response::error(400, "`controlled` must be an array of faction ids"));
+        return Err(Response::error(
+            400,
+            "`controlled` must be an array of faction ids or {\"faction\":<id>,\"layers\":[...]} objects",
+        ));
     };
-    let mut out = Vec::with_capacity(items.len());
+    let mut out = ControlledLayers::new();
     for item in items {
-        let Some(id) = item.as_u32() else {
-            return Err(Response::error(400, "`controlled` entries must be non-negative integers"));
+        let (fid, layers): (FactionId, BTreeSet<Layer>) = if let Some(id) = item.as_u32() {
+            (FactionId(id), ALL_LAYERS.into_iter().collect())
+        } else if item.get("faction").is_some() || item.get("layers").is_some() {
+            let Some(id) = item.get("faction").and_then(Value::as_u32) else {
+                return Err(Response::error(400, "`controlled` object entries need an integer `faction`"));
+            };
+            let Some(layer_items) = item.get("layers").and_then(Value::as_array) else {
+                return Err(Response::error(400, "`controlled` object entries need an array `layers`"));
+            };
+            if layer_items.is_empty() {
+                return Err(Response::error(
+                    400,
+                    "`controlled` entry's `layers` must not be empty - omit the faction instead of naming zero layers",
+                ));
+            }
+            let mut set = BTreeSet::new();
+            for lv in layer_items {
+                let Some(key) = lv.as_str() else {
+                    return Err(Response::error(400, "`layers` entries must be strings"));
+                };
+                match action_codec::layer_from_key(key) {
+                    Ok(layer) => {
+                        set.insert(layer);
+                    }
+                    Err(reason) => return Err(Response::error(400, &reason)),
+                }
+            }
+            (FactionId(id), set)
+        } else {
+            return Err(Response::error(
+                400,
+                "`controlled` entries must be a non-negative integer or {\"faction\":<id>,\"layers\":[...]}",
+            ));
         };
-        if id as usize >= faction_count(manager) {
+        if fid.0 as usize >= faction_count(manager) {
             return Err(Response::error(400, "`controlled` names an unknown faction"));
         }
-        let fid = FactionId(id);
-        if !out.contains(&fid) {
-            out.push(fid);
-        }
+        out.entry(fid).or_default().extend(layers);
     }
     Ok(out)
 }
 
 fn observations_value(session: &Session) -> Value {
-    let factions: Vec<FactionId> = if session.controlled.is_empty() { vec![FactionId(0)] } else { session.controlled.clone() };
+    let factions: Vec<FactionId> = {
+        let controlled = session.controlled_factions();
+        if controlled.is_empty() { vec![FactionId(0)] } else { controlled }
+    };
     Value::Object(
         factions
             .into_iter()
@@ -372,12 +484,31 @@ fn outcome_value(outcome: &Outcome, session: &Session) -> Value {
     }
 }
 
+/// Per controlled faction, the `Layer`s this session's client claims for it -
+/// `/reset`'s own round-trip of the per-layer-control wire shape
+/// `parse_controlled` reads (see that function's own doc), so a client can
+/// confirm exactly what it got back. `handle_sessions` builds the identical
+/// view for `GET /sessions`.
+fn controlled_layers_value(session: &Session) -> Value {
+    Value::Object(
+        session
+            .controlled_factions()
+            .into_iter()
+            .map(|f| {
+                let layers = session.controlled_layers(f);
+                (f.0.to_string(), Value::arr(layers.into_iter().map(|l| Value::str(l.key())).collect()))
+            })
+            .collect(),
+    )
+}
+
 fn reset_response(session: &Session, session_id: &str) -> Response {
     let body = Value::obj(vec![
         ("session_id", Value::str(session_id)),
         ("seed", Value::num(session.seed as f64)),
         ("day", Value::num(session.sim.world.day as f64)),
-        ("controlled", Value::arr(session.controlled.iter().map(|f| Value::num(f.0 as f64)).collect())),
+        ("controlled", Value::arr(session.controlled_factions().iter().map(|f| Value::num(f.0 as f64)).collect())),
+        ("controlled_layers", controlled_layers_value(session)),
         ("observations", observations_value(session)),
     ]);
     Response::json(200, &body)
@@ -444,7 +575,15 @@ fn handle_action(request: &Request, manager: &SessionManager) -> Response {
         // training (an agent that can move its opponents around isn't
         // learning to play the game), so this is rejected outright rather
         // than merely rejected-with-a-reason like a normal invalid `Action`.
-        if !session.is_controlled(faction) {
+        //
+        // Per-layer control (playtest defect fix): a faction with *some*
+        // controlled `Layer`s but not this action's is not puppeting - the
+        // client legitimately owns nothing there, exactly like an entirely
+        // uncontrolled faction - but it also isn't the "wrong faction
+        // entirely" shape the 403 above guards against, so it's reported
+        // per-action in `rejected[]` instead of failing the whole batch.
+        let layers = session.controlled_layers(faction);
+        if layers.is_empty() {
             return Response::error(403, "faction is not controlled by this session");
         }
         let mut accepted = Vec::new();
@@ -452,6 +591,16 @@ fn handle_action(request: &Request, manager: &SessionManager) -> Response {
         for (index, raw) in actions.iter().enumerate() {
             match action_codec::action_from_value(raw) {
                 Ok(action) => {
+                    if !layers.contains(&action.layer()) {
+                        rejected.push(action_codec::rejected_value(
+                            index,
+                            &format!(
+                                "faction {faction_num} does not control layer `{}` in this session",
+                                action.layer().key()
+                            ),
+                        ));
+                        continue;
+                    }
                     let errors = session.sim.apply(faction, std::slice::from_ref(&action));
                     match errors.into_iter().next() {
                         None => accepted.push(Value::num(index as f64)),
@@ -485,7 +634,11 @@ fn handle_step(request: &Request, manager: &SessionManager) -> Response {
     };
 
     let result = manager.with_session(session_id, |session| {
-        let primary = session.controlled.first().copied().unwrap_or(FactionId(0));
+        // The reward basis's "primary" faction: the smallest `FactionId`
+        // with at least one controlled layer (`BTreeMap`'s own ascending
+        // iteration order - deterministic, docs/conventions.md §5), or
+        // faction 0 if nothing is controlled at all.
+        let primary = session.controlled_factions().first().copied().unwrap_or(FactionId(0));
         let before = RewardBasis::snapshot(&session.sim.world, primary);
         let mut per_day_events = Vec::new();
         for _ in 0..steps {
@@ -529,6 +682,17 @@ fn handle_sessions(manager: &SessionManager) -> Response {
                 ("session_id", Value::str(s.id)),
                 ("day", Value::num(s.day as f64)),
                 ("controlled", Value::arr(s.controlled.into_iter().map(|f| Value::num(f as f64)).collect())),
+                (
+                    "controlled_layers",
+                    Value::Object(
+                        s.controlled_layers
+                            .into_iter()
+                            .map(|(f, layers)| {
+                                (f.to_string(), Value::arr(layers.into_iter().map(|l| Value::str(l.key())).collect()))
+                            })
+                            .collect(),
+                    ),
+                ),
                 ("age_secs", Value::num(s.age_secs)),
                 ("idle_secs", Value::num(s.idle_secs)),
                 (

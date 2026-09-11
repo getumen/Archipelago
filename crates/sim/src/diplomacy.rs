@@ -31,6 +31,15 @@
 //! - `NonAggression`'s notice period is a real countdown
 //!   (`PendingBreak::days_left`, ticked down once per day), not a flag
 //!   re-checked against a shrinking remainder.
+//! - A proposal that stops being outstanding *without* becoming a treaty -
+//!   an explicit `RejectTreaty` (`reject`) or an unanswered `PendingProposal`
+//!   timing out (`tick_diplomacy`) - spends the same `TREATY_COOLDOWN_DAYS`
+//!   breaking a treaty does. Playtest defect fix: before this, neither path
+//!   spent anything, so a `HeuristicAgent`'s own proactive proposal loop
+//!   (`archipelago-agents`' `diplomacy_ai`, re-evaluated from scratch every
+//!   `period` days) re-offered the identical treaty to an uninterested
+//!   target every time its turn came back around, unbounded - one playtest
+//!   saw the same `Ceasefire` offered 30+ times in 120 days.
 
 use crate::balance::{
     ALLIANCE_BREAK_OPINION_PENALTY, DECLARE_WAR_OPINION_PENALTY, FOCUS_ALLIANCE_OPINION_RECOVERY_MULT,
@@ -501,7 +510,22 @@ pub(crate) fn accept(world: &mut World, a: FactionId, b: FactionId, treaty: Trea
     world.diplomacy.log.push(Event::TreatySigned { a, b, treaty });
 }
 
+/// Playtest defect fix: an explicit rejection used to spend no cooldown at
+/// all, unlike every other way a proposal stops being outstanding (`accept`
+/// clears it by making the treaty active, which `apply_propose_treaty`'s own
+/// `has_treaty` check then blocks re-proposing; `break_treaty`/`declare_war`
+/// spend a real `TREATY_COOLDOWN_DAYS`). With nothing gating a rejected
+/// proposal, a `HeuristicAgent`'s `diplomacy_ai` - which re-evaluates
+/// "should I propose this" from scratch every `period` days - reproposes the
+/// identical treaty the moment its own turn comes around again, forever: one
+/// playtest saw the same `Ceasefire` offered 30+ times over 120 days.
+/// Spending `TREATY_COOLDOWN_DAYS` here closes that off the same way it
+/// already closes off the break/reform/break cycle, and matches this
+/// module's own doc, which already claimed (before this fix, incorrectly)
+/// that re-proposing after an answer "costs nothing beyond the normal
+/// cooldown ... rules."
 pub(crate) fn reject(world: &mut World, from: FactionId, to: FactionId, treaty: Treaty) {
+    world.diplomacy.set_cooldown(from, to, treaty, TREATY_COOLDOWN_DAYS);
     world.diplomacy.log.push(Event::TreatyRejected { from, to, treaty });
 }
 
@@ -787,9 +811,23 @@ pub fn tick_diplomacy(world: &mut World, events: &mut Vec<Event>) {
     // call before it can expire, giving every faction's turn a fair chance
     // to see and answer it via `Observation`, regardless of iteration order
     // within the day it was made.
+    //
+    // Playtest defect fix: an unanswered proposal that simply times out must
+    // spend the same `TREATY_COOLDOWN_DAYS` an explicit `RejectTreaty` now
+    // does (`reject`'s own doc) - otherwise a recipient too slow (or too
+    // uninterested) to ever act on it is a *cheaper* way to dodge the
+    // cooldown than answering "no" outright, and `diplomacy_ai`'s proactive
+    // proposal loop reproposes it again the moment its own next turn comes
+    // around. Mirrors the `expired_nl`/`set_nl_cooldown` handling just below
+    // for natural-language proposals, which already got this right.
+    let expired: Vec<(FactionId, FactionId, Treaty)> =
+        world.diplomacy.pending.iter().filter(|p| p.ttl == 0).map(|p| (p.from, p.to, p.treaty)).collect();
     world.diplomacy.pending.retain(|p| p.ttl > 0);
     for p in world.diplomacy.pending.iter_mut() {
         p.ttl -= 1;
+    }
+    for (from, to, treaty) in expired {
+        world.diplomacy.set_cooldown(from, to, treaty, TREATY_COOLDOWN_DAYS);
     }
 
     // Stage 4B: the same expiry shape as `pending` above, but an expired

@@ -4,17 +4,24 @@
 //! reclaims ones nobody has touched in a while so a long-running server
 //! doesn't grow without bound).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use archipelago_sim::action::Layer;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
 use archipelago_sim::world::World;
+
+/// Per faction, the set of `Layer`s this session's API client controls
+/// directly through `POST /action` - see `Session::controlled`'s own doc for
+/// the defect this replaces and `server::parse_controlled` for the wire
+/// shape a `/reset` request uses to populate it.
+pub type ControlledLayers = BTreeMap<FactionId, BTreeSet<Layer>>;
 
 /// `Simulation::outcome`'s day horizon for a session that doesn't override
 /// it - matches `apps/headless`'s own `Args::default().days` so an
@@ -32,14 +39,32 @@ const WATCH_CHANNEL_CAPACITY: usize = 256;
 pub struct Session {
     pub id: String,
     pub sim: Simulation,
-    /// One `Agent` per faction, in faction-id order. Only ever consulted
-    /// for factions *not* in `controlled` - kept for every faction anyway
-    /// (rather than a sparse map) so indices line up directly with
-    /// `FactionId::index()`. Persisted across ticks (not rebuilt per
-    /// `/step` call) because `HeuristicAgent` carries its own
-    /// cross-tick state (`focus_initialized`) that must not be reset.
+    /// One `Agent` per faction, in faction-id order - always consulted, for
+    /// every living faction, every day (`advance_one_day`). What each one
+    /// actually decides depends entirely on `controlled`: a faction with no
+    /// controlled `Layer`s gets a plain `archipelago_agents::
+    /// default_heuristic_agent`-equivalent that owns every layer (byte-
+    /// identical to a headless run, `api_run_matches_headless`); a partially
+    /// or fully controlled faction gets an `archipelago_agents::
+    /// CompositeAgent` routed to exactly the `Layer`s this session's client
+    /// does *not* claim for it (see `server::build_default_agents`) - so a
+    /// client that takes only `Layer::Economy` still has its army fought by
+    /// the built-in AI, closing the defect where a partially-driven faction
+    /// used to do nothing at all outside what the client itself submitted.
+    /// Persisted across ticks (not rebuilt per `/step` call) because
+    /// `HeuristicAgent` carries its own cross-tick state
+    /// (`focus_initialized`) that must not be reset.
     pub agents: Vec<Box<dyn Agent + Send>>,
-    pub controlled: Vec<FactionId>,
+    /// Per faction, the `Layer`s this session's API client controls directly
+    /// through `POST /action` - every other `Layer` for that faction is
+    /// decided by `agents[faction]`'s own built-in `Agent`. A faction absent
+    /// from this map (or mapped to an empty set) is entirely AI-driven,
+    /// exactly as `controlled` always meant before per-layer control
+    /// existed; a faction mapped to every `Layer`
+    /// (`archipelago_sim::action::ALL_LAYERS`) is "whole-faction control",
+    /// today's exact prior behavior. Set once at `/reset` and never mutated
+    /// afterward - see `server::parse_controlled` for the wire shape.
+    controlled: ControlledLayers,
     pub seed: u64,
     pub max_days: u32,
     pub created: Instant,
@@ -48,8 +73,24 @@ pub struct Session {
 }
 
 impl Session {
+    /// Every faction with at least one controlled `Layer`, in ascending
+    /// `FactionId` order (`BTreeMap`'s own iteration order - deterministic,
+    /// docs/conventions.md §5).
+    pub fn controlled_factions(&self) -> Vec<FactionId> {
+        self.controlled.keys().copied().collect()
+    }
+
+    /// The `Layer`s this session's client controls for `faction` - empty if
+    /// `faction` isn't controlled at all.
+    pub fn controlled_layers(&self, faction: FactionId) -> BTreeSet<Layer> {
+        self.controlled.get(&faction).cloned().unwrap_or_default()
+    }
+
+    /// Whether `faction` has at least one controlled `Layer` - `true` for
+    /// both whole- and partial-faction control, `false` only when this
+    /// session's client claims nothing for it at all.
     pub fn is_controlled(&self, faction: FactionId) -> bool {
-        self.controlled.contains(&faction)
+        self.controlled.get(&faction).is_some_and(|layers| !layers.is_empty())
     }
 
     pub fn outcome(&self) -> Outcome {
@@ -60,20 +101,23 @@ impl Session {
         self.last_touched = Instant::now();
     }
 
-    /// Advances one simulated day: every uncontrolled, living faction acts
-    /// through its persisted `Agent` (in ascending `FactionId` order,
-    /// exactly `apps/headless`'s own per-day loop) and its actions are
-    /// applied via `Simulation::apply` before `Simulation::step` runs -
-    /// controlled factions get whatever they already submitted via
-    /// `/action` since the last `/step` call (nothing, if they submitted
-    /// nothing this day - a legitimate no-op, not an error).
+    /// Advances one simulated day: every living faction's persisted `Agent`
+    /// decides (in ascending `FactionId` order, exactly `apps/headless`'s
+    /// own per-day loop) and its output is applied via `Simulation::apply`
+    /// before `Simulation::step` runs. Which layers that `Agent` actually
+    /// speaks for - none, some, or all of a faction's decisions - was fixed
+    /// once at session creation by `controlled` (see `agents`'s own doc);
+    /// this loop no longer branches on `controlled` itself; a fully client-
+    /// controlled faction's `Agent` is a zero-route `CompositeAgent` that
+    /// always decides nothing, so applying its empty output is a no-op
+    /// exactly like the old `continue`-on-controlled skip was.
     pub fn advance_one_day(&mut self) -> Vec<archipelago_sim::event::Event> {
         let n = self.sim.world.factions.len();
         for idx in 0..n {
-            let faction = FactionId(idx as u32);
-            if !self.sim.world.factions[idx].alive || self.is_controlled(faction) {
+            if !self.sim.world.factions[idx].alive {
                 continue;
             }
+            let faction = FactionId(idx as u32);
             let obs = Observation { faction, world: &self.sim.world };
             let actions = self.agents[idx].decide(&obs);
             self.sim.apply(faction, &actions);
@@ -139,22 +183,42 @@ pub struct SessionManager {
     /// observation length/layout always matches whatever map is actually
     /// loaded, not a scenario-agnostic compile-time constant.
     pub scenario: World,
+    /// Playtest defect fix: the real identity of `scenario` - `"mvp"` for
+    /// the embedded default, or the `--scenario <path>` file's stem
+    /// (`bin/main.rs`'s `scenario_stem`, e.g. `"japan_hex"` for
+    /// `scenarios/japan_hex.json`) otherwise. `POST /reset`'s optional
+    /// `scenario` field is checked against this (`server::handle_reset`)
+    /// instead of the two hardcoded literals `"default"`/`"mvp"` it used to
+    /// accept regardless of what the server actually loaded - which meant a
+    /// client that correctly named the real running scenario got rejected,
+    /// while a client that happened to pass `"mvp"` against a server running
+    /// something else got silently handed that something else instead
+    /// (docs/conventions.md §3's "no silent substitution").
+    pub scenario_id: String,
 }
 
 impl SessionManager {
-    /// `SessionManager::with_scenario` on the embedded default scenario -
-    /// unchanged since before Stage 6A, so every existing caller (this
-    /// crate's own tests included) keeps compiling and behaving exactly as
-    /// before.
+    /// `SessionManager::with_scenario` on the embedded default scenario,
+    /// identified as `"mvp"` - unchanged since before Stage 6A, so every
+    /// existing caller (this crate's own tests included) keeps compiling and
+    /// behaving exactly as before.
     pub fn new(idle_timeout: Duration) -> Arc<Self> {
-        SessionManager::with_scenario(idle_timeout, archipelago_sim::scenario::build_world())
+        SessionManager::with_scenario(idle_timeout, archipelago_sim::scenario::build_world(), "mvp".to_string())
     }
 
     /// Builds a `SessionManager` whose sessions all start from `scenario`
     /// (already loaded and validated by the caller - `archipelago-api`'s
-    /// `--scenario <path>`, via `archipelago_sim::scenario::load_file`).
-    pub fn with_scenario(idle_timeout: Duration, scenario: World) -> Arc<Self> {
-        Arc::new(SessionManager { sessions: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1), idle_timeout, scenario })
+    /// `--scenario <path>`, via `archipelago_sim::scenario::load_file`),
+    /// identified to `POST /reset`'s own `scenario` field check as
+    /// `scenario_id` (see that field's own doc).
+    pub fn with_scenario(idle_timeout: Duration, scenario: World, scenario_id: String) -> Arc<Self> {
+        Arc::new(SessionManager {
+            sessions: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            idle_timeout,
+            scenario,
+            scenario_id,
+        })
     }
 
     /// Spawns the background idle-reclamation sweep on its own daemon
@@ -218,7 +282,7 @@ impl SessionManager {
         &self,
         sim: Simulation,
         agents: Vec<Box<dyn Agent + Send>>,
-        controlled: Vec<FactionId>,
+        controlled: ControlledLayers,
         seed: u64,
         max_days: u32,
     ) -> String {
@@ -272,7 +336,12 @@ impl SessionManager {
                 SessionSummary {
                     id: s.id.clone(),
                     day: s.sim.world.day,
-                    controlled: s.controlled.iter().map(|f| f.0).collect(),
+                    controlled: s.controlled_factions().iter().map(|f| f.0).collect(),
+                    controlled_layers: s
+                        .controlled_factions()
+                        .into_iter()
+                        .map(|f| (f.0, s.controlled_layers(f)))
+                        .collect(),
                     age_secs: now.duration_since(s.created).as_secs_f64(),
                     idle_secs: now.duration_since(s.last_touched).as_secs_f64(),
                     outcome: s.outcome(),
@@ -296,6 +365,10 @@ pub struct SessionSummary {
     pub id: String,
     pub day: u32,
     pub controlled: Vec<u32>,
+    /// Per controlled faction id, the `Layer`s this session's client
+    /// controls for it - `GET /sessions`'s own per-layer visibility into
+    /// what `controlled` above only names at faction granularity.
+    pub controlled_layers: Vec<(u32, BTreeSet<Layer>)>,
     pub age_secs: f64,
     pub idle_secs: f64,
     pub outcome: Outcome,

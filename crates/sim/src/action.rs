@@ -438,6 +438,19 @@ pub enum ActionError {
     /// see that function's own doc for exactly what "reach" means for land
     /// and sea.
     NoForceInRange,
+    /// Playtest defect fix: `Action::DeclareWar` against a faction this one
+    /// is already at `Stance::War` with used to fall through to the generic
+    /// `InvalidValue` - the same code a malformed or out-of-range `to`
+    /// produces, which tells a player nothing about *why* the order was
+    /// refused. `apply_declare_war` now names this specific situation
+    /// instead, the same way `AlreadyBuilding`/`NoConstruction` already name
+    /// their own "right shape, wrong state" cases rather than sharing
+    /// `InvalidValue`. `NonAggression`/`Alliance` still report
+    /// `InvalidValue` for `DeclareWar` - those must go through
+    /// `Action::BreakTreaty` instead (see `apply_declare_war`'s own doc),
+    /// which is a different situation ("wrong action for this relationship")
+    /// than "you already asked for exactly this."
+    AlreadyAtWar,
 }
 
 pub fn apply_action(
@@ -1318,7 +1331,11 @@ fn apply_declare_war(world: &mut World, faction: FactionId, to: FactionId) -> Re
     if to == faction || world.factions.get(to.index()).is_none_or(|f| !f.alive) {
         return Err(ActionError::InvalidValue);
     }
-    if world.diplomacy.stance(faction, to) != Stance::Ceasefire {
+    let stance = world.diplomacy.stance(faction, to);
+    if stance == Stance::War {
+        return Err(ActionError::AlreadyAtWar);
+    }
+    if stance != Stance::Ceasefire {
         return Err(ActionError::InvalidValue);
     }
     let mut events = Vec::new();

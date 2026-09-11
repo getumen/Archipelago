@@ -62,6 +62,16 @@ fn treaty_from_key(key: &str) -> Result<Treaty, String> {
     }
 }
 
+/// `POST /reset`'s `{"faction":<id>,"layers":[<layer key>,...]}` per-layer
+/// control entries (`server::parse_controlled`) name a `Layer` the same way
+/// `enums.layer` in `GET /schema` lists them - built from the same
+/// `ALL_LAYERS`/`Layer::key()` pair every other `_from_key` helper in this
+/// module reads its own enum from, so this can't list (or accept) a name the
+/// schema disagrees with.
+pub(crate) fn layer_from_key(key: &str) -> Result<Layer, String> {
+    ALL_LAYERS.iter().copied().find(|l| l.key() == key).ok_or_else(|| format!("unknown layer `{key}`"))
+}
+
 fn focus_from_key(key: &str) -> Result<NationalFocus, String> {
     match key {
         "military_unification" => Ok(NationalFocus::MilitaryUnification),
@@ -474,7 +484,72 @@ fn objects_schema() -> Value {
                 ),
             ]),
         ),
+        // Playtest defect fix ("the API is all-or-nothing per faction"):
+        // `POST /reset`'s `controlled` array entries - see `server::
+        // parse_controlled`'s own doc for the full reasoning. Reusing the
+        // existing `controlled` field (rather than adding a second one)
+        // keeps every existing caller's plain integer array working
+        // unchanged; a client that wants per-layer control opts in per
+        // entry by sending the object shape instead.
+        (
+            "controlled_entry",
+            Value::obj(vec![
+                (
+                    "note",
+                    Value::str(
+                        "either an integer faction id (full control: every enums.layer entry for that faction, \
+                         the only shape this field accepted before per-layer control existed) or \
+                         {\"faction\":<id>,\"layers\":[<layer key>,...]} (control of only the named Layers - every \
+                         other Layer for that faction is decided by its own built-in Agent, exactly as an \
+                         entirely uncontrolled faction always has been)",
+                    ),
+                ),
+                (
+                    "object_fields",
+                    Value::arr(vec![
+                        field("faction", "integer", true),
+                        Value::obj(vec![
+                            ("name", Value::str("layers")),
+                            ("type", Value::str("array")),
+                            ("item_enum", Value::str("layer")),
+                            ("required", Value::Bool(true)),
+                        ]),
+                    ]),
+                ),
+            ]),
+        ),
     ])
+}
+
+/// `POST /reset`'s own request fields - `server::handle_reset`'s validation
+/// is the source of truth this describes, the same "generated from what the
+/// handler actually reads" discipline `actions_schema`/`enums_schema` follow
+/// for `POST /action`. `controlled`'s `items` names `controlled_entry`
+/// (`objects_schema`) rather than a fixed object shape, since an entry may
+/// be either a plain integer or that object - see `controlled_entry`'s own
+/// `"note"` field.
+fn reset_schema() -> Value {
+    Value::obj(vec![(
+        "fields",
+        Value::arr(vec![
+            field("seed", "integer", true),
+            field("max_days", "integer", false),
+            Value::obj(vec![
+                ("name", Value::str("scenario")),
+                ("type", Value::str("string")),
+                ("required", Value::Bool(false)),
+                (
+                    "note",
+                    Value::str(
+                        "must equal this server's actual loaded scenario.id (see this schema's own top-level \
+                         `scenario.id`) or be omitted entirely - any other value is rejected outright, never \
+                         silently substituted",
+                    ),
+                ),
+            ]),
+            field_array("controlled", "controlled_entry", false),
+        ]),
+    )])
 }
 
 /// The full action-vocabulary/enum/object schema `GET /schema`
@@ -483,7 +558,12 @@ fn objects_schema() -> Value {
 /// truth (`archipelago_sim::observation`, `archipelago_sim::scenario`) -
 /// see `server::handle_schema` for where those get merged in.
 pub fn schema() -> Value {
-    Value::obj(vec![("actions", actions_schema()), ("enums", enums_schema()), ("objects", objects_schema())])
+    Value::obj(vec![
+        ("actions", actions_schema()),
+        ("enums", enums_schema()),
+        ("objects", objects_schema()),
+        ("reset", reset_schema()),
+    ])
 }
 
 pub fn action_error_key(e: ActionError) -> &'static str {
@@ -510,6 +590,7 @@ pub fn action_error_key(e: ActionError) -> &'static str {
         ActionError::NodeNotHostile => "node_not_hostile",
         ActionError::NoAircraftInRange => "no_aircraft_in_range",
         ActionError::NoForceInRange => "no_force_in_range",
+        ActionError::AlreadyAtWar => "already_at_war",
     }
 }
 

@@ -369,6 +369,7 @@ pub fn action_error_ja(e: ActionError) -> &'static str {
         ActionError::NodeNotHostile => "交戦中の敵の拠点ではない",
         ActionError::NoAircraftInRange => "目標に到達できる航空部隊がない",
         ActionError::NoForceInRange => "目標に到達できる部隊がない",
+        ActionError::AlreadyAtWar => "すでに交戦中",
     }
 }
 
