@@ -93,7 +93,28 @@ impl Branch {
             _ => None,
         }
     }
+
+    /// Japanese label for UI display - `Good::label`'s exact convention,
+    /// but for the branch itself, not its equipment commodity (`Good::
+    /// Infantry.label()` is "歩兵装備" - the equipment a unit consumes;
+    /// this is "歩兵" - what the unit *is*, e.g. `apps/game`'s unit list
+    /// and recruit-branch selector).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Branch::Infantry => "歩兵",
+            Branch::Armour => "機甲",
+            Branch::Artillery => "砲兵",
+        }
+    }
 }
+
+/// Every `Branch`, in `Branch::key()`'s fixed declaration order - the same
+/// `ALL_GOODS`/`ALL_GROUPS` convention (`good::ALL_GOODS`'s own doc),
+/// shared by every caller that needs to iterate all three rather than
+/// re-listing them (`Observation::encode`'s per-branch unit counts,
+/// `apps/headless`'s `--json` branch breakdown, `apps/game`'s branch
+/// selector cycle).
+pub const ALL_BRANCHES: [Branch; 3] = [Branch::Infantry, Branch::Armour, Branch::Artillery];
 
 /// Stage 11B's per-branch, per-terrain/posture combat multiplier - folded
 /// into `raw_power`/`side_power` in `tick_combat` at exactly the

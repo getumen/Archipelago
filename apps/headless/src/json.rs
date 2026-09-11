@@ -9,6 +9,7 @@ use archipelago_sim::focus;
 use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::ids::FactionId;
+use archipelago_sim::military::Branch;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::{Domain, Station, VictoryCondition, World};
 
@@ -223,8 +224,23 @@ fn serialize_factions(world: &World) -> String {
                 .iter()
                 .filter(|u| u.alive && u.owner == f.id && u.station.domain() == Domain::Air)
                 .count();
+            // Stage 11C (docs/phase11-spec.md §4 "兵科ごとの部隊数...を出
+            // す"): `units` above already reports the Land total, but this
+            // serializer carries no per-unit list a reader could break that
+            // total down from (unlike `archipelago_api::state::units_value`,
+            // which now carries a per-unit `branch` field) - exactly the
+            // gap Stage 10D's own `squadrons` fix closed for the Air total,
+            // one Phase later and one level down. `{infantry,armour,
+            // artillery}` mirrors `good_object`/`group_object`'s own keyed-
+            // object convention rather than three more positional fields.
+            let branch_units = format!(
+                "{{\"infantry\":{},\"armour\":{},\"artillery\":{}}}",
+                world.units.iter().filter(|u| u.alive && u.owner == f.id && u.branch == Some(Branch::Infantry)).count(),
+                world.units.iter().filter(|u| u.alive && u.owner == f.id && u.branch == Some(Branch::Armour)).count(),
+                world.units.iter().filter(|u| u.alive && u.owner == f.id && u.branch == Some(Branch::Artillery)).count(),
+            );
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"branch_units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
@@ -232,6 +248,7 @@ fn serialize_factions(world: &World) -> String {
                 units,
                 fleets,
                 squadrons,
+                branch_units,
                 number(f.manpower),
                 good_object(&f.stock),
                 number(f.conscription),
@@ -296,8 +313,64 @@ fn serialize_regions(world: &World) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archipelago_sim::ids::UnitId;
+    use archipelago_sim::military::Unit;
     use archipelago_sim::scenario;
     use archipelago_sim::world::DominationShare;
+
+    /// Stage 11D gap fix: `serialize_factions`' `units` field only ever
+    /// reported the Land domain total, with nothing in this serializer's
+    /// output able to break that total down by branch - so a `--json` run
+    /// could never show whether a faction ever actually built any Armour
+    /// (the exact "Air squadrons invisible to `--json`" gap Stage 10D found
+    /// and fixed for `squadrons`, found here the same way: reading the
+    /// output of a real run and noticing there was no way to tell).
+    /// Confirmed this can fail: with `branch_units` removed from both the
+    /// field list and the format string, this test's `armour":1` assertion
+    /// failed (the field was absent from the JSON entirely) - restored
+    /// before committing.
+    #[test]
+    fn faction_json_reports_unit_counts_by_branch() {
+        let mut world = scenario::build_world();
+        let faction = world.factions[0].id;
+        let region = world.factions[0].capital;
+        let count_before = |branch| {
+            world.units.iter().filter(|u| u.alive && u.owner == faction && u.branch == Some(branch)).count()
+        };
+        let (infantry_before, artillery_before, armour_before) =
+            (count_before(Branch::Infantry), count_before(Branch::Artillery), count_before(Branch::Armour));
+
+        world.units.push(Unit {
+            id: UnitId(world.units.len() as u32),
+            owner: faction,
+            name: "Test Armour".to_string(),
+            station: Station::Region(region),
+            movement: None,
+            manpower: 1000.0,
+            equipment: 100.0,
+            organization: 100.0,
+            morale: 100.0,
+            supply: 1.0,
+            arms_delivery: 0.0,
+            arms_budget: 0.0,
+            arms_delivery_station: Station::Region(region),
+            experience: 0.0,
+            alive: true,
+            branch: Some(Branch::Armour),
+        });
+
+        let json = serialize_factions(&world);
+        let expected = format!(
+            "\"branch_units\":{{\"infantry\":{infantry_before},\"armour\":{},\"artillery\":{artillery_before}}}",
+            armour_before + 1
+        );
+
+        assert!(
+            json.contains(&expected),
+            "faction 0's branch_units must count the one Armour unit just added \
+             (expected to contain {expected}), got: {json}"
+        );
+    }
 
     /// External review fix (P2): `serialize_outcome`'s legacy
     /// `{"faction":...}` shape used to fire for *any* single-winner

@@ -258,6 +258,15 @@ fn units_value(world: &World) -> Value {
                 ("alive", Value::Bool(u.alive)),
                 ("domain", Value::str(u.station.domain().key())),
                 ("station", station),
+                // Stage 11C (docs/phase11-spec.md §4 "兵科ごとの部隊数と品目
+                // を出す"): `GET /state` claims to be the complete board
+                // (`state_value`'s own doc) - a client could already see a
+                // land unit exists here, but had no way to tell an Armour
+                // unit apart from an Infantry one without cross-referencing
+                // its `equipment` stock against every `Good`, which this
+                // (`Unit::branch`, `None` for every Sea/Air unit, `Branch::
+                // key()` for every land one) makes direct instead.
+                ("branch", u.branch.map(|b| Value::str(b.key())).unwrap_or(Value::Null)),
                 ("manpower", Value::f32num(u.manpower)),
                 ("equipment", Value::f32num(u.equipment)),
                 ("organization", Value::f32num(u.organization)),

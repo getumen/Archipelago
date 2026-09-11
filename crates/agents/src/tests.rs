@@ -1507,3 +1507,115 @@ fn heuristic_agent_never_moves_a_unit_it_is_also_disbanding() {
         "sanity: a MoveUnit for an already-disbanded unit is exactly the rejection this fix prevents the AI from ever issuing"
     );
 }
+
+/// Stage 11C (docs/phase11-spec.md §4 "地形...に応じて兵科を選ぶ"):
+/// `choose_land_branch` must actually read `region`'s terrain, not just
+/// accept a branch argument and ignore it - the exact "a new layer the AI
+/// never touches" shape CLAUDE.md records for Phase 9D/10D. mvp region 0
+/// (北海道) is `Terrain::Plain` (`ARMOUR_PLAIN_MULT` 1.30, above Infantry's
+/// flat 1.0); region 4 (信越・北陸) is `Terrain::Mountain` (`ARMOUR_MOUNTAIN_
+/// MULT` 0.60, below it) - the same two scenario regions
+/// `docs/phase11-spec.md`'s own table names as Armour's best and worst
+/// ground. At ample supply (`tightness == 0.0`, no discount in play) this
+/// must diverge exactly the way real combat's own multiplier would reward.
+///
+/// Checked this fails when broken: temporarily hardcoded
+/// `choose_land_branch` to always return `Branch::Infantry` regardless of
+/// terrain - the first assertion below then failed (`北海道` no longer
+/// picked Armour). Reverted before committing.
+#[test]
+fn heuristic_agent_recruit_branch_differs_by_terrain() {
+    let world = scenario::build_world();
+    let plain = RegionId(0);
+    let mountain = RegionId(4);
+    assert_eq!(world.region(plain).terrain, archipelago_sim::world::Terrain::Plain, "test setup: mvp region 0 must be Plain");
+    assert_eq!(
+        world.region(mountain).terrain,
+        archipelago_sim::world::Terrain::Mountain,
+        "test setup: mvp region 4 must be Mountain"
+    );
+
+    // `existing_land_units == 0` keeps both calls off the fixed
+    // one-in-three Artillery cadence slot, isolating the terrain
+    // comparison between Infantry and Armour this test is about.
+    let on_plain = crate::choose_land_branch(&world, plain, 0, 1.0);
+    let on_mountain = crate::choose_land_branch(&world, mountain, 0, 1.0);
+
+    assert_eq!(on_plain, Branch::Armour, "open plain terrain must favour Armour at ample supply: got {on_plain:?}");
+    assert_eq!(
+        on_mountain,
+        Branch::Infantry,
+        "mountain terrain must favour Infantry once Armour's own multiplier falls below Infantry's flat baseline: got {on_mountain:?}"
+    );
+}
+
+/// Stage 11C (docs/phase11-spec.md §4 "補給...に応じて兵科を選ぶ"): the same
+/// plain terrain that favours Armour at ample supply must fall back to
+/// Infantry once nationwide `Faction::supply_ratio` is tight enough that
+/// Armour's 1.6x weight (`ARMOUR_SUPPLY_WEIGHT`) no longer survives the
+/// discount against Infantry's untouched 1.0x - the "維持できる補給" axis
+/// docs/phase11-spec.md §1 names alongside terrain. Only `supply_ratio`
+/// changes between the two calls below; the region and unit count are held
+/// fixed, isolating supply (not terrain) as the cause of the flip.
+///
+/// Checked this fails when broken: temporarily removed the `tightness`
+/// discount from `choose_land_branch` (comparing raw terrain multipliers
+/// only, Stage 11B's own behaviour) - the second assertion below then
+/// failed (still Armour at `supply_ratio == 0.5`). Reverted before
+/// committing.
+#[test]
+fn heuristic_agent_recruit_branch_falls_back_to_infantry_when_supply_is_tight() {
+    let world = scenario::build_world();
+    let plain = RegionId(0);
+    assert_eq!(world.region(plain).terrain, archipelago_sim::world::Terrain::Plain, "test setup: mvp region 0 must be Plain");
+
+    let ample_supply = crate::choose_land_branch(&world, plain, 0, 1.0);
+    let tight_supply = crate::choose_land_branch(&world, plain, 0, 0.5);
+
+    assert_eq!(ample_supply, Branch::Armour, "sanity: ample supply must still favour Armour on plain terrain");
+    assert_eq!(
+        tight_supply,
+        Branch::Infantry,
+        "a network already at the DISBAND_SOLVENCY_SUPPLY_RATIO floor must not add Armour's heavier upkeep on top: got {tight_supply:?}"
+    );
+}
+
+/// `codex review` (P2) fix, Stage 11C: the scheduled Artillery slot
+/// (`existing_land_units % 3 == 2`) must degrade *gradually* as supply
+/// tightens, not vanish the instant `supply_ratio` reads anything less
+/// than perfectly ample - the same complaint `docs/conventions.md` §6
+/// makes about a discount that saturates at the very first tick of strain
+/// instead of scaling with it. A moderate shortfall (`supply_ratio == 0.8`,
+/// comfortably above `DISBAND_SOLVENCY_SUPPLY_RATIO`) must still schedule
+/// Artillery; only once supply is much closer to that floor
+/// (`supply_ratio == 0.55`) should the slot fall back to Infantry.
+///
+/// Checked this fails when broken: temporarily restored the pre-fix flat
+/// `1.0` baseline (`discount(Branch::Artillery, 1.0)` in place of the
+/// averaged `artillery_value`) - the first assertion below then failed
+/// (Infantry scheduled even at `supply_ratio == 0.8`, exactly the
+/// "eliminated outright" defect `codex review` flagged). Reverted before
+/// committing.
+#[test]
+fn heuristic_agent_recruit_branch_artillery_slot_survives_a_moderate_shortfall() {
+    let world = scenario::build_world();
+    let plain = RegionId(0);
+    assert_eq!(world.region(plain).terrain, archipelago_sim::world::Terrain::Plain, "test setup: mvp region 0 must be Plain");
+
+    // `existing_land_units == 2` (2 % 3 == 2) lands on the scheduled
+    // Artillery slot both times - only `supply_ratio` differs between the
+    // two calls, isolating supply as the cause of the fallback.
+    let moderate_shortfall = crate::choose_land_branch(&world, plain, 2, 0.8);
+    let severe_shortfall = crate::choose_land_branch(&world, plain, 2, 0.55);
+
+    assert_eq!(
+        moderate_shortfall,
+        Branch::Artillery,
+        "a moderate shortfall (supply_ratio 0.8) must not already zero Artillery out of the rotation: got {moderate_shortfall:?}"
+    );
+    assert_eq!(
+        severe_shortfall,
+        Branch::Infantry,
+        "a shortfall much closer to the DISBAND_SOLVENCY_SUPPLY_RATIO floor must still fall back to Infantry: got {severe_shortfall:?}"
+    );
+}

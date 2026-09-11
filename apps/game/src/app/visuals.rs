@@ -19,6 +19,7 @@
 use bevy::prelude::*;
 
 use archipelago_sim::balance::{UNIT_EQUIPMENT, UNIT_MANPOWER};
+use archipelago_sim::military::Branch;
 use archipelago_sim::world::Region;
 
 use super::map_mode::{self, MapMode, MapModeRes};
@@ -207,6 +208,28 @@ fn ring_offset(index: usize, count: usize, radius: f32) -> Vec2 {
     Vec2::new(angle.cos(), angle.sin()) * radius
 }
 
+/// Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科が分かる"): a unit
+/// marker's own *shape*, on top of the color every marker already carries
+/// (`faction_color`, unchanged - color is owner, never branch, so the two
+/// signals never fight for the same channel). `Infantry` keeps the
+/// pre-Stage-11C triangle unchanged (the branch every scenario's starting
+/// units already are, and the visual default before branches existed at
+/// all), `None` (every Sea/Air unit - `Unit::branch`'s own doc) keeps it
+/// too, so this stage changes nothing about a marker a player has never
+/// seen differentiated before. `Armour` gets a square (a vehicle's own
+/// silhouette, the branch `ARMOUR_PLAIN_MULT` already marks as the
+/// aggressive/mobile one), `Artillery` a circle (the third, distinct
+/// silhouette) - three shapes a glance at the map can tell apart, the same
+/// "discoverable, not just present" bar the region panel's `[branch]`
+/// suffix meets one level up.
+fn unit_marker_mesh(meshes: &mut Assets<Mesh>, branch: Option<Branch>) -> Handle<Mesh> {
+    match branch {
+        Some(Branch::Armour) => meshes.add(Rectangle::new(9.0, 9.0)),
+        Some(Branch::Artillery) => meshes.add(Circle::new(6.0)),
+        Some(Branch::Infantry) | None => meshes.add(RegularPolygon::new(6.0, 3)),
+    }
+}
+
 pub(super) fn sync_unit_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -225,7 +248,7 @@ pub(super) fn sync_unit_visuals(
     for unit in &world.units {
         if !known.contains(&unit.id.index()) {
             commands.spawn((
-                Mesh2d(meshes.add(RegularPolygon::new(6.0, 3))),
+                Mesh2d(unit_marker_mesh(&mut meshes, unit.branch)),
                 MeshMaterial2d(materials.add(ColorMaterial::from_color(faction_color(unit.owner.index())))),
                 Transform::from_xyz(0.0, 0.0, 1.0),
                 Visibility::Hidden,

@@ -66,7 +66,7 @@ use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
-use archipelago_sim::military::Branch;
+use archipelago_sim::military::{Branch, ALL_BRANCHES};
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
 use super::chrome;
@@ -74,7 +74,7 @@ use super::input::MENU_ITEMS;
 use super::map_mode::MapModeRes;
 use super::setup::{text_font, RIGHT_COLUMN_WIDTH};
 use super::{
-    ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion, SelectedUnits, SimRes,
+    ActiveBranch, ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion, SelectedUnits, SimRes,
     SpeedRes,
 };
 use crate::action_codec::action_error_ja;
@@ -301,10 +301,17 @@ impl RegionActionKind {
         REGION_ACTION_KINDS.iter().position(|&k| k == self).expect("every RegionActionKind is listed in REGION_ACTION_KINDS")
     }
 
-    fn label(self, active_good: Good) -> String {
+    fn label(self, active_good: Good, active_branch: Branch) -> String {
         let base = MENU_ITEMS[self.index()];
         match self {
             RegionActionKind::BuildCapacity => format!("{base} [{}]", active_good.label()),
+            // Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科が分か
+            // る"): mirrors `BuildCapacity`'s own `[good]` suffix just
+            // above - `ActiveGood`'s exact convention, so which branch a
+            // click on this button would actually raise is visible on the
+            // button itself, not just discoverable by clicking and checking
+            // afterward.
+            RegionActionKind::RecruitLand => format!("{base} [{}]", active_branch.label()),
             _ => base.to_string(),
         }
     }
@@ -315,9 +322,9 @@ impl RegionActionKind {
         format!("(右クリック→{})", self.index() + 1)
     }
 
-    fn to_action(self, region: RegionId, active_good: Good) -> Action {
+    fn to_action(self, region: RegionId, active_good: Good, active_branch: Branch) -> Action {
         match self {
-            RegionActionKind::RecruitLand => Action::RecruitUnit { region, domain: Domain::Land, branch: Branch::Infantry },
+            RegionActionKind::RecruitLand => Action::RecruitUnit { region, domain: Domain::Land, branch: active_branch },
             RegionActionKind::RecruitSea => Action::RecruitUnit { region, domain: Domain::Sea, branch: Branch::Infantry },
             RegionActionKind::RecruitAir => Action::RecruitUnit { region, domain: Domain::Air, branch: Branch::Infantry },
             RegionActionKind::BuildInfra => Action::Build { region, project: Project::Infrastructure },
@@ -331,7 +338,7 @@ impl RegionActionKind {
     /// Mirrors `action::apply_recruit`/`apply_build`/`apply_cancel_build`'s
     /// own visible preconditions - see this module's own doc, "Disabled,
     /// with a reason". Read-only; never mutates `world`.
-    fn reason(self, world: &SimWorld, faction: FactionId, region_id: RegionId) -> Option<&'static str> {
+    fn reason(self, world: &SimWorld, faction: FactionId, region_id: RegionId, active_branch: Branch) -> Option<&'static str> {
         let region = world.regions.get(region_id.index())?;
         if region.owner != faction {
             return Some(action_error_ja(ActionError::RegionNotOwned));
@@ -340,18 +347,23 @@ impl RegionActionKind {
             return Some(action_error_ja(ActionError::RegionContested));
         }
         match self {
-            RegionActionKind::RecruitLand => recruit_reason(world, faction, Domain::Land),
+            // Stage 11C: the button must read "enabled"/"disabled" against
+            // whichever branch it would *actually* raise
+            // (`active_branch.equipment_good()`), not the fixed `Good::
+            // Infantry` every land recruit used to spend regardless of
+            // choice - `Branch::equipment_good`'s own doc.
+            RegionActionKind::RecruitLand => recruit_reason(world, faction, Domain::Land, active_branch.equipment_good()),
             RegionActionKind::RecruitSea => {
                 if region.port <= 0.0 {
                     return Some(action_error_ja(ActionError::NoPort));
                 }
-                recruit_reason(world, faction, Domain::Sea)
+                recruit_reason(world, faction, Domain::Sea, Good::Naval)
             }
             RegionActionKind::RecruitAir => {
                 if !world.airfield_node_operational(region_id) {
                     return Some(action_error_ja(ActionError::NoAirfield));
                 }
-                recruit_reason(world, faction, Domain::Air)
+                recruit_reason(world, faction, Domain::Air, Good::Aircraft)
             }
             RegionActionKind::BuildInfra | RegionActionKind::BuildPort | RegionActionKind::BuildCapacity | RegionActionKind::Repair => {
                 if region.construction.is_some() {
@@ -371,25 +383,20 @@ impl RegionActionKind {
     }
 }
 
-fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain) -> Option<&'static str> {
+/// `equipment_good` is which `Good` `apply_recruit` will actually charge
+/// for this specific recruit - `active_branch.equipment_good()` for
+/// `Domain::Land` (Stage 11C: this varies by the player's own branch
+/// choice, `Branch::equipment_good`'s own doc), `Good::Naval`/`Good::
+/// Aircraft` fixed for Sea/Air (`good::Good`'s own module doc - Stage 11B
+/// gave them their own commodity instead of sharing `Good::Infantry`).
+/// Checking the wrong good here would let this button read "enabled" right
+/// up until the simulation actually rejects the order, or "disabled" while
+/// the commodity it would actually spend from is perfectly solvent.
+fn recruit_reason(world: &SimWorld, faction: FactionId, domain: Domain, equipment_good: Good) -> Option<&'static str> {
     let f = world.faction(faction);
     if f.manpower < UNIT_MANPOWER {
         return Some(action_error_ja(ActionError::InsufficientManpower));
     }
-    // Stage 11B: which equipment good `apply_recruit` will actually charge
-    // for this domain - `Good::Infantry` for `Domain::Land` (the panel's own
-    // `RecruitLand` button always raises `Branch::Infantry`; branch choice
-    // isn't exposed in this UI yet, Stage 11C's job), `Good::Naval`/
-    // `Good::Aircraft` for Sea/Air (`good::Good`'s own module doc - Stage
-    // 11B gave them their own commodity instead of sharing `Good::Infantry`).
-    // Checking the wrong good here would let this button read "enabled"
-    // right up until the simulation actually rejects the order, or "disabled"
-    // while the domain it would actually spend from is perfectly solvent.
-    let equipment_good = match domain {
-        Domain::Land => Good::Infantry,
-        Domain::Sea => Good::Naval,
-        Domain::Air => Good::Aircraft,
-    };
     if f.stock[equipment_good.index()] < UNIT_EQUIPMENT {
         return Some(action_error_ja(ActionError::InsufficientEquipment));
     }
@@ -432,6 +439,25 @@ pub(super) fn spawn_region_action_panel(parent: &mut ChildSpawnerCommands<'_>, f
         .with_children(|panel| {
             panel.spawn(chrome::panel_title("-- 命令 --", font));
             for kind in REGION_ACTION_KINDS {
+                // Stage 11C (`codex review` P2): the legend advertised a
+                // clickable "C" control for `ActiveBranch`, but until this
+                // fix the only way to change it was the keyboard - a
+                // mouse-only player had no path to it at all, unlike
+                // `ActiveGood`'s own `GoodTabButton` row in the policy panel
+                // (`spawn_policy_panel`'s exact pattern, mirrored here).
+                // Spawned directly above the "陸軍を徴募" row it feeds, so
+                // the choice and its effect sit next to each other.
+                if kind == RegionActionKind::RecruitLand {
+                    panel
+                        .spawn(Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() })
+                        .with_children(|row| {
+                            for branch in ALL_BRANCHES {
+                                row.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), BranchTabButton(branch))).with_children(|b| {
+                                    b.spawn((Text::new(branch.label()), text_font(11.0, font), TextColor(TEXT_ENABLED)));
+                                });
+                            }
+                        });
+                }
                 panel.spawn(column_node()).with_children(|slot| {
                     slot.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), kind)).with_children(|b| {
                         b.spawn((Text::new(String::new()), text_font(12.0, font), TextColor(TEXT_ENABLED), RegionActionLabel(kind)));
@@ -440,6 +466,36 @@ pub(super) fn spawn_region_action_panel(parent: &mut ChildSpawnerCommands<'_>, f
                 });
             }
         });
+}
+
+#[derive(Component, Clone, Copy)]
+pub(super) struct BranchTabButton(Branch);
+
+/// The clickable half of `ActiveBranch` (`input::keyboard_input`'s `C`
+/// binding is the other) - `handle_policy_button_clicks`'s `GoodTabButton`
+/// loop's exact shape: a direct-select tab, not a cycle, since with only
+/// three branches a full row of named tabs costs nothing a cycle-through
+/// button would save.
+pub(super) fn handle_branch_tab_clicks(mut active_branch: ResMut<ActiveBranch>, query: Query<(&Interaction, &BranchTabButton), Changed<Interaction>>) {
+    for (interaction, tab) in &query {
+        if *interaction == Interaction::Pressed {
+            active_branch.0 = tab.0;
+        }
+    }
+}
+
+/// Highlights whichever `BranchTabButton` matches the current
+/// `ActiveBranch` - `sync_policy_panel`'s `good_tabs` loop's exact
+/// convention (`COLOR_ACTIVE` for the selected tab, `COLOR_ENABLED`
+/// otherwise). Runs unconditionally (not gated on the region panel's own
+/// `showing` the way `sync_region_action_buttons` is) since `ActiveBranch`
+/// itself is meaningful even before a region is selected - keeping this
+/// tab row's highlight in sync the instant `C` (or a click) changes it,
+/// not just the next time the region panel happens to redraw.
+pub(super) fn sync_branch_tabs(active_branch: Res<ActiveBranch>, mut tabs: Query<(&BranchTabButton, &mut BackgroundColor)>) {
+    for (tab, mut bg) in &mut tabs {
+        bg.0 = if tab.0 == active_branch.0 { COLOR_ACTIVE } else { COLOR_ENABLED };
+    }
 }
 
 #[derive(Component, Clone, Copy)]
@@ -456,6 +512,7 @@ pub(super) fn sync_region_action_buttons(
     diplomacy: Res<DiplomacyPanel>,
     policy: Res<PolicyPanel>,
     active_good: Res<ActiveGood>,
+    active_branch: Res<ActiveBranch>,
     mut root: Query<(&mut Visibility, &mut Node), With<RegionActionPanelRoot>>,
     mut buttons: Query<(&RegionActionKind, &mut BackgroundColor)>,
     mut labels: Query<(&RegionActionLabel, &mut Text, &mut TextColor)>,
@@ -472,7 +529,7 @@ pub(super) fn sync_region_action_buttons(
     let world = sim.0.world();
 
     for kind in REGION_ACTION_KINDS {
-        let reason = kind.reason(world, player_faction, region_id);
+        let reason = kind.reason(world, player_faction, region_id, active_branch.0);
         for (k, mut bg) in &mut buttons {
             if *k == kind {
                 bg.0 = button_bg(reason.is_none(), false);
@@ -480,7 +537,7 @@ pub(super) fn sync_region_action_buttons(
         }
         for (label, mut text, mut color) in &mut labels {
             if label.0 == kind {
-                text.0 = format!("{} {}", kind.label(active_good.0), kind.shortcut_hint());
+                text.0 = format!("{} {}", kind.label(active_good.0, active_branch.0), kind.shortcut_hint());
                 color.0 = if reason.is_none() { TEXT_ENABLED } else { TEXT_DISABLED };
             }
         }
@@ -497,6 +554,7 @@ pub(super) fn handle_region_action_clicks(
     player: Res<PlayerFaction>,
     selected: Res<SelectedRegion>,
     active_good: Res<ActiveGood>,
+    active_branch: Res<ActiveBranch>,
     query: Query<(&Interaction, &RegionActionKind), Changed<Interaction>>,
 ) {
     let Some(player_faction) = player.0 else { return };
@@ -505,10 +563,10 @@ pub(super) fn handle_region_action_clicks(
         if *interaction != Interaction::Pressed {
             continue;
         }
-        if kind.reason(sim.0.world(), player_faction, region_id).is_some() {
+        if kind.reason(sim.0.world(), player_faction, region_id, active_branch.0).is_some() {
             continue;
         }
-        sim.0.push_human_action(kind.to_action(region_id, active_good.0));
+        sim.0.push_human_action(kind.to_action(region_id, active_good.0, active_branch.0));
     }
 }
 
@@ -1118,9 +1176,15 @@ pub(super) fn sync_unit_panel(
         let (row_line, reinforce_reason) = match unit {
             Some(u) => (
                 format!(
-                    "#{} {}{}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}{}",
+                    "#{} {}{}{}\n兵力{:.1} 装備{:.1} 組織{:.0} 士気{:.2} 補給{:.2}{} 経験{:.1}{}",
                     u.id.0,
                     u.name,
+                    // Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科
+                    // が分かる"): a land unit's own `Branch` - `None` for
+                    // every Sea/Air unit (`Unit::branch`'s own doc), so this
+                    // is silently empty for them rather than printing a
+                    // meaningless "[]".
+                    u.branch.map(|b| format!(" [{}]", b.label())).unwrap_or_default(),
                     if delegated { " [AI操作中]" } else { "" },
                     u.manpower,
                     u.equipment,
@@ -2172,6 +2236,7 @@ mod tests {
         world.insert_resource(PlayerFaction(Some(FactionId(0))));
         world.insert_resource(SelectedRegion(Some(capital)));
         world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch::default());
         world.spawn((Interaction::Pressed, RegionActionKind::RecruitLand));
 
         run(&mut world, handle_region_action_clicks);
@@ -2182,6 +2247,61 @@ mod tests {
         assert!(sim.0.last_human_action_errors().is_empty(), "a legal recruit order must not be rejected: {:?}", sim.0.last_human_action_errors());
         let units_after = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0)).count();
         assert_eq!(units_after, units_before + 1, "the recruited unit must actually exist in the world after the tick");
+    }
+
+    /// Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科が分かる"): a
+    /// player must be able to *choose* which land branch a click on
+    /// "RecruitLand" actually raises - `ActiveBranch` (cycled with `C`,
+    /// `input::keyboard_input`'s own doc), read by both
+    /// `RegionActionKind::to_action` (what gets queued) and `::reason`
+    /// (whether the button is enabled at all - `Branch::Armour`'s own
+    /// `Good::Armour` stock here, not `Good::Infantry`). Mirrors
+    /// `region_action_click_enqueues_recruit_for_the_players_own_region`
+    /// above exactly, with `ActiveBranch(Branch::Armour)` in place of the
+    /// `Infantry` default.
+    ///
+    /// Checked this fails when broken: temporarily hardcoded
+    /// `RegionActionKind::to_action`'s `RecruitLand` arm back to
+    /// `branch: Branch::Infantry` (Stage 11B's own behaviour, ignoring
+    /// `active_branch`) - the first assertion below then failed (queued
+    /// `branch: Infantry` instead of `Armour`). Reverted before committing.
+    #[test]
+    fn region_action_click_enqueues_the_players_chosen_branch() {
+        let mut world = World::new();
+        // Built directly (not through `player_sim()`) so `Good::Armour`'s
+        // stock can be topped up *before* `SimDriver` owns the world -
+        // `sim_driver::SimDriver` exposes no mutable world accessor, on
+        // purpose (`push_human_action` is the only way a caller is meant to
+        // change a live `SimDriver`'s state). This proves the button reads
+        // the *chosen* branch's commodity, not whichever one happens to
+        // also be stocked (`scenario::build_world` starts every faction
+        // with both).
+        let mut sim_world = scenario::build_world();
+        sim_world.faction_mut(FactionId(0)).stock[Good::Armour.index()] = 100.0;
+        let capital = sim_world.faction(FactionId(0)).capital;
+        let sim = SimRes(SimDriver::new_with_player(sim_world, 1, Some(FactionId(0)), None));
+        let units_before = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0)).count();
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedRegion(Some(capital)));
+        world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch(Branch::Armour));
+        world.spawn((Interaction::Pressed, RegionActionKind::RecruitLand));
+
+        run(&mut world, handle_region_action_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::RecruitUnit { region: capital, domain: Domain::Land, branch: Branch::Armour }],
+            "the click must have queued a RecruitUnit(Land) for whichever branch ActiveBranch currently selects"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty(), "a legal Armour recruit order must not be rejected: {:?}", sim.0.last_human_action_errors());
+        let units_after = sim.0.world().units.iter().filter(|u| u.owner == FactionId(0)).count();
+        assert_eq!(units_after, units_before + 1, "the recruited Armour unit must actually exist in the world after the tick");
+        let recruited_branch = sim.0.world().units.iter().find(|u| u.owner == FactionId(0) && u.station == Station::Region(capital) && u.branch == Some(Branch::Armour));
+        assert!(recruited_branch.is_some(), "the newly-recruited unit must actually carry Branch::Armour, not just the action that raised it");
     }
 
     /// The other half of "disabled, with a reason": a click on a region the
@@ -2201,6 +2321,7 @@ mod tests {
         world.insert_resource(PlayerFaction(Some(FactionId(0))));
         world.insert_resource(SelectedRegion(Some(foreign)));
         world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch::default());
         world.spawn((Interaction::Pressed, RegionActionKind::RecruitLand));
 
         run(&mut world, handle_region_action_clicks);
@@ -2236,6 +2357,7 @@ mod tests {
         world.insert_resource(PlayerFaction(Some(FactionId(0))));
         world.insert_resource(SelectedRegion(Some(capital)));
         world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch::default());
         world.spawn((Interaction::Pressed, RegionActionKind::RecruitAir));
 
         run(&mut world, handle_region_action_clicks);
@@ -2599,6 +2721,7 @@ mod tests {
         world.insert_resource(sim);
         world.insert_resource(PlayerFaction(Some(FactionId(0))));
         world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch::default());
         world.spawn((Interaction::Pressed, PolicyStepButton { field: PolicyField::Conscription, increase: true }));
         // The other two click sources `handle_policy_button_clicks` reads -
         // spawned empty so the system's other `Query`s simply match nothing.
@@ -2718,5 +2841,49 @@ mod tests {
         let mut q = world.query::<(&UnitRowText, &Text)>();
         let row_text = q.iter(&world).find(|(r, _)| r.0 == 0).map(|(_, t)| t.0.clone()).expect("slot 0 must have been rendered");
         assert!(row_text.contains("※損耗中"), "supply below ATTRITION_SUPPLY_THRESHOLD must be marked, got: {row_text}");
+    }
+
+    /// `codex review` (P2): the legend's "徴募兵科: C ボタン/キー" row claims
+    /// a clickable control exists for `ActiveBranch` - `BranchTabButton`
+    /// (`handle_branch_tab_clicks`) is that control, `MapModeButton`'s exact
+    /// pattern one level up (`map_mode_button_click_advances_to_the_next_mode`
+    /// above). A mouse-only player must be able to pick a branch without
+    /// ever touching the keyboard.
+    ///
+    /// Checked this fails when broken: temporarily made
+    /// `handle_branch_tab_clicks` a no-op - the assertion below then failed
+    /// (`ActiveBranch` stayed at its `Infantry` default after the click).
+    /// Reverted before committing.
+    #[test]
+    fn branch_tab_click_selects_that_branch() {
+        let mut world = World::new();
+        world.insert_resource(ActiveBranch::default());
+        world.spawn((Interaction::Pressed, BranchTabButton(Branch::Armour)));
+
+        run(&mut world, handle_branch_tab_clicks);
+
+        assert_eq!(world.resource::<ActiveBranch>().0, Branch::Armour, "a click on the Armour tab must select Branch::Armour");
+    }
+
+    /// `sync_branch_tabs` must actually highlight whichever tab matches the
+    /// current `ActiveBranch`, not just leave every tab the same color -
+    /// otherwise the control exists but a player has no way to see *which*
+    /// branch is currently selected without also reading the recruit
+    /// button's own `[branch]` label.
+    #[test]
+    fn branch_tab_highlights_the_active_branch() {
+        let mut world = World::new();
+        world.insert_resource(ActiveBranch(Branch::Artillery));
+        world.spawn((BackgroundColor(COLOR_ENABLED), BranchTabButton(Branch::Infantry)));
+        world.spawn((BackgroundColor(COLOR_ENABLED), BranchTabButton(Branch::Armour)));
+        world.spawn((BackgroundColor(COLOR_ENABLED), BranchTabButton(Branch::Artillery)));
+
+        run(&mut world, sync_branch_tabs);
+
+        let mut q = world.query::<(&BranchTabButton, &BackgroundColor)>();
+        for (tab, bg) in q.iter(&world) {
+            let expected = if tab.0 == Branch::Artillery { COLOR_ACTIVE } else { COLOR_ENABLED };
+            assert_eq!(bg.0, expected, "tab {:?} must be {} (COLOR_ACTIVE iff it is the current ActiveBranch)", tab.0, if tab.0 == Branch::Artillery { "highlighted" } else { "unhighlighted" });
+        }
     }
 }

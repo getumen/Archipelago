@@ -30,6 +30,7 @@ use archipelago_agents::newspaper::NewspaperArticle;
 use archipelago_sim::action::Action;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
+use archipelago_sim::military::Branch;
 use archipelago_sim::world::{LinkKind, World as SimWorld};
 
 use crate::sim_driver::{SimDriver, Speed};
@@ -208,6 +209,27 @@ impl Default for ActiveGood {
         // tuning actually contends over (`balance.rs`'s Stage 2A section) -
         // is the good a new player is most likely to want to adjust first.
         ActiveGood(ALL_GOODS[2])
+    }
+}
+
+/// Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科が分かる"): which
+/// `military::Branch` the region panel's land-recruit button
+/// (`RegionActionKind::RecruitLand`) and its right-click-menu digit
+/// equivalent (`input::handle_menu_keys`'s `Digit1`) raise, cycled with `C`
+/// - `ActiveGood`'s exact pattern (one shared pointer, cycled by a single
+/// key, rather than a key per branch) for the identical reason: there are
+/// only three, but a keybinding each would still grow the keymap for no
+/// real benefit over a cycle.
+#[derive(Resource)]
+pub(crate) struct ActiveBranch(pub Branch);
+
+impl Default for ActiveBranch {
+    fn default() -> Self {
+        // Infantry - this model's own reference class
+        // (`balance::INFANTRY_SUPPLY_WEIGHT`'s doc) and the branch every
+        // scenario's starting units are already raised as, is the safest
+        // default: affordable everywhere, penalized nowhere.
+        ActiveBranch(Branch::Infantry)
     }
 }
 
@@ -663,6 +685,7 @@ pub fn run(
         .insert_resource(DiplomacyPanel { open: debug_open_diplomacy, target: debug_diplomacy_target })
         .insert_resource(PolicyPanel(debug_open_policy))
         .insert_resource(debug_industry_good.map(ActiveGood).unwrap_or_default())
+        .insert_resource(ActiveBranch::default())
         .insert_resource(LastRejection::default())
         .insert_resource(map_mode::MapModeRes(debug_map_mode))
         .insert_resource(NlCompose::default())
@@ -708,6 +731,16 @@ pub fn run(
             )
                 .chain(),
         )
+        // `handle_branch_tab_clicks` couldn't join the 21-system chain above
+        // without exceeding Bevy's `.chain()` tuple arity (the same limit
+        // that already split the sync block further down into two calls -
+        // that block's own doc) - a standalone call instead, `.before(...)`
+        // the same anchor so a click still lands before this frame's tick,
+        // same as every other click handler in the chain above. Only
+        // touches `ActiveBranch`, never `SimRes`, so it shares no state
+        // with (and needs no relative order against) anything else in this
+        // frame's input handling beyond that one ordering constraint.
+        .add_systems(Update, panels::handle_branch_tab_clicks.before(sim_control::advance_simulation))
         .add_systems(
             Update,
             (
@@ -765,6 +798,7 @@ pub fn run(
                 panels::sync_speed_buttons,
                 panels::sync_map_mode_button,
                 panels::sync_region_action_buttons,
+                panels::sync_branch_tabs,
                 panels::sync_strike_panel,
                 panels::sync_interdict_panel,
                 panels::sync_unit_panel,

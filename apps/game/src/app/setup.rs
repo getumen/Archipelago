@@ -1222,6 +1222,14 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             row("地域メニュー: 右クリック", label_color);
             row("地図モード: M ボタン/キー", label_color);
             row("対象品目: 行クリック/G", label_color);
+            // Stage 11C (`codex review` P2): `ActiveBranch`'s own `C` binding
+            // (`input::keyboard_input`'s doc) had no visible-controls
+            // counterpart at all - the region panel's "陸軍を徴募 [歩兵]"
+            // label shows the *current* branch, but nothing on screen told a
+            // player which key changes it, exactly the discoverability gap
+            // `ActiveGood`'s own "対象品目: 行クリック/G" row one line above
+            // already closes for `G`.
+            row("徴募兵科: C ボタン/キー", label_color);
             row("政策パネル: P ボタン/キー", label_color);
             row("外交パネル: D ボタン/キー", label_color);
             row("部隊待機/補充: ボタン/H/J", label_color);

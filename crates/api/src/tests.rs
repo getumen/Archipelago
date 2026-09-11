@@ -280,6 +280,48 @@ fn air_actions_round_trip_through_the_http_codec() {
     assert_eq!(status, 200, "the session must still be usable after every request above");
 }
 
+/// Stage 11C (docs/phase11-spec.md §4 "兵科ごとの部隊数と品目...を出す"): a
+/// client must be able to both *choose* a land branch through `POST
+/// /action`'s `recruit_unit` (`action_codec`'s own `branch` field, Stage
+/// 11B) and *see* it afterward through `GET /state`'s per-unit `branch`
+/// field (this stage's own addition to `state::units_value`) - recruiting
+/// with no way to later confirm which branch was actually raised would
+/// leave a client unable to trust its own request.
+///
+/// Checked this fails when broken: temporarily removed the `("branch",
+/// ...)` field from `state::units_value` - the second assertion below
+/// (`branch.is_some()`) then failed (`None`, the same as every Sea/Air
+/// unit). Reverted before committing.
+#[test]
+fn recruited_branch_is_observable_through_state() {
+    let handle = start(Duration::from_secs(3600), Duration::from_secs(3600));
+    let reset_body = reset(handle.addr, 1, &[0]);
+    let session_id = reset_body.get("session_id").and_then(Value::as_str).unwrap().to_string();
+
+    let recruit_body = format!(
+        r#"{{"session_id":"{session_id}","faction":0,"actions":[{{"type":"recruit_unit","region":3,"domain":"land","branch":"armour"}}]}}"#
+    );
+    let (status, response) = json_body(request(handle.addr, "POST", "/action", Some(&recruit_body)));
+    assert_eq!(status, 200);
+    let accepted = response.get("accepted").and_then(Value::as_array).expect("accepted[] present");
+    assert_eq!(accepted.len(), 1, "recruiting an Armour unit at an owned capital must be accepted: {response:?}");
+
+    let (status, state_body) = state(handle.addr, &session_id);
+    assert_eq!(status, 200);
+    let units = state_body.get("units").and_then(Value::as_array).expect("units[] present");
+    let recruited = units
+        .iter()
+        .filter(|u| u.get("owner").and_then(Value::as_u64) == Some(0) && u.get("branch").and_then(Value::as_str) == Some("armour"))
+        .count();
+    assert_eq!(recruited, 1, "the newly-recruited unit's branch must read back as \"armour\" through GET /state: {units:?}");
+
+    let non_land_has_no_branch = units
+        .iter()
+        .filter(|u| u.get("domain").and_then(Value::as_str) != Some("land"))
+        .all(|u| matches!(u.get("branch"), Some(Value::Null)));
+    assert!(non_land_has_no_branch, "a Sea/Air unit must report `branch: null`, never a land branch key: {units:?}");
+}
+
 /// docs/phase5-spec.md "並列セッションが互いの結果に影響しないこと": two
 /// sessions from the *same* seed but different action sequences must
 /// diverge exactly as expected, and two sessions from different seeds must

@@ -42,15 +42,15 @@ use archipelago_sim::diplomacy::{Stance, Treaty, ALL_TREATIES};
 use archipelago_sim::focus::ALL_FOCI;
 use archipelago_sim::good::{ALL_GOODS, GOOD_COUNT};
 use archipelago_sim::ids::RegionId;
-use archipelago_sim::military::Branch;
+use archipelago_sim::military::{Branch, ALL_BRANCHES};
 use archipelago_sim::world::{Domain, Station};
 
 use super::map_mode::MapModeRes;
 use super::setup::sea_zone_radius;
 use super::{
-    ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose, PlayerFaction,
-    RegionLayout, RegionRadii, SeaZoneCenters, SelectedFaction, SelectedRegion, SelectedSeaZone,
-    SelectedUnits, SimRes, Speed, SpeedRes, UnitMarker,
+    ActiveBranch, ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose,
+    PlayerFaction, RegionLayout, RegionRadii, SeaZoneCenters, SelectedFaction, SelectedRegion,
+    SelectedSeaZone, SelectedUnits, SimRes, Speed, SpeedRes, UnitMarker,
 };
 
 const MIN_ZOOM: f32 = 0.25;
@@ -99,6 +99,7 @@ pub(super) fn keyboard_input(
     mut diplomacy: ResMut<DiplomacyPanel>,
     mut policy: ResMut<super::PolicyPanel>,
     mut active_good: ResMut<ActiveGood>,
+    mut active_branch: ResMut<ActiveBranch>,
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
     mut nl_compose: ResMut<NlCompose>,
@@ -142,6 +143,17 @@ pub(super) fn keyboard_input(
         let cur = active_good.0.index();
         active_good.0 = ALL_GOODS[(cur + 1) % GOOD_COUNT];
     }
+    // Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科が分かる"): `C`
+    // cycles `ActiveBranch` the same way `G` cycles `ActiveGood`, one line
+    // above - placed alongside it (before the menu/diplomacy branches
+    // below) for the identical reason: a player must be able to pick which
+    // branch the region panel's "陸軍を徴募" button (and its `Digit1`
+    // menu equivalent, `handle_menu_keys` below) raises without first
+    // closing whatever panel is open.
+    if keys.just_pressed(KeyCode::KeyC) {
+        let cur = ALL_BRANCHES.iter().position(|&b| b == active_branch.0).expect("ActiveBranch always holds one of ALL_BRANCHES");
+        active_branch.0 = ALL_BRANCHES[(cur + 1) % ALL_BRANCHES.len()];
+    }
     if keys.just_pressed(KeyCode::KeyN) {
         newspaper.open = !newspaper.open;
     }
@@ -170,7 +182,7 @@ pub(super) fn keyboard_input(
     // "自国地域を右クリック: その地域で可能な命令のメニュー" - and closes on
     // any of its own keys or `Esc`.
     if let Some(region) = menu.0 {
-        handle_menu_keys(&keys, region, active_good.0, &mut menu, &mut sim);
+        handle_menu_keys(&keys, region, active_good.0, active_branch.0, &mut menu, &mut sim);
         return;
     }
 
@@ -351,7 +363,7 @@ pub(super) fn keyboard_input(
 /// `ui::update_player_panel`'s legend text - kept in exactly one place so
 /// the two can't drift apart.
 pub(super) const MENU_ITEMS: [&str; 8] = [
-    "陸軍を徴募",
+    "陸軍を徴募（対象兵科）",
     "艦隊を徴募（要港湾）",
     "空軍を徴募（要飛行場）",
     "インフラ建設",
@@ -361,13 +373,21 @@ pub(super) const MENU_ITEMS: [&str; 8] = [
     "建設中止",
 ];
 
-fn handle_menu_keys(keys: &ButtonInput<KeyCode>, region: RegionId, active_good: archipelago_sim::good::Good, menu: &mut MenuRegion, sim: &mut SimRes) {
+fn handle_menu_keys(
+    keys: &ButtonInput<KeyCode>,
+    region: RegionId,
+    active_good: archipelago_sim::good::Good,
+    active_branch: Branch,
+    menu: &mut MenuRegion,
+    sim: &mut SimRes,
+) {
     if keys.just_pressed(KeyCode::Escape) {
         menu.0 = None;
         return;
     }
     let action = if keys.just_pressed(KeyCode::Digit1) {
-        Some(Action::RecruitUnit { region, domain: Domain::Land, branch: Branch::Infantry })
+        // `C` (above) picks which branch - see `ActiveBranch`'s own doc.
+        Some(Action::RecruitUnit { region, domain: Domain::Land, branch: active_branch })
     } else if keys.just_pressed(KeyCode::Digit2) {
         Some(Action::RecruitUnit { region, domain: Domain::Sea, branch: Branch::Infantry })
     } else if keys.just_pressed(KeyCode::Digit3) {
@@ -1056,6 +1076,7 @@ mod tests {
         world.insert_resource(DiplomacyPanel { open: false, target: None });
         world.insert_resource(super::super::PolicyPanel::default());
         world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch::default());
         world.insert_resource(PlayerFaction(None));
         world.insert_resource(SimRes(SimDriver::new(archipelago_sim::scenario::build_world(), 1)));
         world.insert_resource(NlCompose::default());

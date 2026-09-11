@@ -1657,16 +1657,16 @@ fn recruit(faction: FactionId, chronic_insolvency_ticks: u32, obs: &Observation,
     if land_units as f32 >= cap {
         return;
     }
-    // Stage 11B (docs/phase11-spec.md §1): which land branch this recruit
-    // would raise, decided *before* the stock gate below so that gate checks
-    // the commodity this specific recruit would actually spend - never
-    // `Good::Infantry` unconditionally, or a faction sitting on abundant
-    // Armour but zero Infantry (or vice versa) would never recruit at all.
-    // `choose_land_branch`'s own doc has the reasoning; this is a minimal,
-    // terrain-led default, not the full supply-aware doctrine
-    // docs/phase11-spec.md §4 reserves for Stage 11C.
+    // Stage 11B/11C (docs/phase11-spec.md §1, §4): which land branch this
+    // recruit would raise, decided *before* the stock gate below so that
+    // gate checks the commodity this specific recruit would actually spend
+    // - never `Good::Infantry` unconditionally, or a faction sitting on
+    // abundant Armour but zero Infantry (or vice versa) would never recruit
+    // at all. `choose_land_branch`'s own doc has the terrain-and-supply
+    // reasoning; `f.supply_ratio` is read here rather than re-derived, the
+    // same nationwide flow ratio the solvency gates below already trust.
     let region = recruit_region(faction, obs);
-    let branch = region.map(|r| choose_land_branch(&obs.world, r, land_units));
+    let branch = region.map(|r| choose_land_branch(&obs.world, r, land_units, f.supply_ratio));
     let equipment_good = branch.map(military::Branch::equipment_good).unwrap_or(Good::Infantry);
     if f.manpower < UNIT_MANPOWER * RECRUIT_STOCK_MARGIN
         || f.stock[equipment_good.index()] < UNIT_EQUIPMENT * RECRUIT_STOCK_MARGIN
@@ -1750,30 +1750,136 @@ fn recruit_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
         .map(|(r, _)| r)
 }
 
-/// Stage 11B minimal default (docs/phase11-spec.md §4 reserves the full
-/// terrain *and* supply-aware doctrine for Stage 11C - out of this stage's
-/// scope, which only has to make the branches real, not make the AI clever
-/// about them - CLAUDE.md's own record of the Phase 9D/10D shape this stage
-/// must not repeat: a new layer the AI never touches is effectively dead
-/// code in every AI-vs-AI game).
+/// Stage 11C (docs/phase11-spec.md §4 "地形と補給の状況に応じて兵科を選ぶ"):
+/// extends Stage 11B's terrain-only default with spec §1's *other* axis -
+/// "補給を実際に維持できるか". Both axes read real simulation numbers a real
+/// recruit would actually face, never an independently-invented score:
 ///
-/// Every third recruit is Artillery regardless of terrain: its own
-/// differentiator is posture (the attacking side's firepower,
-/// `military::branch_terrain_mult`'s own doc), not terrain, so there is no
-/// terrain signal to rotate it in by - a fixed cadence is the simplest way
-/// to actually field some. The other two of three go to whichever of
-/// Infantry/Armour reads stronger on `region`'s own terrain, using the exact
-/// multiplier real combat resolves with (`military::branch_terrain_mult`)
-/// rather than an independently-invented "is this good tank country" guess
-/// that could silently drift from what combat actually rewards.
-fn choose_land_branch(world: &World, region: RegionId, existing_land_units: usize) -> military::Branch {
-    if existing_land_units % 3 == 2 {
-        return military::Branch::Artillery;
-    }
+/// - **Terrain** decides Armour vs. Infantry exactly as Stage 11B did:
+///   `military::branch_terrain_mult` against `region`'s terrain - the
+///   identical multiplier real combat resolves with, so this can never
+///   silently drift from what fielding a branch there actually earns it.
+///   Infantry's own multiplier is flat `1.0` on every terrain
+///   (`INFANTRY_MOUNTAIN_MULT`'s own doc: the generalist reference class),
+///   so this reduces to "is Armour's terrain multiplier above `1.0` here".
+/// - **Supply** discounts each non-Infantry branch's terrain value by how
+///   much heavier its `Branch::supply_weight()` is than Infantry's `1.0`
+///   reference, scaled by `tightness` - `0.0` at ample `Faction::
+///   supply_ratio`, `1.0` at `DISBAND_SOLVENCY_SUPPLY_RATIO` (the floor
+///   `recruit` itself already refuses to recruit under at all, so nothing
+///   below that floor is ever actually reachable here). At `tightness ==
+///   0.0` every branch's score is its terrain value unchanged - Stage 11B's
+///   exact comparison. As supply tightens toward the floor, Armour's 1.6x
+///   weight is increasingly discounted against Infantry's untouched `1.0`,
+///   so a plain region that would recruit Armour at ample supply falls back
+///   to Infantry once the network can no longer carry the difference -
+///   continuous in `supply_ratio`, never a fixed threshold to saturate
+///   against (docs/conventions.md §6 "必ず比率で按分する").
+///
+/// Artillery keeps Stage 11B's fixed one-in-three cadence (its own
+/// differentiator is posture, not terrain - `branch_terrain_mult`'s own
+/// doc - so there is no terrain signal to place it by, the same reasoning
+/// Stage 11B already used), but Stage 11C makes that slot supply-aware too:
+/// the scheduled recruit is only actually Artillery if the same discount
+/// applied to its own 1.25x weight still clears Infantry's baseline: a
+/// faction whose supply is already tight builds Infantry in that slot
+/// instead of adding a second heavy branch on top of whatever Armour it is
+/// already declining.
+///
+/// Measured on `scenarios/mvp.json` seeds 1-8 (720 days each). Stage 11B's
+/// terrain-only default (no supply discount - the committed state before
+/// this discount existed, *not* branch-blind) reached 8/8 decisive
+/// (316/342/434/385/294/481/361/382). A genuinely branch-blind variant
+/// (`choose_land_branch` hardcoded to always return `Branch::Infantry`,
+/// against either Stage 11B's mechanics or this stage's - both give the
+/// identical result) drops to 2/8 (370/300 decisive, the rest stalemate at
+/// day 720): Stage 11A/11B's scenario data alone already damages a
+/// branch-blind AI, since Armour/Artillery capacity is wholly new
+/// production layered on top of the old economy (mvp.json's `infantry`
+/// capacity per region is unchanged from the old unified `arms` value), so
+/// `unit_cap` (`World::industry_total` sums every good) grows past what an
+/// Infantry-only force can actually feed - nothing to do with this
+/// function.
+///
+/// This stage's supply discount, layered on Stage 11B's terrain default,
+/// measures 5/8 (370/338/**720**/448/244/**720**/438/**720**). Traced on
+/// seed 3's stalemate: `Faction::supply_ratio` spends most of any real war
+/// below the ~0.75 this discount needs before Armour's best terrain edge
+/// (Plain, `ARMOUR_PLAIN_MULT` 1.30) still clears Infantry's baseline once
+/// discounted, so the mix shifts toward Armour only in the first few
+/// peacetime weeks (`supply_ratio` starts at `1.0`) and then reverts to
+/// Infantry for essentially the rest of the game once real fighting
+/// starts - every surviving faction in all 8 seeds ends day 720 with zero
+/// Armour. That reversion is not starvation - in the traced seed,
+/// `Faction::stock[Good::Armour]` sat 30-95x above `UNIT_EQUIPMENT` the
+/// whole time, never the gate that actually blocked a recruit - it is this
+/// discount correctly reading a nationwide flow ratio that mvp's own
+/// economy holds below the crossover point for most of any war
+/// (docs/phase11-spec.md §0's own pre-Phase-11 measurement: even with a
+/// single pool, "在庫があるとき" produced/demand already sat at 0.62). A
+/// real, measured cost of adding supply-awareness - not a coding defect
+/// (`Branch::Armour`'s equipment was never actually the scarce resource),
+/// so neither `ARMOUR_SUPPLY_WEIGHT` nor this formula's shape should be
+/// retuned to chase mvp's seed count back up (CLAUDE.md's own record of
+/// three constants fitted to mvp that distorted the design).
+fn choose_land_branch(world: &World, region: RegionId, existing_land_units: usize, supply_ratio: f32) -> military::Branch {
     let terrain = world.region(region).terrain;
-    let infantry = military::branch_terrain_mult(military::Branch::Infantry, terrain, false);
-    let armour = military::branch_terrain_mult(military::Branch::Armour, terrain, false);
-    if armour > infantry {
+    // `0.0` at ample supply, `1.0` at `DISBAND_SOLVENCY_SUPPLY_RATIO` - the
+    // floor `recruit` itself already refuses to recruit under at all, so
+    // nothing below that floor is ever actually reachable here. Continuous,
+    // never a fixed threshold to saturate against
+    // (docs/conventions.md §6 "必ず比率で按分する").
+    let tightness = ((1.0 - supply_ratio) / (1.0 - DISBAND_SOLVENCY_SUPPLY_RATIO)).clamp(0.0, 1.0);
+    // A branch's terrain value, discounted by how much heavier its
+    // `Branch::supply_weight()` is than Infantry's `1.0` reference, scaled
+    // by `tightness` - at ample supply this is the terrain value
+    // unchanged; as the network strains, a heavier branch's edge is
+    // increasingly discounted against Infantry's untouched `1.0` baseline
+    // (`Branch::Infantry.supply_weight() == 1.0`, so its own discount is
+    // always `1.0` regardless of `tightness`).
+    let discount = |branch: military::Branch, terrain_value: f32| {
+        let extra_weight = branch.supply_weight() - military::Branch::Infantry.supply_weight();
+        terrain_value / (1.0 + extra_weight * tightness)
+    };
+    let infantry_score = discount(military::Branch::Infantry, 1.0);
+    // Armour's own terrain value (`military::branch_terrain_mult` - the
+    // identical multiplier real combat resolves with, docs/phase11-spec.md
+    // §1's table: strong on the plain, penalized everywhere else).
+    let armour_terrain = military::branch_terrain_mult(military::Branch::Armour, terrain, false);
+    let armour_score = discount(military::Branch::Armour, armour_terrain);
+
+    // Artillery's own differentiator is posture, not terrain
+    // (`branch_terrain_mult`'s own doc) - it has no terrain edge to weigh
+    // against Infantry's here, so every third recruit is scheduled as
+    // Artillery regardless of terrain, the simplest way to actually field
+    // some (Stage 11B's own reasoning, unchanged). What Stage 11C adds: the
+    // scheduled slot is only honoured if a strained network can still carry
+    // Artillery's 1.25x weight over Infantry's baseline - a faction whose
+    // supply is already tight builds Infantry in that slot instead, judged
+    // by the exact same discount every other branch answers to.
+    //
+    // `codex review` (P2) on this stage's first cut: a flat `1.0` baseline
+    // here (Infantry's own reference value, carrying no terrain edge of its
+    // own the way Armour's `armour_terrain` does) meant Artillery's score
+    // could never exceed Infantry's once `tightness` was positive at all -
+    // any supply short of perfectly ample silently zeroed Artillery out of
+    // the rotation, not the gradual reduction "残量に比率を掛け直す" this
+    // discount is supposed to be. The fix: give Artillery the same kind of
+    // headroom Armour's own terrain multiplier already provides, honestly
+    // derived from `branch_terrain_mult`'s own two real values for this
+    // branch (`ARTILLERY_ATTACK_MULT` attacking, `1.0` defending) rather
+    // than an invented number - averaged, since a recruit not yet raised
+    // has no posture to read yet, this is the unbiased expectation over the
+    // two outcomes the branch actually produces.
+    if existing_land_units % 3 == 2 {
+        let artillery_value = (military::branch_terrain_mult(military::Branch::Artillery, terrain, false)
+            + military::branch_terrain_mult(military::Branch::Artillery, terrain, true))
+            / 2.0;
+        let artillery_score = discount(military::Branch::Artillery, artillery_value);
+        return if artillery_score >= infantry_score { military::Branch::Artillery } else { military::Branch::Infantry };
+    }
+
+    if armour_score > infantry_score {
         military::Branch::Armour
     } else {
         military::Branch::Infantry

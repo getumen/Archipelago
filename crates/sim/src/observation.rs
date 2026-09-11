@@ -8,6 +8,7 @@ use crate::good::GOOD_COUNT;
 use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::logistics;
+use crate::military::ALL_BRANCHES;
 use crate::naval;
 use crate::transport::TransportNodeKind;
 use crate::world::{Domain, Station, World};
@@ -34,15 +35,27 @@ pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 /// `stock[GOOD_COUNT]`, `war_support`, `stability`,
 /// `group_support[GROUP_COUNT]` (Stage 3A), `unit_count`,
 /// `[national_focus_code, focus_transition_days]` (Stage 3C), then
-/// `air_unit_count` (Stage 10D, 1 trailing field) - the `Domain::Air` slice
+/// `air_unit_count` (Stage 10D, 1 field) - the `Domain::Air` slice
 /// of `unit_count` (which already silently included air units once they
 /// existed at all - `Observation::own_units()` filters only on
 /// owner/`alive`, never on domain), broken out on its own since air power
 /// isn't a raw regional/zone power addend the way land/sea combat power is
 /// (`Observation::power_tables`'s own doc) - this is the one faction-level
 /// place an agent can read "how many squadrons do I have" without deriving
-/// it from the per-node transport-network segment below.
-pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2 + 1;
+/// it from the per-node transport-network segment below. Then
+/// `[infantry_count, armour_count, artillery_count]` (Stage 11C,
+/// docs/phase11-spec.md §4 "兵科ごとの部隊数...を出す", 3 trailing fields) -
+/// the `Domain::Land` slice of `unit_count` broken out by
+/// `military::Branch`, `Branch::Infantry`/`Armour`/`Artillery` in that fixed
+/// order (mirroring `Branch::key()`'s own declaration order, never a
+/// `HashMap` count). `unit_count` above already silently includes every
+/// land unit regardless of branch, exactly the way it already did for air
+/// before `air_unit_count` broke that slice out too - the equipment
+/// commodities each branch draws on are already observable via
+/// `stock[GOOD_COUNT]` (`Good::Infantry`/`Armour`/`Artillery`, Stage 11A),
+/// but nothing before this let a consumer see the *branch mix* of the force
+/// itself.
+pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2 + 1 + 3;
 
 /// Stage 3B per-relation field count in `Observation::encode()`, one block
 /// per *other* faction (own row zeroed - see `encode`'s doc): `[stance_code,
@@ -338,8 +351,11 @@ impl<'a> Observation<'a> {
     /// per-sea-zone (Stage 2D) `[own_control, enemy_control_max, own_power,
     /// enemy_power]`, then faction scalars `[manpower, stock[GOOD_COUNT]...,
     /// war_support, stability, group_support[GROUP_COUNT]..., unit_count,
-    /// national_focus_code, focus_transition_days]` (Stage 3A adds
-    /// `group_support`; Stage 3C adds the trailing pair -
+    /// national_focus_code, focus_transition_days, air_unit_count,
+    /// infantry_count, armour_count, artillery_count]` (Stage 3A adds
+    /// `group_support`; Stage 3C adds the focus pair; Stage 10D adds
+    /// `air_unit_count`; Stage 11C adds the trailing per-branch triple -
+    /// `FACTION_FIELD_COUNT`'s own doc has the full reasoning for each -
     /// `national_focus_code` is `NationalFocus::index()` as an `f32`,
     /// regardless of whether a switch is still transitioning - a consumer
     /// that needs "is it actually active" must additionally check
@@ -422,6 +438,20 @@ impl<'a> Observation<'a> {
         let air_unit_count =
             own_units.iter().filter(|&&u| self.world.unit(u).station.domain() == Domain::Air).count();
         out.push(air_unit_count as f32);
+
+        // Stage 11C (docs/phase11-spec.md §4, `FACTION_FIELD_COUNT`'s own
+        // doc): the `Domain::Land` slice of `unit_count`, broken out by
+        // `military::Branch` - fixed `Infantry`/`Armour`/`Artillery` order,
+        // never a `HashMap` iteration. `Unit::branch` is `Some` for every
+        // land unit and `None` for every fleet/squadron (`Unit::branch`'s
+        // own doc), so this counts by explicit equality against each
+        // `Branch` variant rather than trusting `station.domain()` alone -
+        // a unit whose domain and branch ever disagreed (which nothing in
+        // this codebase constructs) would silently miscount otherwise.
+        for branch in ALL_BRANCHES {
+            let count = own_units.iter().filter(|&&u| self.world.unit(u).branch == Some(branch)).count();
+            out.push(count as f32);
+        }
 
         // Stage 3B (docs/phase3-spec.md "Stage 3B"): one `DIPLOMACY_FIELD_
         // COUNT`-sized block per faction in ascending `FactionId` order
@@ -514,6 +544,7 @@ impl<'a> Observation<'a> {
 mod tests {
     use super::*;
     use crate::ids::UnitId;
+    use crate::military::Branch;
 
     /// Regression guard for exactly the defect class that used to be caught
     /// only by hashing a whole `--seed 1 --days 720` run
@@ -817,10 +848,69 @@ mod tests {
         let air_unit_count_offset = world.regions.len() * REGION_FIELD_COUNT
             + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
             + FACTION_FIELD_COUNT
-            - 1;
+            - 1
+            - 3; // Stage 11C appended 3 more trailing fields after this one
         assert_eq!(
             encoded[air_unit_count_offset], 1.0,
             "moving one unit to an airfield must show up as air_unit_count == 1"
         );
+    }
+
+    /// Stage 11C (docs/phase11-spec.md §4 "兵科ごとの部隊数...を出す"):
+    /// `[infantry_count, armour_count, artillery_count]` must reflect the
+    /// actual per-`military::Branch` mix of this faction's land force, not
+    /// just its total (`unit_count`, already observable, doesn't say what
+    /// any of them *are*). Checked this fails when broken: temporarily
+    /// changed the branch loop in `encode()` to always push `0.0` regardless
+    /// of `u.branch` - both assertions below then failed (every branch
+    /// count read `0.0` even with two Armour units recruited). Reverted
+    /// before committing.
+    #[test]
+    fn branch_unit_counts_are_observable() {
+        let mut world = crate::scenario::build_world();
+        let faction = FactionId(0);
+        let capital = world.faction(faction).capital;
+
+        // Two fresh Armour units, on top of whatever mvp's `build_world`
+        // already starts faction 0 with (all `Branch::Infantry`, confirmed
+        // just below rather than assumed).
+        let starting_infantry =
+            world.units.iter().filter(|u| u.owner == faction && u.alive && u.branch == Some(Branch::Infantry)).count();
+        assert!(starting_infantry > 0, "test setup: mvp must start faction 0 with at least one Infantry unit");
+
+        for i in 0..2 {
+            let id = crate::ids::UnitId(world.units.len() as u32);
+            world.units.push(crate::military::Unit {
+                id,
+                owner: faction,
+                name: format!("Armour Test {i}"),
+                station: crate::world::Station::Region(capital),
+                movement: None,
+                manpower: crate::balance::UNIT_MANPOWER,
+                equipment: crate::balance::UNIT_EQUIPMENT,
+                organization: crate::balance::UNIT_ORG,
+                morale: 1.0,
+                supply: 1.0,
+                arms_delivery: 1.0,
+                arms_budget: 0.0,
+                arms_delivery_station: crate::world::Station::Region(capital),
+                branch: Some(Branch::Armour),
+                experience: 0.0,
+                alive: true,
+            });
+        }
+
+        let obs = Observation { faction, world: &world };
+        let encoded = obs.encode();
+        let branch_base = world.regions.len() * REGION_FIELD_COUNT
+            + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+            + FACTION_FIELD_COUNT
+            - 3;
+        assert_eq!(
+            encoded[branch_base], starting_infantry as f32,
+            "infantry_count must count exactly the Infantry-branch units"
+        );
+        assert_eq!(encoded[branch_base + 1], 2.0, "armour_count must count the two newly-raised Armour units");
+        assert_eq!(encoded[branch_base + 2], 0.0, "artillery_count must read zero with no Artillery unit raised");
     }
 }

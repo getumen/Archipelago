@@ -81,12 +81,20 @@ pub fn print_event(world: &World, day: u32, event: &Event) {
             )
         }
         Event::UnitDestroyed { unit, station, owner } => match station {
-            Station::Region(region) => format!(
-                "部隊壊滅: {} 軍 部隊#{} が {} で失われた",
-                world.faction(*owner).name,
-                unit.0,
-                world.region(*region).name
-            ),
+            // Stage 11C (docs/phase11-spec.md §4): mirrors `apps/game`'s
+            // `event_text::format_event` (this function's own doc explains
+            // why the two are kept in sync by hand) - the destroyed unit's
+            // own `Branch`, still readable off `world.unit(*unit)` even now
+            // that it's dead (`Unit::branch`'s own doc).
+            Station::Region(region) => {
+                let branch = world.unit(*unit).branch.map(|b| format!("[{}] ", b.label())).unwrap_or_default();
+                format!(
+                    "部隊壊滅: {} 軍 {branch}部隊#{} が {} で失われた",
+                    world.faction(*owner).name,
+                    unit.0,
+                    world.region(*region).name
+                )
+            }
             Station::Sea(zone) => format!(
                 "艦隊撃沈: {} 軍 部隊#{} が {} で撃沈された",
                 world.faction(*owner).name,

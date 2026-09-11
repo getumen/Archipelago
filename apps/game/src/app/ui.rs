@@ -435,7 +435,14 @@ pub(super) fn update_player_panel(
             out.push_str("この地域の部隊（クリックで選択/解除）:\n");
             for u in units {
                 let mark = if selected_units.0.contains(&u.id.0) { "*" } else { " " };
-                out.push_str(&format!("  {mark}#{} {} 兵力{:.0} 装備{:.0} 組織{:.0}\n", u.id.0, u.name, u.manpower, u.equipment, u.organization));
+                // Stage 11C (docs/phase11-spec.md §4 "地図とパネルで兵科が
+                // 分かる"): every unit this loop can ever show is
+                // `Station::Region` (the filter above), so `Domain::Land`
+                // and therefore always `Some(branch)` (`Unit::branch`'s own
+                // doc) - `unwrap_or("?")` is defensive only, never expected
+                // to actually read "?" here.
+                let branch = u.branch.map(|b| b.label()).unwrap_or("?");
+                out.push_str(&format!("  {mark}#{} {} [{branch}] 兵力{:.0} 装備{:.0} 組織{:.0}\n", u.id.0, u.name, u.manpower, u.equipment, u.organization));
             }
         }
     }

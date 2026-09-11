@@ -89,8 +89,17 @@ pub(super) fn format_event(world: &World, event: &Event) -> String {
             format!("海戦: {} で {} が交戦 (損耗 {:.2}万人)", zone_name, names.join(" vs "), casualties)
         }
         Event::UnitDestroyed { unit, station, owner } => match station {
+            // Stage 11C (docs/phase11-spec.md §4): the destroyed unit's own
+            // `Branch` - still readable off `world.unit(*unit)` even now
+            // that it's dead (`military::tick_recovery`'s `Outcome::
+            // Destroyed` arm only ever flips `alive = false`, never removes
+            // the `Unit` from `world.units` - `Unit::branch` is set once at
+            // recruitment and never changed afterward). Land-only: `None`
+            // for every Sea/Air unit (`Unit::branch`'s own doc), so those
+            // two arms below are unchanged.
             Station::Region(region) => {
-                format!("部隊壊滅: {} 軍 部隊#{} が {} で失われた", world.faction(*owner).name, unit.0, world.region(*region).name)
+                let branch = world.unit(*unit).branch.map(|b| format!("[{}] ", b.label())).unwrap_or_default();
+                format!("部隊壊滅: {} 軍 {branch}部隊#{} が {} で失われた", world.faction(*owner).name, unit.0, world.region(*region).name)
             }
             Station::Sea(zone) => {
                 format!("艦隊撃沈: {} 軍 部隊#{} が {} で撃沈された", world.faction(*owner).name, unit.0, world.sea_zone(*zone).name)
