@@ -3042,16 +3042,33 @@ fn blockaded_faction_starves() {
 // Stage 3A — 国内政治勢力 (docs/phase3-spec.md "Stage 3A")
 // ---------------------------------------------------------------------------
 
-/// design.md §2's central claim, and the regression guard for this whole
-/// stage: a faction that keeps winning the war outright (net territorial
-/// gain, never a loss) can still see its government collapse if it keeps
-/// tightening conscription and rationing on its own population. Military
-/// and Government support both get a boost from every captured region, but
-/// Labor, Citizens and (via sustained unrest/shortage) Government and
-/// LocalGovernment support all suffer - and those five groups outweigh
-/// Military+Government's combined 0.40 influence share.
+/// `tick_politics`'s own arithmetic: given sustained maximum unrest, a deep
+/// shortage and continuous casualties, the influence-weighted stability sum
+/// crosses `REGIME_CHANGE_THRESHOLD` even while territory is being gained.
+///
+/// **This test says nothing about whether play can produce those inputs, and
+/// it used to claim it did.** Its previous doc called itself "design.md §2's
+/// central claim" - that tightening conscription and rationing can topple a
+/// winning government. A 2026-09-12 measurement found that claim false in
+/// play: driving conscription to 1.0 and rationing to 0.5 through the real
+/// action path for 720 days leaves `stability` at 44.4-45.7, never below the
+/// threshold, and Strike/Mutiny/CapitalFlight/RegimeChange fire 0 times
+/// across nine runs (mvp, japan47 and japan_hex, seeds 1-3 each).
+///
+/// The reason is structural and is written up in `docs/future-work.md`
+/// (「§12 の『締め付ければ政権が倒れる』は 2 つのつまみでは成立しない」):
+/// 45% of the influence weight sits on groups those two levers either reward
+/// or never touch. What this test force-feeds - `unrest = 95.0` and
+/// `shortage = 0.9` every tick - real play does not reach (shortage sits
+/// around 0.50).
+///
+/// So it is kept, but honestly labelled: it guards the **formula**, not the
+/// causal claim. A guard for the claim would have to drive a real agent into
+/// collapse, and per that write-up the claim as §12 states it needs a third
+/// factor (casualties and devastation) that conscription and rationing alone
+/// do not supply.
 #[test]
-fn winning_war_can_still_topple_government() {
+fn politics_formula_crosses_the_regime_change_threshold_under_forced_extremes() {
     let mut world = scenario::build_world();
     let faction = FactionId(0);
     let start_regions = world.region_count(faction);

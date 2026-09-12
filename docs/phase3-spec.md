@@ -144,8 +144,16 @@ stability = Σ group_influence[g] * group_support[g]
 - `cargo build --workspace` 警告 0、`cargo test --workspace` 全通過
 - 決定論維持（同 seed で `--json` がバイト一致）
 - 新規テスト
-  - `winning_war_can_still_topple_government`: 領土を拡大し続けている勢力でも、
-    徴兵と配給の締め付けを続ければ政権交代に至る（**企画書 §2 の回帰ガード**）
+  - `politics_formula_crosses_the_regime_change_threshold_under_forced_extremes`:
+    不穏と不足と戦死を強制的に極端な値に固定すれば、領土を拡大していても
+    影響力で重みづけた安定度が政権交代の閾値を割る
+    （**式の回帰ガード。企画書 §2 の因果そのものの保証ではない**）
+
+    当初は `winning_war_can_still_topple_government` という名で「企画書 §2 の
+    回帰ガード」と称していたが、2026-09-12 の測定でその主張が実際の対戦では
+    偽であることが判明した。徴兵と配給だけでは影響力の 45% に届かず、政権は
+    倒れない。経緯と数値は `docs/future-work.md` の「§12 の『締め付ければ政権が
+    倒れる』は 2 つのつまみでは成立しない」にある。
   - `support_recovers_after_policy_relaxed`: 締め付けを緩めれば支持が戻る（吸収状態でない）
   - `regime_change_resets_policy_not_territory`: 政権交代で政策のみ既定値に戻り、
     領土・部隊・在庫は保持される
