@@ -186,7 +186,14 @@ pub(crate) struct NewspaperIssue {
 #[derive(Resource, Default)]
 pub(crate) struct NewspaperState {
     pub history: Vec<NewspaperIssue>,
-    pub period_start: u32,
+    /// The board exactly as it stood at the current reporting period's
+    /// first day - `newspaper::publish_issue`'s diff base
+    /// (docs/newspaper-spec.md §1: "期間の始点と終点の差を取り"). `None` only
+    /// ever appears in a test fixture that never ticks far enough to call
+    /// `publish_issue` at all (`app::run`'s own real startup path always
+    /// sets this immediately) - `publish_issue` panics loudly rather than
+    /// silently substituting the current board if it's ever missing there.
+    pub period_start_world: Option<archipelago_sim::world::World>,
     pub period_events: Vec<archipelago_sim::event::Event>,
     pub open: bool,
     /// Index into `history` currently shown - `None` means "the latest
@@ -571,7 +578,12 @@ pub fn run(
     let sea_centers = sea_zone_centers(&world, &positions);
     let region_count = world.regions.len();
     let unit_count = world.units.len();
-    let start_day = world.day;
+    // docs/newspaper-spec.md §1: the first issue's article is driven by the
+    // diff between the board at this exact startup moment and the board at
+    // `NEWSPAPER_INTERVAL_DAYS` later, so a snapshot of it is kept before
+    // `world` moves into `SimDriver::new_with_player` below - the same
+    // reason `region_radii` just below is computed against `&world` first.
+    let newspaper_start_world = world.clone();
     // Computed against `&world` before it moves into `SimDriver::new_with_player`
     // below - see `RegionRadii`'s own doc for why every rendering system
     // shares this one Vec instead of each recomputing its own.
@@ -692,7 +704,7 @@ pub fn run(
         .insert_resource(panels::PointerOverUi::default())
         .insert_resource(panels::UnitPanelSlots::default())
         .insert_resource(panels::InterdictPanelSlots::default())
-        .insert_resource(NewspaperState { period_start: start_day, open: debug_open_newspaper, ..Default::default() })
+        .insert_resource(NewspaperState { period_start_world: Some(newspaper_start_world), open: debug_open_newspaper, ..Default::default() })
         // Cross-attempt state for `screenshot::maybe_capture_screenshot`/
         // `handle_screenshot_captured` (that resource's own doc) - always
         // present, like every other resource in this list, and inert

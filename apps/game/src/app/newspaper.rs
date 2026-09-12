@@ -19,20 +19,26 @@ use archipelago_sim::world::World;
 
 use super::{NewspaperIssue, NewspaperState};
 
-/// Generates the issue covering `news.period_start..world.day` and appends
-/// it to `news.history`, resetting the period for what comes next -
+/// Generates the issue covering `news.period_start_world.day..world.day` and
+/// appends it to `news.history`, resetting the period for what comes next -
 /// mirrors `apps/headless/src/main.rs`'s own `--newspaper` loop body
-/// exactly. `news.viewing` is left untouched: a player already paging back
+/// exactly, including snapshotting a fresh `period_start_world` for the
+/// period that starts now (docs/newspaper-spec.md §1's diff needs both
+/// ends). `news.viewing` is left untouched: a player already paging back
 /// through history keeps looking at the same past issue rather than being
 /// yanked back to the new one every time it lands.
 pub(super) fn publish_issue(news: &mut NewspaperState, world: &World) {
     // A fresh, stateless backend every issue - `MockBackend::always_err`
     // never touches the network or the filesystem and always fails, so
     // `newspaper::generate_article` always falls through to its own
-    // event-driven Japanese template.
+    // state-diff-driven template.
     let backend = MockBackend::always_err(archipelago_agents::llm::LlmError::Unavailable);
-    let articles = newspaper::generate_issue(&backend, world, &news.period_events, news.period_start);
-    news.history.push(NewspaperIssue { period_start: news.period_start, period_end: world.day, articles });
+    let start_world = news
+        .period_start_world
+        .as_ref()
+        .expect("period_start_world must be set (app::run's real startup always sets it) before the first publish_issue call");
+    let articles = newspaper::generate_issue(&backend, start_world, world, &news.period_events);
+    news.history.push(NewspaperIssue { period_start: start_world.day, period_end: world.day, articles });
     news.period_events.clear();
-    news.period_start = world.day;
+    news.period_start_world = Some(world.clone());
 }

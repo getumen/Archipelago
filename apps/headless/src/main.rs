@@ -149,13 +149,19 @@ fn main() {
     // `!args.json` the same way `log`/`show_summary` are, so this flag can
     // never add a single byte to `--json` output - see
     // `newspaper_does_not_affect_simulation`. `newspaper_backend`/`period_events`/
-    // `period_start` are only ever *read from* `sim.world` and `events`,
-    // never fed back into `sim` - see `newspaper.rs`'s module doc for the
-    // boundary this enforces.
+    // `period_start_world` are only ever *read from* `sim.world` and
+    // `events`, never fed back into `sim` - see `newspaper.rs`'s module doc
+    // for the boundary this enforces.
+    //
+    // docs/newspaper-spec.md §1: the article is driven by the *diff* between
+    // the period's start and end board state, so (only when newspaper output
+    // is actually wanted) a full `World` snapshot is kept from the moment
+    // each period begins - `World` derives `Clone` for exactly this kind of
+    // occasional, infrequent (`NEWSPAPER_INTERVAL_DAYS` apart) snapshot.
     let print_newspaper = args.newspaper && !args.json;
     let newspaper_backend = newspaper_backend(&args);
     let mut period_events: Vec<Event> = Vec::new();
-    let mut period_start = sim.world.day;
+    let mut period_start_world: Option<World> = print_newspaper.then(|| sim.world.clone());
 
     let outcome = loop {
         let outcome = sim.outcome(args.days);
@@ -187,10 +193,11 @@ fn main() {
         if print_newspaper {
             period_events.extend(events.iter().cloned());
             if sim.world.day % NEWSPAPER_INTERVAL_DAYS == 0 {
-                let issue = newspaper::generate_issue(&newspaper_backend, &sim.world, &period_events, period_start);
+                let start_world = period_start_world.as_ref().expect("print_newspaper implies Some");
+                let issue = newspaper::generate_issue(&newspaper_backend, start_world, &sim.world, &period_events);
                 report::print_newspaper_issue(&sim.world, &issue);
                 period_events.clear();
-                period_start = sim.world.day;
+                period_start_world = Some(sim.world.clone());
             }
         }
     };
