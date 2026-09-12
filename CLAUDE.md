@@ -90,12 +90,16 @@ Phase 9 で最も高くついた欠陥は艦隊だけが有限流量の外にい
 # 観る（AI 同士）
 cargo run --release -p archipelago-game -- --scenario scenarios/japan47.json --seed 2
 
+# 観る（LLM 国家。企画書 §21-3「LLM 国家」・§13）
+cargo run --release -p archipelago-game -- --scenario scenarios/japan_hex.json --seed 2 --agent llm --backend mock
+
 # 遊ぶ
 cargo run --release -p archipelago-game -- --play 東方連合
 
 # 描画なし
 cargo run -p archipelago-headless -- --seed 1 --days 720 --newspaper
 cargo run -p archipelago-headless -- --seed 1 --days 720 --bench
+cargo run -p archipelago-headless -- --agent llm --backend mock --seed 1 --days 720
 
 # API / 強化学習
 cargo run -p archipelago-api -- --bind 127.0.0.1:8080
@@ -106,6 +110,15 @@ cargo test --workspace     # 404 件
 
 クライアントのキー: `N` 新聞 / `L` 補給網 / `D` 外交 / `Tab` 勢力切替 /
 `Space` 一時停止 / `1` `2` `3` 速度。`--days` で日数上限（既定 720）。
+`--agent llm --backend mock` で全 AI 勢力の方針決定を LLM に切り替えられる
+（`--play` した自国は対象外）。既定は `--agent heuristic` で、これは変えていない -
+決定論とオフラインビルドを守るための意図的な選択であり、`--agent llm --backend fail`
+の結果が `--agent heuristic` とバイト一致することで担保している（下記）。
+左のパネルで LLM 駆動の勢力には `【LLM】` と付く。`--backend mock` は決められた
+`Doctrine` を順に返すだけのオフライン確認用で、本物の LLM ではない。本物を使うには
+`crates/llm::HttpBackend`（平文 HTTP・TLS なし、`docs/future-work.md`）をローカルまたは
+リバースプロキシ経由の OpenAI 互換サーバー（Ollama など）に向けて自分で配線するコードが
+要る - `--backend http:...` のような CLI フラグはまだない。
 
 ## 最重要の不変条件
 

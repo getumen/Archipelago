@@ -17,8 +17,9 @@ crates/agents/  ヒューリスティック AI と LLM エージェント
 crates/llm/     LLM バックエンド（OpenAI 互換 HTTP、TLS なし＝ローカル/プロキシ経由）
 crates/api/     REST / WebSocket API
 apps/headless/  描画なしシミュレーター（CLI）
+apps/game/      Bevy クライアント（観る/遊ぶ。Bevy が入るのはここだけ）
 python/env/     Gymnasium 互換の強化学習環境
-scenarios/      マップデータ（mvp.json = 10 地域、japan47.json = 47 都道府県）
+scenarios/      マップデータ（mvp.json = 10 地域、japan47.json = 47 都道府県、japan_hex.json = 289 マスの実地図）
 ```
 
 Simulation Core は描画から完全に分離されており、UI・API・RL・LLM がすべて同じロジックを使う。
@@ -41,7 +42,26 @@ cargo run -p archipelago-headless -- --agent llm --backend mock --seed 1 --days 
 
 # ベンチマーク
 cargo run -p archipelago-headless -- --seed 1 --days 720 --bench
+
+# Bevy クライアントで観る（AI 同士。既定はヒューリスティック AI）
+cargo run --release -p archipelago-game -- --scenario scenarios/japan_hex.json --seed 2
+
+# 同じ地図・同じ seed を LLM 国家で観る（差別化ポイントの 1 つ、企画書 §21-3「LLM 国家」）
+cargo run --release -p archipelago-game -- --scenario scenarios/japan_hex.json --seed 2 --agent llm --backend mock
 ```
+
+`--agent llm --backend mock` は headless・game のどちらでも同じ意味を持つ:
+既定のヒューリスティック AI の代わりに、各勢力の長期方針（`Doctrine`）を LLM に相談させる。
+`--backend mock` は決められた `Doctrine` の応答を順に返すだけの、ネットワークに一切出ない
+オフライン確認用バックエンドで、**本物の LLM ではない。** 実証するのは「方針が変わると
+歴史が変わる」という配線が実際に効いていることであり、実際の推論能力や自然さは何も示さない。
+本物の LLM を使うには `crates/llm::HttpBackend`（OpenAI 互換 `/v1/chat/completions` を話す）が
+必要だが、これは平文 HTTP のみで TLS を持たず（`docs/future-work.md`「`HttpBackend` が TLS を
+持たない」）、headless・game いずれの CLI にも `--backend http:...` のような形では配線されて
+いない。ローカルまたはリバースプロキシ経由の OpenAI 互換サーバー（Ollama / llama.cpp の
+`server` / vLLM など）を用意した上で、`apps/headless/src/main.rs::build_agents`（または
+`apps/game/src/sim_driver.rs::build_ai_controller`）と同じパターンで `HttpBackend` を組み込む
+数行のコードを書く必要がある。
 
 `--seed` が同じなら結果は完全に再現する。
 
@@ -96,7 +116,10 @@ python python/examples/random_policy.py
 - **japan47 が 720 日で決着しない。** 6 勢力が全員相互に開戦して始まるため、
   勝利に 5 勢力の撃滅を要する。シナリオ単位の初期外交状態が必要
 - **観測ベクトルが平坦。** 隣接関係の構造を持たないため、方策がマップ間で転移しない
-- **Bevy クライアント未着手**（企画書 §16）
+- **LLM 国家は既定で無効。** `--agent llm --backend mock`（上記）を明示しない限り、
+  headless・game のどちらも全勢力ヒューリスティック AI で動く - 決定論・オフラインビルドを
+  既定のまま保つための意図的な選択（`--agent llm --backend fail` が `--agent heuristic` と
+  バイト一致することがその保証）であり、欠陥ではない
 
 ## テスト
 

@@ -31,6 +31,7 @@
 //! file already says or, if the two disagreed, be silently unable to do
 //! anything at all (see the rejection below).
 use archipelago_game::app::{MapMode, PlayConfig, ScreenshotConfig, ScreenshotTrigger};
+use archipelago_game::sim_driver::{Ai, AiBackend};
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::world::World;
@@ -46,11 +47,22 @@ fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!(
         "usage: archipelago-game [--scenario <path>] [--seed <n>] [--days <n>] \
          [--play <faction index or name>] [--record <path>] [--replay <path>] \
-         [--delegate-military] [--cjk-font <path>]\n\
+         [--delegate-military] [--agent <heuristic|llm>] [--backend <mock|fail|scripted:<path>>] \
+         [--cjk-font <path>]\n\
          \n\
          --delegate-military: hand the entire military (orders and recruitment) to the AI \
          for the whole game, so you can just run the economy/diplomacy - requires --play, \
          cannot be combined with --replay.\n\
+         \n\
+         --agent llm --backend mock: every AI-controlled faction (every faction but --play's, \
+         if any) is driven by an LlmAgent instead of plain HeuristicAgent (docs/design.md §21-3 \
+         \"LLM 国家\") - a fixed, offline, deterministic rotation of canned strategic doctrines \
+         (no network access), the same demo backend `apps/headless` uses for the same flags. \
+         Defaults to --agent heuristic (unaffected, byte-identical to omitting these flags \
+         entirely) when --agent is not given. --backend fail wires every faction to a backend \
+         that always fails its consult, falling back to plain HeuristicAgent behaviour - used to \
+         confirm that failure path never changes the game. --backend scripted:<path> replays \
+         canned responses from a local file, one per line.\n\
          \n\
          --replay <path>: a plain recording (from --record) replays the whole faction, exactly \
          as always. A file with its own top-level {{\"layers\": [...], \"days\": [...]}} instead \
@@ -87,6 +99,16 @@ struct Args {
     /// `--delegate-military` (this module's own doc): requires `--play`,
     /// same as `--record`/`--replay` do.
     delegate_military: bool,
+    /// `--agent <heuristic|llm>` (this module's own doc): which `Agent` impl
+    /// drives every AI-controlled (non-player) faction. Defaults to
+    /// `Ai::Heuristic` - unchanged from every prior behaviour. `--backend`
+    /// is folded into this once parsing is done (`build_ai`), same as
+    /// headless keeps the two as separate flags but one combined choice.
+    agent_is_llm: bool,
+    /// `--backend <mock|fail|scripted:<path>>`: only meaningful alongside
+    /// `--agent llm` - ignored otherwise, exactly like headless's own
+    /// `--backend`. Defaults to `mock`.
+    backend: AiBackend,
     screenshot: Option<String>,
     screenshot_after: u32,
     /// `--screenshot-at-day <day>`: overrides `screenshot_after` entirely
@@ -144,6 +166,8 @@ fn parse_args() -> Args {
     let mut record = None;
     let mut replay = None;
     let mut delegate_military = false;
+    let mut agent_is_llm = false;
+    let mut backend = AiBackend::Mock;
     let mut screenshot = None;
     let mut screenshot_after = DEFAULT_SCREENSHOT_AFTER_FRAMES;
     let mut screenshot_at_day = None;
@@ -182,6 +206,14 @@ fn parse_args() -> Args {
                 replay = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--replay expects a value")));
             }
             "--delegate-military" => delegate_military = true,
+            "--agent" => {
+                let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--agent expects a value"));
+                agent_is_llm = parse_agent(&v);
+            }
+            "--backend" => {
+                let v = iter.next().unwrap_or_else(|| print_usage_and_exit("--backend expects a value"));
+                backend = parse_backend(&v);
+            }
             "--screenshot" => {
                 screenshot = Some(iter.next().unwrap_or_else(|| print_usage_and_exit("--screenshot expects a value")));
             }
@@ -238,6 +270,10 @@ fn parse_args() -> Args {
                     screenshot_at_day = Some(v.parse().unwrap_or_else(|_| print_usage_and_exit("--screenshot-at-day expects an integer")));
                 } else if let Some(v) = other.strip_prefix("--cjk-font=") {
                     cjk_font = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--agent=") {
+                    agent_is_llm = parse_agent(v);
+                } else if let Some(v) = other.strip_prefix("--backend=") {
+                    backend = parse_backend(v);
                 } else if let Some(v) = other.strip_prefix("--debug-map-mode=") {
                     let (mode, good) = parse_map_mode(v);
                     debug_map_mode = Some(mode);
@@ -256,6 +292,8 @@ fn parse_args() -> Args {
         record,
         replay,
         delegate_military,
+        agent_is_llm,
+        backend,
         screenshot,
         screenshot_after,
         screenshot_at_day,
@@ -356,6 +394,34 @@ fn parse_map_mode(value: &str) -> (MapMode, Option<Good>) {
 /// this lives here rather than as a `Good::from_key` in `crates/sim`.
 fn good_from_key(key: &str) -> Option<Good> {
     ALL_GOODS.iter().copied().find(|g| g.key() == key)
+}
+
+/// `--agent <heuristic|llm>` (this module's own doc, mirroring
+/// `apps/headless/src/cli.rs::parse_agent` one-for-one): returns whether
+/// every AI-controlled faction should be `LlmAgent`-driven. Fails fast on
+/// anything else, same as every other malformed flag in this file.
+fn parse_agent(v: &str) -> bool {
+    match v {
+        "heuristic" => false,
+        "llm" => true,
+        other => print_usage_and_exit(&format!("--agent {other}: unknown value, expected \"heuristic\" or \"llm\"")),
+    }
+}
+
+/// `--backend <mock|fail|scripted:<path>>` (mirroring `apps/headless/src/
+/// cli.rs::parse_backend` one-for-one) - only meaningful alongside
+/// `--agent llm`, ignored otherwise.
+fn parse_backend(v: &str) -> AiBackend {
+    if v == "mock" {
+        return AiBackend::Mock;
+    }
+    if v == "fail" {
+        return AiBackend::Fail;
+    }
+    if let Some(path) = v.strip_prefix("scripted:") {
+        return AiBackend::Scripted(path.to_string());
+    }
+    print_usage_and_exit(&format!("--backend {v}: unknown value, expected \"mock\", \"fail\", or \"scripted:<path>\""))
 }
 
 fn main() {
@@ -487,5 +553,7 @@ fn main() {
         debug_force_blank: args.debug_force_blank_screenshot,
     });
 
-    archipelago_game::app::run(world, args.seed, scenario_name, args.days, screenshot, play_config, args.cjk_font);
+    let ai = if args.agent_is_llm { Ai::Llm(args.backend) } else { Ai::Heuristic };
+
+    archipelago_game::app::run(world, args.seed, scenario_name, args.days, screenshot, play_config, args.cjk_font, ai);
 }

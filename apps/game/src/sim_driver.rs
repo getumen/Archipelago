@@ -61,6 +61,9 @@
 //! `build_replay_controller`'s own doc for why that reproduces today's
 //! full-scope `--replay` byte-for-byte.
 
+use std::sync::Mutex;
+
+use archipelago_agents::llm::{LlmAgent, LlmBackend, LlmError, LlmRequest, MockBackend, ScriptedBackend};
 use archipelago_agents::{CompositeAgent, HumanAgent};
 use archipelago_sim::action::{Action, ActionError, Layer, ALL_LAYERS};
 use archipelago_sim::agent::Agent;
@@ -69,6 +72,132 @@ use archipelago_sim::ids::FactionId;
 use archipelago_sim::observation::Observation;
 use archipelago_sim::sim::{Outcome, Simulation};
 use archipelago_sim::world::World;
+
+/// Which `Agent` implementation drives every AI-controlled (non-player)
+/// faction (docs/design.md §21-3 "LLM 国家": "AI国家が固定スクリプトだけで
+/// はなく、状況に応じて長期戦略を変更する"). `Heuristic` is `new`/
+/// `new_with_player`'s existing behavior, unchanged. `Llm(backend)` wraps
+/// each AI faction's own `default_heuristic_agent` fallback in an
+/// independent `archipelago_agents::llm::LlmAgent` instance, mirroring
+/// `apps/headless/src/main.rs::build_agents` exactly - the same reason both
+/// binaries can be pointed at `--agent llm --backend mock` on the same seed
+/// and see the same kind of doctrine-driven divergence from a heuristic run
+/// (they build agents the same way, not by coincidence).
+///
+/// Every AI faction gets the *same* `Ai` - a mixed run (some factions
+/// heuristic, others LLM) isn't in scope here either, exactly as headless's
+/// own `AgentKind`/`BackendKind` doc says. The `--play`ed faction (if any)
+/// is never affected by this at all: `Ai` only ever reaches
+/// `Controller::Ai` slots, never `Controller::Human`/`Controller::Replay`.
+#[derive(Clone)]
+pub enum Ai {
+    Heuristic,
+    Llm(AiBackend),
+}
+
+impl Default for Ai {
+    fn default() -> Self {
+        Ai::Heuristic
+    }
+}
+
+/// Which `LlmBackend` an `Ai::Llm` selects - mirrors `apps/headless/src/
+/// cli.rs`'s `BackendKind` one-for-one, for `apps/game`'s own `--backend`
+/// flag (`main.rs`'s CLI parsing).
+#[derive(Clone)]
+pub enum AiBackend {
+    /// `apps/headless/src/main.rs::mock_doctrine_backend`'s own small, fixed,
+    /// deterministic rotation of canned `Doctrine` JSON - duplicated in this
+    /// module (`mock_doctrine_backend` below) rather than shared, since
+    /// `apps/headless` is a binary-only crate with no library target (the
+    /// same reason `client_run_matches_headless` below reproduces headless's
+    /// loop body verbatim instead of importing it).
+    Mock,
+    /// Fails every consult - the same `--backend fail` shape headless uses
+    /// to demonstrate `--agent llm --backend fail` == `--agent heuristic`.
+    Fail,
+    /// Replays canned responses from a local file.
+    Scripted(String),
+}
+
+/// The same canned `Doctrine` JSON rotation `apps/headless/src/main.rs::
+/// mock_doctrine_backend` uses - see `AiBackend::Mock`'s own doc for why
+/// this is a duplicate, not a shared import.
+fn mock_doctrine_backend() -> MockBackend {
+    MockBackend::new(vec![
+        Ok(r#"{"posture":"consolidate","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.0,"rationale":"stabilize the home front before any new venture"}"#
+            .to_string()),
+        Ok(r#"{"posture":"offensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":-0.2,"rationale":"press the advantage while it lasts"}"#
+            .to_string()),
+        Ok(r#"{"posture":"defensive","primary_target":null,"avoid":[],"focus":null,"seek_treaties":[],"caution_bias":0.4,"rationale":"hold what we have and rebuild"}"#
+            .to_string()),
+    ])
+}
+
+/// Bevy's `Resource` (and therefore `SimRes`/`SimDriver`, which stores every
+/// `Controller`) must be `Sync`. `archipelago_agents::llm::MockBackend`/
+/// `ScriptedBackend` track their call count in a `Cell<usize>` - correct
+/// and sufficient for headless's single-threaded loop, but `!Sync` by
+/// construction, which would make any `LlmAgent` wrapping one un-storable
+/// in a Bevy `Resource`. This wraps either concrete backend behind a
+/// `Mutex` instead, serializing calls - `SimDriver::tick` (this module's
+/// own doc) only ever calls one faction's `Agent::decide` at a time in the
+/// first place, so the lock is never contended; it exists purely to satisfy
+/// `Sync`, not to add concurrency this code didn't already need. An enum
+/// (not a boxed `dyn LlmBackend + Send + Sync`) because `archipelago_agents
+/// ::llm::LlmBackend`'s existing blanket impl only covers plain
+/// `Box<dyn LlmBackend>`, a different type from `Box<dyn LlmBackend + Send
+/// + Sync>` - matching on a closed, two-variant enum sidesteps that
+/// entirely rather than adding a second blanket impl to `crates/agents` for
+/// a Bevy-only plumbing need.
+enum SyncBackend {
+    Mock(Mutex<MockBackend>),
+    Scripted(Mutex<ScriptedBackend>),
+}
+
+impl LlmBackend for SyncBackend {
+    fn complete(&self, request: &LlmRequest) -> Result<String, LlmError> {
+        match self {
+            SyncBackend::Mock(m) => m.lock().unwrap_or_else(|p| p.into_inner()).complete(request),
+            SyncBackend::Scripted(s) => s.lock().unwrap_or_else(|p| p.into_inner()).complete(request),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            SyncBackend::Mock(_) => "MockBackend",
+            SyncBackend::Scripted(_) => "ScriptedBackend",
+        }
+    }
+}
+
+/// Builds one AI faction's `Controller::Ai` agent - `default_heuristic_agent`
+/// alone for `Ai::Heuristic`, or that same fallback wrapped in its own
+/// `LlmAgent` (its own independent backend instance, never shared across
+/// factions - same as headless's `build_agents`) for `Ai::Llm`.
+fn build_ai_controller(ai: &Ai, faction_index: usize) -> Box<dyn Agent + Send + Sync> {
+    let fallback = archipelago_agents::default_heuristic_agent(faction_index);
+    match ai {
+        Ai::Heuristic => Box::new(fallback) as Box<dyn Agent + Send + Sync>,
+        Ai::Llm(backend) => {
+            let backend = match backend {
+                AiBackend::Mock => SyncBackend::Mock(Mutex::new(mock_doctrine_backend())),
+                AiBackend::Fail => SyncBackend::Mock(Mutex::new(MockBackend::always_err(LlmError::Unavailable))),
+                AiBackend::Scripted(path) => match ScriptedBackend::from_file(path) {
+                    Ok(scripted) => SyncBackend::Scripted(Mutex::new(scripted)),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: could not read --backend scripted:{path} ({e}); \
+                             this faction's LlmAgent will fall back to HeuristicAgent behaviour"
+                        );
+                        SyncBackend::Scripted(Mutex::new(ScriptedBackend::new(Vec::new())))
+                    }
+                },
+            };
+            Box::new(LlmAgent::new(backend, fallback)) as Box<dyn Agent + Send + Sync>
+        }
+    }
+}
 
 /// A `Vec<Action>` per day, replayed back in order - the in-memory shape of
 /// a `--record` file once `crate::action_codec::read_record`/`read_replay`
@@ -213,8 +342,20 @@ impl SimDriver {
     /// fed back for exactly `replay.layers`, every other layer decided by a
     /// fresh AI, with no live input accepted for this faction at all (see
     /// `Replay`'s own doc). Every other faction is `HeuristicAgent`,
-    /// exactly as `new`.
+    /// exactly as `new`. Equivalent to `new_with_player_and_ai` with
+    /// `Ai::Heuristic` - see that constructor for `--agent llm`.
     pub fn new_with_player(world: World, seed: u64, player: Option<FactionId>, replay: Option<Replay>) -> Self {
+        Self::new_with_player_and_ai(world, seed, player, replay, Ai::Heuristic)
+    }
+
+    /// As `new_with_player`, but every AI-controlled (non-player) faction is
+    /// built via `build_ai_controller(&ai, ..)` instead of always
+    /// `default_heuristic_agent` directly - `main.rs`'s own `--agent`/
+    /// `--backend` flags construct `ai` and are this constructor's only
+    /// caller outside tests, so this is genuinely reachable from the CLI,
+    /// not machinery nothing calls (design.md §21-3's "LLM 国家" gap this
+    /// exists to close - see `Ai`'s own doc).
+    pub fn new_with_player_and_ai(world: World, seed: u64, player: Option<FactionId>, replay: Option<Replay>, ai: Ai) -> Self {
         let sim = Simulation::with_world(world, seed);
         let n = sim.world.factions.len();
         let mut controllers = Vec::with_capacity(n);
@@ -229,11 +370,28 @@ impl SimDriver {
                     None => Controller::Human(HumanAgent::new(faction)),
                 }
             } else {
-                Controller::Ai(Box::new(archipelago_agents::default_heuristic_agent(i)) as Box<dyn Agent + Send + Sync>)
+                Controller::Ai(build_ai_controller(&ai, i))
             };
             controllers.push(controller);
         }
         SimDriver { sim, controllers, human_index, last_human_actions: Vec::new(), last_human_action_errors: Vec::new() }
+    }
+
+    /// Which concrete `Agent` impl is currently driving `faction`'s
+    /// `Controller::Ai` slot - `"HeuristicAgent"` or `"LlmAgent"`
+    /// (`archipelago_sim::agent::Agent::name()`'s own literal for each -
+    /// never anything this function computes itself, so it can't drift from
+    /// what's actually deciding that faction's actions). `None` for the
+    /// live `--play`ed faction (`Human`) or a `--replay` faction: neither
+    /// slot is ever `Ai`, and neither is ever LLM-driven, so there is
+    /// nothing meaningful to report. Read by `apps/game/src/app/ui.rs`'s
+    /// faction panel to mark which factions design.md §21-3's "LLM 国家"
+    /// differentiator is actually running for this session.
+    pub fn agent_name(&self, faction: FactionId) -> Option<&str> {
+        match self.controllers.get(faction.index()) {
+            Some(Controller::Ai(agent)) => Some(agent.name()),
+            _ => None,
+        }
     }
 
     /// The `--play`ed faction, if any.
@@ -496,6 +654,122 @@ mod tests {
             format!("{:?}", reference_sim.world),
             format!("{:?}", driver.sim.world),
             "the client's sim-driving loop must reach byte-identical final state to headless's own loop"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // `--agent llm`/`--backend` (docs/design.md §21-3 "LLM 国家")
+    // -------------------------------------------------------------------
+
+    /// Runs an observing-only (`player: None`) `SimDriver` with the given
+    /// `ai` to completion and returns the day it stopped on plus the
+    /// `World`'s full `Debug` snapshot - the same "day + byte-identical
+    /// state" shape `client_run_matches_headless` above already checks.
+    fn run_to_completion(seed: u64, ai: Ai, days: u32) -> (u32, String) {
+        let mut driver = SimDriver::new_with_player_and_ai(scenario::build_world(), seed, None, None, ai);
+        while driver.outcome(days) == Outcome::Ongoing {
+            driver.tick();
+        }
+        (driver.sim.world.day, format!("{:?}", driver.sim.world))
+    }
+
+    /// The client-level mirror of `apps/headless/tests/llm_integration.rs`'s
+    /// `llm_failure_falls_back_to_heuristic` (docs/conventions.md §3's
+    /// approved fallback: "バックエンドの失敗・壊れた応答では... 有効な
+    /// Doctrine を一度も得ていなければヒューリスティックの既定動作に落ちる").
+    /// This exercises `apps/game`'s own agent-building path
+    /// (`build_ai_controller`/`SyncBackend`), not headless's - the two are
+    /// separate implementations of the same wiring, so this invariant has to
+    /// be checked here too, not only assumed to transfer from headless's own
+    /// test.
+    ///
+    /// Confirmed this can actually fail: temporarily changed
+    /// `build_ai_controller`'s `Ai::Llm` arm to always use
+    /// `mock_doctrine_backend()` regardless of `AiBackend` (ignoring `Fail`/
+    /// `Scripted` entirely) and re-ran - this test failed immediately (the
+    /// `Fail` run started producing `Doctrine`-driven actions instead of
+    /// falling back to plain heuristic play, diverging from the `Heuristic`
+    /// run's state well before day 720). Reverted before committing.
+    #[test]
+    fn llm_backend_that_always_fails_matches_pure_heuristic_play() {
+        const SEED: u64 = 1;
+        const DAYS: u32 = 720;
+
+        let (heuristic_day, heuristic_state) = run_to_completion(SEED, Ai::Heuristic, DAYS);
+        let (fail_day, fail_state) = run_to_completion(SEED, Ai::Llm(AiBackend::Fail), DAYS);
+
+        assert_ne!(heuristic_day, 0, "the heuristic run must have actually played");
+        assert_eq!(heuristic_day, fail_day, "a backend that fails every consult must stop on the exact same day as plain heuristic play");
+        assert_eq!(
+            heuristic_state, fail_state,
+            "a backend that fails every consult must reach byte-identical final state to plain heuristic play"
+        );
+    }
+
+    /// The client-level mirror of `apps/headless/tests/llm_integration.rs`'s
+    /// `mock_backend_run_is_deterministic` plus the plainest possible check
+    /// that `--agent llm --backend mock` genuinely changes what happens
+    /// (design.md §21-3's "毎回異なる歴史が生まれる" - the differentiator this
+    /// whole task exists to make reachable from `apps/game`): the same seed
+    /// under `Ai::Llm(AiBackend::Mock)` must (a) reach the exact same result
+    /// on two independent runs (`MockBackend`'s call-count-only determinism),
+    /// and (b) differ from plain `Ai::Heuristic` on that same seed - a mock
+    /// backend that silently behaved just like heuristic play would satisfy
+    /// (a) vacuously while failing to demonstrate anything.
+    ///
+    /// Confirmed this can actually fail: temporarily made `build_ai_controller`
+    /// return the plain `fallback` (`Box::new(fallback)`) for `Ai::Llm` too,
+    /// i.e. build the same agent as `Ai::Heuristic` regardless of `ai` - the
+    /// "must diverge from heuristic" assertion below failed immediately
+    /// (`mock_state == heuristic_state`). Reverted before committing.
+    #[test]
+    fn llm_mock_backend_is_deterministic_and_diverges_from_heuristic() {
+        const SEED: u64 = 1;
+        const DAYS: u32 = 720;
+
+        let (heuristic_day, heuristic_state) = run_to_completion(SEED, Ai::Heuristic, DAYS);
+        let (mock_day_a, mock_state_a) = run_to_completion(SEED, Ai::Llm(AiBackend::Mock), DAYS);
+        let (mock_day_b, mock_state_b) = run_to_completion(SEED, Ai::Llm(AiBackend::Mock), DAYS);
+
+        assert_eq!(mock_day_a, mock_day_b, "the same seed and MockBackend rotation must stop on the same day across runs");
+        assert_eq!(mock_state_a, mock_state_b, "the same seed and MockBackend rotation must reach byte-identical final state across runs");
+        assert!(
+            heuristic_day != mock_day_a || heuristic_state != mock_state_a,
+            "an LlmAgent actually driven by Doctrine-changing responses must produce a different history than plain heuristic \
+             play on the same seed - got identical outcomes for both"
+        );
+    }
+
+    /// `SimDriver::agent_name` (read by `apps/game/src/app/ui.rs`'s faction
+    /// panel to mark which factions are LLM-driven, per this task's own
+    /// screenshot verification): must report `"HeuristicAgent"`/`"LlmAgent"`
+    /// for every AI-controlled faction according to `ai`, and `None` for a
+    /// `--play`ed (`Human`) faction regardless of `ai` - the played faction
+    /// is never wrapped in an `LlmAgent`, no matter what `--agent` says.
+    ///
+    /// Confirmed this can actually fail: temporarily made `agent_name`
+    /// return `Some("HeuristicAgent")` unconditionally - the two
+    /// `Ai::Llm(AiBackend::Mock)` assertions below failed immediately.
+    /// Reverted before committing.
+    #[test]
+    fn agent_name_reports_which_agent_drives_each_faction() {
+        let heuristic_driver = SimDriver::new(scenario::build_world(), 1);
+        for i in 0..heuristic_driver.sim.world.factions.len() {
+            assert_eq!(heuristic_driver.agent_name(FactionId(i as u32)), Some("HeuristicAgent"));
+        }
+
+        let llm_driver = SimDriver::new_with_player_and_ai(scenario::build_world(), 1, None, None, Ai::Llm(AiBackend::Mock));
+        for i in 0..llm_driver.sim.world.factions.len() {
+            assert_eq!(llm_driver.agent_name(FactionId(i as u32)), Some("LlmAgent"));
+        }
+
+        let player = FactionId(0);
+        let mixed_driver = SimDriver::new_with_player_and_ai(scenario::build_world(), 1, Some(player), None, Ai::Llm(AiBackend::Mock));
+        assert_eq!(mixed_driver.agent_name(player), None, "the --play'ed faction is Human, never Ai, regardless of --agent");
+        assert_eq!(
+            mixed_driver.agent_name(FactionId(1)),
+            Some("LlmAgent"),
+            "every non-player faction must still be LlmAgent-driven when --agent llm is given, played faction aside"
         );
     }
 

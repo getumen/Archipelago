@@ -290,8 +290,17 @@ pub(super) fn update_faction_panel(
     // to a different faction) shows nothing extra here.
     let you_marker = if player.0 == Some(faction.id) { "【あなたの国】 " } else { "" };
 
+    // docs/design.md §21-3 "LLM 国家": `--agent llm` wraps every AI-controlled
+    // faction's decisions in an `LlmAgent` instead of a plain `HeuristicAgent`
+    // - see `SimDriver::agent_name`'s own doc for why comparing this literal
+    // is safe (it can't drift from what's actually deciding this faction's
+    // actions). `None` (the `--play`ed faction, or observing with `--agent
+    // heuristic`, the default) shows nothing extra here, exactly as before
+    // this flag existed.
+    let llm_marker = if sim.0.agent_name(faction.id) == Some("LlmAgent") { "【LLM】 " } else { "" };
+
     text.0 = format!(
-        "{you_marker}{}{}  [Tab で他勢力に切替]\n\
+        "{you_marker}{llm_marker}{}{}  [Tab で他勢力に切替]\n\
          領土: {regions} 地域\n\
          部隊数: {units}\n\
          人的資源: {:.1}{}\n\

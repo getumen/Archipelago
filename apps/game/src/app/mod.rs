@@ -33,7 +33,7 @@ use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use archipelago_sim::military::Branch;
 use archipelago_sim::world::{LinkKind, World as SimWorld};
 
-use crate::sim_driver::{SimDriver, Speed};
+use crate::sim_driver::{Ai, SimDriver, Speed};
 
 /// Stage 7B (docs/phase7-spec.md "Stage 7B — 遊ぶ"): `--play`/`--record`/
 /// `--replay`, resolved by `main.rs` before `run` is ever called (faction
@@ -565,6 +565,11 @@ pub(crate) struct PortMarker(pub RegionId);
 /// `cjk_font_override` is `main.rs`'s already-parsed `--cjk-font <path>` -
 /// see `fonts::load`/`fonts::resolve` for how it's combined with
 /// `ARCHIPELAGO_CJK_FONT` and this platform's own candidate search.
+///
+/// `ai` is `main.rs`'s already-parsed `--agent`/`--backend` (docs/design.md
+/// §21-3 "LLM 国家"): which `Agent` impl drives every AI-controlled
+/// (non-player) faction - `Ai::Heuristic` unless `--agent llm` was given.
+/// Never affects `play`'s own faction - see `Ai`'s own doc.
 pub fn run(
     world: SimWorld,
     seed: u64,
@@ -573,6 +578,7 @@ pub fn run(
     screenshot: Option<ScreenshotConfig>,
     play: Option<PlayConfig>,
     cjk_font_override: Option<String>,
+    ai: Ai,
 ) {
     let positions = crate::layout::region_positions(&world);
     let sea_centers = sea_zone_centers(&world, &positions);
@@ -653,7 +659,7 @@ pub fn run(
         None
     };
     let debug_select_region = screenshot.as_ref().and_then(|c| c.select_region);
-    let mut sim_driver = SimDriver::new_with_player(world, seed, player_faction, replay_days);
+    let mut sim_driver = SimDriver::new_with_player_and_ai(world, seed, player_faction, replay_days, ai);
     // `--delegate-military` (`PlayConfig::delegate_military`'s own doc):
     // one `SimDriver::delegate_military()` call at startup hands the entire
     // `Layer::Military` decision domain - recruitment included - to the AI,
