@@ -15,6 +15,7 @@ use crate::logistics;
 use crate::military;
 use crate::naval;
 use crate::politics;
+use crate::research;
 use crate::rng::Rng;
 use crate::scenario;
 use crate::trade;
@@ -165,6 +166,12 @@ impl Simulation {
         // Construction draws Machinery/Steel from what production just
         // left in stock, the same way every other consumer in the tick does.
         construction::tick_construction(&mut self.world);
+        // Phase 12 (docs/phase12-spec.md §0): reads this same tick's
+        // `Faction::machinery_output` (just set by `tick_economy` above) and
+        // today's `Region::labor_ratio()` - an economic system in exactly
+        // the same sense `construction` is, so it shares this bucket rather
+        // than opening a fifth `--bench` category for it.
+        research::tick_research(&mut self.world);
         timings.economy += t2.elapsed();
 
         let t3 = Instant::now();

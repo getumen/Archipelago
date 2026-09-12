@@ -285,6 +285,10 @@ pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
         | Action::SetCivilianRation(_)
         | Action::SetImportPlan { .. }
         | Action::SetLogisticsPriority { .. }
+        // Stage 12A: no dedicated research panel exists yet
+        // (docs/phase12-spec.md's own "画面" is Stage 12C) - bucketed with
+        // every other national-resource-policy action until one does.
+        | Action::SetResearchAllocation { .. }
         | Action::SetNationalFocus(_) => RejectionTarget::Policy,
         Action::ProposeTreaty { .. }
         | Action::AcceptTreaty { .. }

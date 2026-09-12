@@ -17,6 +17,7 @@ use crate::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use crate::logistics;
 use crate::military::{air_move_required, fleet_move_required, move_required, Branch, Movement, Unit};
 use crate::naval;
+use crate::research::{ResearchAxis, ResearchWeight};
 use crate::transport::{Condition, TransportNodeKind};
 use crate::world::{Domain, Station, World};
 
@@ -73,6 +74,23 @@ pub enum Action {
     /// to split contended regional throughput between Munitions and Arms
     /// delivery for `good`.
     SetLogisticsPriority { good: Good, weight: f32 },
+    /// Stage 12A (docs/phase12-spec.md §2, "`SetIndustryPriority` と同じ
+    /// 形"): sets the priority weight `research::tick_research` uses to
+    /// split a faction's daily research rate across `axis` - the same
+    /// proportional, no-fixed-order mechanism `SetIndustryPriority`/
+    /// `SetLogisticsPriority` already use for their own contended inputs
+    /// (docs/conventions.md §6).
+    ///
+    /// Classified `Layer::Economy`, not `Layer::GrandStrategy` - see
+    /// `Layer`'s own doc for why `GrandStrategy` is `SetNationalFocus`
+    /// alone: a national focus reshapes multipliers *across* every other
+    /// layer at once, while this action only ever moves a bounded
+    /// coefficient inside one faction's own economic planning - the exact
+    /// shape `SetIndustryPriority`'s `Economy` classification already
+    /// covers. Three axes contending for the same finite Machinery/labour
+    /// budget is a resource-allocation decision, not a standing
+    /// cross-layer posture.
+    SetResearchAllocation { axis: ResearchAxis, weight: f32 },
     /// Stage 3B (docs/phase3-spec.md "条約"): queues a one-tick pending
     /// proposal, visible to `to` via `Observation`/`Diplomacy::pending`.
     /// Replaces any existing outgoing proposal from this faction to `to`
@@ -199,7 +217,9 @@ pub enum Action {
 ///   (uncontroversially military) would have to move to `Economy` too.
 /// - **`Economy`** — national resource policy: `SetConscription`,
 ///   `SetCivilianRation`, `SetIndustryPriority`, `SetLogisticsPriority`,
-///   `SetImportPlan`, plus `Build`/`CancelBuild`. Construction is design.md
+///   `SetImportPlan`, `SetResearchAllocation` (Stage 12A - see that
+///   variant's own doc for why it isn't `GrandStrategy`), plus
+///   `Build`/`CancelBuild`. Construction is design.md
 ///   §9's own economic system listing "建設" alongside food/steel/energy as
 ///   one of the industries a national economy runs, and every project it
 ///   funds (`crate::construction::Project`) draws on the same
@@ -298,6 +318,7 @@ impl Action {
             | Action::SetIndustryPriority { .. }
             | Action::SetLogisticsPriority { .. }
             | Action::SetImportPlan { .. }
+            | Action::SetResearchAllocation { .. }
             | Action::Build { .. }
             | Action::CancelBuild { .. } => Layer::Economy,
 
@@ -341,6 +362,7 @@ impl Action {
             | Action::SetIndustryPriority { .. }
             | Action::SetLogisticsPriority { .. }
             | Action::SetImportPlan { .. }
+            | Action::SetResearchAllocation { .. }
             | Action::Build { .. }
             | Action::CancelBuild { .. }
             | Action::SetNationalFocus(_)
@@ -474,6 +496,9 @@ pub fn apply_action(
         Action::SetImportPlan { good, rate } => apply_set_import_plan(world, faction, good, rate),
         Action::SetLogisticsPriority { good, weight } => {
             apply_set_logistics_priority(world, faction, good, weight)
+        }
+        Action::SetResearchAllocation { axis, weight } => {
+            apply_set_research_allocation(world, faction, axis, weight)
         }
         Action::ProposeTreaty { to, treaty } => apply_propose_treaty(world, faction, to, treaty),
         Action::AcceptTreaty { from, treaty } => apply_accept_treaty(world, faction, from, treaty),
@@ -1162,6 +1187,23 @@ fn apply_set_logistics_priority(
         return Err(ActionError::InvalidValue);
     }
     world.faction_mut(faction).logistics_priority[good.index()] = weight;
+    Ok(())
+}
+
+/// `Action::SetResearchAllocation` (docs/phase12-spec.md §2): same
+/// validation shape as `apply_set_industry_priority`/
+/// `apply_set_logistics_priority`, but constructs a `ResearchWeight`
+/// instead of storing the raw `f32` directly - see that type's own doc
+/// (`research.rs`) for why Stage 12A's new code doesn't repeat industry/
+/// logistics priority's unwrapped-`f32` shape.
+fn apply_set_research_allocation(
+    world: &mut World,
+    faction: FactionId,
+    axis: ResearchAxis,
+    weight: f32,
+) -> Result<(), ActionError> {
+    let weight = ResearchWeight::new(weight).ok_or(ActionError::InvalidValue)?;
+    world.faction_mut(faction).research_allocation[axis.index()] = weight;
     Ok(())
 }
 

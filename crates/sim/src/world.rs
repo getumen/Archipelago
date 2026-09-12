@@ -11,6 +11,7 @@ use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, TransportNodeId, UnitId};
 use crate::logistics::SupplyLeftover;
 use crate::military::Unit;
+use crate::research::{ResearchWeight, RESEARCH_AXIS_COUNT};
 use crate::transport::{TransportLine, TransportNode};
 
 /// Stage 2D (docs/phase2-spec.md "Stage 2D — 海軍・制海権・海上封鎖"): the two
@@ -726,6 +727,18 @@ pub struct Faction {
     /// Kept as a ratio (not an absolute figure) so it stays meaningful
     /// regardless of how much Machinery capacity a faction actually holds.
     pub machinery_output_ratio: f32,
+    /// Phase 12 (`research::tick_research`'s own doc): this tick's actual,
+    /// absolute Machinery production - the same `actual_machinery`
+    /// `economy::tick_economy` already computes to derive
+    /// `machinery_output_ratio` just above, kept here in its raw form too
+    /// because a *ratio* to potential stays near its ceiling even after a
+    /// faction loses machinery-producing territory (potential shrinks right
+    /// alongside actual output), which would hide exactly the "losing an
+    /// industrial region slows research" causality Phase 12 needs. `0.0`
+    /// for a dead faction - `tick_economy` skips a dead faction's entire
+    /// per-faction block, the same as every other field it sets here, so
+    /// this simply freezes at whatever it last was.
+    pub machinery_output: f32,
     /// Stage 3A political events (docs/phase3-spec.md "政治イベント"): the
     /// two fixed-duration ones. `0` means inactive; set to
     /// `balance::STRIKE_DAYS`/`balance::REGIME_CHANGE_DAYS` on trigger and
@@ -762,6 +775,39 @@ pub struct Faction {
     /// why that's what keeps rapid `SetNationalFocus` spam from ever
     /// shortening or stacking anything.
     pub focus_transition_days: u32,
+    /// Phase 12 (docs/phase12-spec.md §1, `research::ResearchAxis`): the
+    /// priority weight this faction currently assigns each of the three
+    /// research axes, indexed by `ResearchAxis::index()`. Set via
+    /// `Action::SetResearchAllocation`; split into a proportional share of
+    /// each tick's research rate by `research::tick_research` exactly the
+    /// way `industry_priority` is already split between contended goods -
+    /// never a fixed axis order (docs/conventions.md §6).
+    pub research_allocation: [ResearchWeight; RESEARCH_AXIS_COUNT],
+    /// Phase 12 (docs/phase12-spec.md §1, "進捗は増える一方でよい"):
+    /// cumulative research progress on each axis, indexed by
+    /// `ResearchAxis::index()`, grown daily by `research::tick_research`.
+    ///
+    /// **A deliberate, documented exception to docs/conventions.md §6's
+    /// "一方通行のアキュムレータを作らない。増える量には戻る経路を持たせ
+    /// る."** The spec is explicit that this one accumulator does not get
+    /// that treatment (docs/phase12-spec.md §1's own "規約 §6 への意図的な
+    /// 逸脱"): what the convention actually guards against is a value that
+    /// *saturates at a boundary and cannot move again* - a one-way ratchet
+    /// that jams. `research_progress` never jams: it has nowhere to
+    /// saturate *to* (no ceiling), and once Stage 12B's catch-up/diffusion
+    /// mechanic exists (docs/phase12-spec.md §1 "追いつきには接触が要る"),
+    /// what's kept bounded is the *gap* between a lagging faction and a
+    /// contacted rival, not this value itself - a lagging faction catches
+    /// up faster, so the level keeps climbing for everyone while the
+    /// spread between them stays governable. Deliberately not "fixed" by
+    /// capping this field later: a cap here would re-impose the exact
+    /// "effort has a hard ceiling" shape the owner explicitly rejected
+    /// (docs/phase12-spec.md §1 "研究が進んだ側が強くなってよい... 効果に
+    /// 人為的な上限を置いて抑える形は採らない").
+    ///
+    /// Stage 12A ships no reader of this field at all outside this crate's
+    /// own tests - see `research`'s own module doc.
+    pub research_progress: [f32; RESEARCH_AXIS_COUNT],
     pub alive: bool,
 }
 

@@ -28,6 +28,7 @@ use crate::observation::{
     REGION_FIELD_COUNT, SEA_ZONE_FIELD_COUNT, TRANSPORT_LINE_FIELD_COUNT, TRANSPORT_NODE_FIELD_COUNT,
 };
 use crate::politics;
+use crate::research::{self, ResearchAxis, ResearchWeight, ALL_RESEARCH_AXES, RESEARCH_AXIS_COUNT};
 use crate::rng::Rng;
 use crate::scenario;
 use crate::sim::{Outcome, Simulation};
@@ -7684,7 +7685,7 @@ fn allied_groups_combined_holdings_count_toward_domination() {
 // so the *existence* of a classification for every variant can never
 // regress silently. What the compiler cannot check is that a variant sits
 // in the *right* bucket - that is what these tests pin down, one concrete
-// sample of every one of `Action`'s 20 variants at a time.
+// sample of every one of `Action`'s variants at a time.
 // ---------------------------------------------------------------------
 
 /// One concrete, arbitrary-but-valid sample of every `Action` variant,
@@ -7694,6 +7695,18 @@ fn allied_groups_combined_holdings_count_toward_domination() {
 /// actually cover the whole enum - a variant added to `Action` without a
 /// matching entry added here is caught by `layer_classification_is_exhaustive_over_all_samples`
 /// below, not silently skipped.
+///
+/// Stage 12A finding: this list was missing `Action::StrikeNode` entirely
+/// (its own `Layer::Military` classification went completely unexercised by
+/// `every_action_variant_has_the_expected_layer`) while
+/// `layer_classification_is_exhaustive_over_all_samples`'s hardcoded count
+/// (`21`) matched the *incomplete* list rather than `Action`'s real 22
+/// pre-Stage-12A variants - exactly the "test that can't fail because it
+/// was written to match the bug" shape CLAUDE.md's own "空のテストが2件
+/// あった" already found twice elsewhere in this codebase. Added here
+/// (docs/conventions.md §1's boy-scout rule: this list is being touched for
+/// `SetResearchAllocation` anyway) alongside the new variant, with the
+/// count corrected to match both additions.
 fn action_layer_samples() -> Vec<(Action, Layer)> {
     let unit = UnitId(0);
     let region = RegionId(0);
@@ -7712,6 +7725,7 @@ fn action_layer_samples() -> Vec<(Action, Layer)> {
         (Action::SetIndustryPriority { good: Good::Steel, weight: 0.5 }, Layer::Economy),
         (Action::SetLogisticsPriority { good: Good::Munitions, weight: 0.5 }, Layer::Economy),
         (Action::SetImportPlan { good: Good::Food, rate: 1.0 }, Layer::Economy),
+        (Action::SetResearchAllocation { axis: ResearchAxis::Equipment, weight: 0.5 }, Layer::Economy),
         (Action::SetNationalFocus(NationalFocus::EconomicSphere), Layer::GrandStrategy),
         (Action::ProposeTreaty { to: faction, treaty: Treaty::NonAggression }, Layer::Diplomacy),
         (Action::AcceptTreaty { from: faction, treaty: Treaty::NonAggression }, Layer::Diplomacy),
@@ -7724,6 +7738,7 @@ fn action_layer_samples() -> Vec<(Action, Layer)> {
             Layer::Diplomacy,
         ),
         (Action::InterdictLine { line: crate::ids::TransportLineId(0) }, Layer::Military),
+        (Action::StrikeNode { node: crate::ids::TransportNodeId(0) }, Layer::Military),
     ]
 }
 
@@ -7746,7 +7761,7 @@ fn every_action_variant_has_the_expected_layer() {
 }
 
 /// `action_layer_samples` must itself list exactly one sample per `Action`
-/// variant - 21 entries, matching the count in this module's own doc and in
+/// variant - 23 entries, matching `Action`'s real variant count and
 /// `crates/api/src/action_codec.rs`'s decoder. This is what stands in for
 /// the compiler's own exhaustiveness check (which `Action::layer`'s
 /// wildcard-free `match` already enforces at the type level) at the level
@@ -7755,9 +7770,16 @@ fn every_action_variant_has_the_expected_layer() {
 /// even though the crate itself still compiles fine (the new variant would
 /// simply never be exercised by `every_action_variant_has_the_expected_layer`
 /// otherwise).
+///
+/// Confirmed this can actually fail (Stage 12A): this assertion's count was
+/// briefly restored to the old, incorrect `21` (matching the list before
+/// `StrikeNode`/`SetResearchAllocation` were added back above) and re-ran -
+/// it failed, reporting `23` vs the expected `21`. Reverted before
+/// committing. See `action_layer_samples`'s own doc for the pre-existing
+/// gap this also closes.
 #[test]
 fn layer_classification_is_exhaustive_over_all_samples() {
-    assert_eq!(action_layer_samples().len(), 21, "one sample per Action variant - update this alongside any new variant");
+    assert_eq!(action_layer_samples().len(), 23, "one sample per Action variant - update this alongside any new variant");
 }
 
 /// `ALL_LAYERS` must list every `Layer` variant exactly once, in the fixed
@@ -7801,10 +7823,229 @@ fn target_unit_identifies_exactly_the_unit_orders() {
         (Action::SetNationalFocus(NationalFocus::Technocracy), None),
         (Action::ProposeTreaty { to: faction, treaty: Treaty::Ceasefire }, None),
         (Action::InterdictLine { line: crate::ids::TransportLineId(0) }, None),
+        (Action::SetResearchAllocation { axis: ResearchAxis::Civilian, weight: 0.5 }, None),
     ];
     for (action, expected) in cases {
         assert_eq!(action.target_unit(), expected, "{action:?} should target {expected:?}");
     }
+}
+
+// ---------------------------------------------------------------------
+// Phase 12, Stage 12A (docs/phase12-spec.md): types, the
+// `Action::SetResearchAllocation` action, and daily progress accumulation.
+// **No effects yet** - nothing outside `research`'s own module reads
+// `Faction::research_progress` at this stage (`research`'s own doc), so
+// these tests exercise the mechanism directly (`research::tick_research`)
+// rather than through any downstream production/combat number.
+// ---------------------------------------------------------------------
+
+/// `Action::SetResearchAllocation` (docs/phase12-spec.md §2): validates and
+/// stores exactly like `SetIndustryPriority`/`SetLogisticsPriority` - an
+/// out-of-range weight is rejected with `ActionError::InvalidValue`, a
+/// valid one lands as the corresponding `ResearchWeight` on exactly the
+/// named axis, and every other axis stays at its untouched default.
+///
+/// Confirmed this can fail: temporarily changed `apply_set_research_allocation`
+/// to skip the `ResearchWeight::new` validation (assigning the raw `weight`
+/// through a hypothetical unchecked path) and re-ran with `weight: 1.5` -
+/// `apply_action` returned `Ok(())` instead of `Err(InvalidValue)`, and the
+/// out-of-range assertion below failed. Reverted before committing.
+#[test]
+fn set_research_allocation_validates_and_stores() {
+    let mut world = scenario::build_world();
+    let f = FactionId(0);
+
+    assert_eq!(
+        action::apply_action(&mut world, f, Action::SetResearchAllocation { axis: ResearchAxis::Munitions, weight: 1.5 }),
+        Err(ActionError::InvalidValue),
+        "a weight above 1.0 must be rejected"
+    );
+    assert_eq!(
+        action::apply_action(&mut world, f, Action::SetResearchAllocation { axis: ResearchAxis::Munitions, weight: -0.1 }),
+        Err(ActionError::InvalidValue),
+        "a negative weight must be rejected"
+    );
+
+    assert!(action::apply_action(&mut world, f, Action::SetResearchAllocation { axis: ResearchAxis::Munitions, weight: 0.75 }).is_ok());
+    assert_eq!(world.faction(f).research_allocation[ResearchAxis::Munitions.index()], ResearchWeight::new(0.75).unwrap());
+    // Every other axis is untouched by setting one - still the scenario's
+    // even three-way-split default.
+    assert_eq!(
+        world.faction(f).research_allocation[ResearchAxis::Civilian.index()],
+        ResearchWeight::new(1.0 / 3.0).unwrap()
+    );
+}
+
+/// docs/phase12-spec.md §1 "配分は比率で按分する。固定の優先順位を置か
+/// ない": `research::tick_research` must split a faction's daily research
+/// rate across axes in proportion to `research_allocation`'s *weights*,
+/// never by which axis happens to sit at which array slot
+/// (CLAUDE.md「繰り返し踏んだ欠陥」's "希少な資源に固定の優先順位を置か
+/// ない").
+///
+/// Confirmed this can fail: temporarily changed `tick_research` to always
+/// grant `ResearchAxis::Civilian` the full `rate` outright, ignoring
+/// `research_allocation` entirely (the "fixed priority decided by
+/// declaration order" shape CLAUDE.md lists first) and re-ran - the
+/// proportionality assertion below failed (`Munitions`'s progress was
+/// `0.0` in the `heavy_civilian` run despite a nonzero weight, and the two
+/// runs' totals no longer matched). Reverted before committing.
+#[test]
+fn research_allocation_is_proportional_and_order_independent() {
+    fn measure(weights: [f32; RESEARCH_AXIS_COUNT]) -> [f32; RESEARCH_AXIS_COUNT] {
+        let mut world = scenario::build_world();
+        let f = FactionId(0);
+        world.faction_mut(f).machinery_output = 100.0;
+        for axis in ALL_RESEARCH_AXES {
+            world.faction_mut(f).research_allocation[axis.index()] = ResearchWeight::new(weights[axis.index()]).unwrap();
+        }
+        research::tick_research(&mut world);
+        world.faction(f).research_progress
+    }
+
+    // A 2:1:1 ratio (1.0 vs 0.5 vs 0.5) favouring Civilian...
+    let heavy_civilian = measure([1.0, 0.5, 0.5]);
+    // ...and the exact same 2:1:1 ratio, but with the heavy weight moved to
+    // Munitions instead - same *values*, different *slots*.
+    let heavy_munitions = measure([0.5, 1.0, 0.5]);
+
+    let c = ResearchAxis::Civilian.index();
+    let m = ResearchAxis::Munitions.index();
+    let e = ResearchAxis::Equipment.index();
+
+    assert!(
+        heavy_civilian[c] > heavy_civilian[m] * 1.9,
+        "the axis with the larger weight must receive roughly twice the smaller-weight axes' share: {heavy_civilian:?}"
+    );
+    assert!(
+        (heavy_civilian[c] - heavy_munitions[m]).abs() < 1e-4,
+        "swapping which *axis* carries the heavier weight must not change how much that axis receives - only the \
+         weight should: heavy_civilian={heavy_civilian:?}, heavy_munitions={heavy_munitions:?}"
+    );
+    assert!(
+        (heavy_civilian[m] - heavy_munitions[c]).abs() < 1e-4 && (heavy_civilian[e] - heavy_munitions[e]).abs() < 1e-4,
+        "every axis not carrying the heavy weight must receive the same (smaller) share regardless of which slot \
+         the heavy weight sits in: heavy_civilian={heavy_civilian:?}, heavy_munitions={heavy_munitions:?}"
+    );
+    let total_civilian: f32 = heavy_civilian.iter().sum();
+    let total_munitions: f32 = heavy_munitions.iter().sum();
+    assert!(
+        (total_civilian - total_munitions).abs() < 1e-4,
+        "the total rate handed out must be conserved regardless of which axis is favoured: {total_civilian} vs {total_munitions}"
+    );
+}
+
+/// docs/phase12-spec.md §0 "研究の進行は機械の生産...に比例する":
+/// `tick_research`'s rate must scale with `Faction::machinery_output`
+/// (labour held fixed), not some disconnected constant.
+///
+/// Confirmed this can fail: temporarily changed `tick_research`'s `rate`
+/// computation to drop the `faction.machinery_output` factor entirely
+/// (`labor * RESEARCH_RATE_PER_MACHINERY` alone) and re-ran - doubling
+/// `machinery_output` no longer doubled the day's progress (both runs
+/// produced the identical nonzero total). Reverted before committing.
+#[test]
+fn research_rate_scales_with_machinery_output() {
+    fn progress_after(machinery_output: f32) -> f32 {
+        let mut world = scenario::build_world();
+        let f = FactionId(0);
+        world.faction_mut(f).machinery_output = machinery_output;
+        research::tick_research(&mut world);
+        world.faction(f).research_progress.iter().sum()
+    }
+
+    let low = progress_after(40.0);
+    let high = progress_after(80.0);
+    assert!(low > 0.0, "sanity: nonzero machinery output must produce nonzero progress: {low}");
+    assert!(
+        (high - 2.0 * low).abs() < low * 0.01,
+        "doubling machinery_output (labour held fixed) should double the day's progress: low={low}, high={high}"
+    );
+}
+
+/// docs/phase12-spec.md §0 "労働力に比例する... 徴兵で労働力を削れば...
+/// 遅くなる": `tick_research`'s rate must also scale with the faction's
+/// national labour availability, independent of whatever `machinery_output`
+/// already reflects - conscripting away the workforce must slow research
+/// even when this tick's Machinery figure is pinned identical between runs.
+/// `Region::labor_ratio()` is identical across every region a single
+/// faction owns (`economy::tick_economy` distributes `mobilized`
+/// proportionally to population), so the capital's own value stands in for
+/// the faction's national figure exactly the way
+/// `idle_conscripts_return_to_workforce` already reads it.
+///
+/// Confirmed this can fail: temporarily changed `tick_research`'s `rate`
+/// computation to drop the `labor` factor entirely
+/// (`faction.machinery_output * RESEARCH_RATE_PER_MACHINERY` alone) and
+/// re-ran - a faction with its labour force fully committed (depressed
+/// `labor_ratio`) made exactly the same progress as one with a fresh
+/// workforce, and the assertion below failed. Reverted before committing.
+#[test]
+fn research_rate_scales_with_national_labour() {
+    fn progress_with_manpower(manpower: f32) -> (f32, f32) {
+        let mut world = scenario::build_world();
+        let f = FactionId(0);
+        let capital = world.faction(f).capital;
+        world.faction_mut(f).manpower = manpower;
+        // The same real depress/relax mechanism
+        // `idle_conscripts_return_to_workforce` uses - `tick_economy` is
+        // what actually recomputes `Region::mobilized` (and therefore
+        // `labor_ratio`) from the pool set above.
+        economy::tick_economy(&mut world);
+        let labor = world.region(capital).labor_ratio();
+        // Pin `machinery_output` identical across both runs *after*
+        // `tick_economy` overwrote it with whatever this pool size's
+        // realistic production happened to be - only the labour term can
+        // explain any remaining difference in progress below.
+        world.faction_mut(f).machinery_output = 100.0;
+        research::tick_research(&mut world);
+        (world.faction(f).research_progress.iter().sum(), labor)
+    }
+
+    let (progress_low_labor, labor_low) = progress_with_manpower(3000.0);
+    let (progress_high_labor, labor_high) = progress_with_manpower(20.0);
+
+    assert!(labor_low < labor_high, "sanity: the oversized pool must depress labor_ratio: {labor_low} vs {labor_high}");
+    assert!(
+        progress_low_labor < progress_high_labor,
+        "with machinery_output pinned equal, lower national labour must yield less progress: \
+         low_labor_progress={progress_low_labor} (labor={labor_low}), high_labor_progress={progress_high_labor} (labor={labor_high})"
+    );
+}
+
+/// docs/phase12-spec.md §0, taken to its limit: a faction with no territory
+/// at all must make *exactly* zero research progress, even with a stale,
+/// nonzero `machinery_output` left over from before its last region was
+/// lost - `tick_research`'s population-weighted labour term must gate
+/// progress on genuine current territory, not merely happen to see
+/// `machinery_output` itself go to zero.
+///
+/// Confirmed this can fail: temporarily changed `tick_research`'s
+/// zero-population fallback from `0.0` to `1.0` (`let labor = if
+/// total_pop[f] > 0.0 { .. } else { 1.0 };`) and re-ran - the
+/// territory-less faction's stale `machinery_output` (`500.0`) produced
+/// `[8.333334, 8.333334, 8.333334]` instead of `[0.0, 0.0, 0.0]`, and the
+/// assertion below failed. Reverted before committing.
+#[test]
+fn faction_with_no_territory_makes_no_research_progress() {
+    let mut world = scenario::build_world();
+    let f = FactionId(0);
+    let other = world.factions.iter().map(|fac| fac.id).find(|&id| id != f).expect("mvp has more than one faction");
+
+    for region in world.regions.iter_mut() {
+        if region.owner == f {
+            region.owner = other;
+        }
+    }
+    world.faction_mut(f).machinery_output = 500.0;
+
+    research::tick_research(&mut world);
+
+    assert_eq!(
+        world.faction(f).research_progress,
+        [0.0; RESEARCH_AXIS_COUNT],
+        "a faction with no territory at all must make zero research progress, regardless of a stale machinery_output"
+    );
 }
 
 // ---------------------------------------------------------------------------

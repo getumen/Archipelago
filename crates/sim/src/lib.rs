@@ -21,6 +21,7 @@ pub mod military;
 pub mod naval;
 pub mod observation;
 pub mod politics;
+pub mod research;
 pub mod rng;
 pub mod scenario;
 pub mod sim;

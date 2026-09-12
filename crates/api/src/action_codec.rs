@@ -19,12 +19,17 @@ use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::military::Branch;
+use archipelago_sim::research::{ResearchAxis, ALL_RESEARCH_AXES};
 use archipelago_sim::world::{Domain, Station};
 
 use crate::json::Value;
 
 fn good_from_key(key: &str) -> Option<Good> {
     ALL_GOODS.iter().copied().find(|g| g.key() == key)
+}
+
+fn research_axis_from_key(key: &str) -> Option<ResearchAxis> {
+    ALL_RESEARCH_AXES.iter().copied().find(|a| a.key() == key)
 }
 
 fn project_from_value(v: &Value) -> Result<Project, String> {
@@ -203,6 +208,13 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
         "set_logistics_priority" => {
             Ok(Action::SetLogisticsPriority { good: good_field(v, "good")?, weight: f32_field(v, "weight")? })
         }
+        "set_research_allocation" => {
+            let axis_key = v.get("axis").and_then(Value::as_str).ok_or("expected string `axis`")?;
+            Ok(Action::SetResearchAllocation {
+                axis: research_axis_from_key(axis_key).ok_or_else(|| format!("unknown research axis `{axis_key}`"))?,
+                weight: f32_field(v, "weight")?,
+            })
+        }
         "propose_treaty" => {
             let treaty_key = v.get("treaty").and_then(Value::as_str).ok_or("`propose_treaty` needs `treaty`")?;
             Ok(Action::ProposeTreaty { to: faction_id(v, "to")?, treaty: treaty_from_key(treaty_key)? })
@@ -263,11 +275,12 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
 // brief, one that has already bitten this codebase twice. Two different
 // defences against that drift are used here, at two different strengths:
 //
-// - The *enum vocabularies* (`good`, `treaty`, `focus`, `layer`) are built
-//   by mapping the exact same `ALL_GOODS`/`ALL_TREATIES`/`ALL_FOCI`/
-//   `ALL_LAYERS` arrays and `key()` methods `good_from_key`/
-//   `treaty_from_key`/`focus_from_key`/`Layer::key` above already use (or,
-//   for `layer`, that `action_entry` uses) - so those four vocabularies
+// - The *enum vocabularies* (`good`, `treaty`, `focus`, `layer`,
+//   `research_axis`) are built by mapping the exact same `ALL_GOODS`/
+//   `ALL_TREATIES`/`ALL_FOCI`/`ALL_LAYERS`/`ALL_RESEARCH_AXES` arrays and
+//   `key()` methods `good_from_key`/`treaty_from_key`/`focus_from_key`/
+//   `Layer::key`/`research_axis_from_key` above already use (or, for
+//   `layer`, that `action_entry` uses) - so those vocabularies
 //   literally cannot list a name the decoder doesn't accept/produce, or
 //   omit one it does; they're the same data, not a copy of it.
 // - The action list itself (names, required/optional fields, nested object
@@ -367,6 +380,11 @@ fn actions_schema() -> Value {
             vec![field_enum("good", "good", true), field("weight", "number", true)],
         ),
         action_entry(
+            "set_research_allocation",
+            Layer::Economy,
+            vec![field_enum("axis", "research_axis", true), field("weight", "number", true)],
+        ),
+        action_entry(
             "propose_treaty",
             Layer::Diplomacy,
             vec![field("to", "integer", true), field_enum("treaty", "treaty", true)],
@@ -408,7 +426,7 @@ fn actions_schema() -> Value {
 }
 
 /// The enum vocabularies referenced by `actions_schema()`'s `"enum"`
-/// fields. `good`/`treaty`/`focus` are read from the same `ALL_*` arrays
+/// fields. `good`/`treaty`/`focus`/`research_axis` are read from the same `ALL_*` arrays
 /// and `key()` methods the decoder itself calls (see this section's own
 /// doc); `domain`/`station_kind`/`treaty_term_kind` name literal string
 /// arms in `action_from_value`/`station_from_value`/`treaty_term_from_value`
@@ -417,6 +435,7 @@ fn actions_schema() -> Value {
 fn enums_schema() -> Value {
     Value::obj(vec![
         ("good", Value::arr(ALL_GOODS.iter().map(|g| Value::str(g.key())).collect())),
+        ("research_axis", Value::arr(ALL_RESEARCH_AXES.iter().map(|a| Value::str(a.key())).collect())),
         ("treaty", Value::arr(ALL_TREATIES.iter().map(|t| Value::str(t.key())).collect())),
         ("focus", Value::arr(ALL_FOCI.iter().map(|f| Value::str(f.key())).collect())),
         ("layer", Value::arr(ALL_LAYERS.iter().map(|l| Value::str(l.key())).collect())),

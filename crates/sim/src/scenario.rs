@@ -26,6 +26,7 @@ use crate::group::GROUP_COUNT;
 use crate::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use crate::json::{self, Value};
 use crate::military::Unit;
+use crate::research::{FACTION_RESEARCH_ALLOCATION_DEFAULT, RESEARCH_AXIS_COUNT};
 use crate::transport::{Capacity, Condition, TransportLine, TransportLineKind, TransportNode, TransportNodeKind};
 use crate::world::{AirSuperiority, DominationShare, Faction, Link, LinkKind, Region, SeaZone, Station, Terrain, VictoryCondition, VictoryDeclaration, World};
 
@@ -1082,6 +1083,7 @@ impl Scenario {
                 group_support: FACTION_GROUP_SUPPORT,
                 group_influence: FACTION_GROUP_INFLUENCE,
                 machinery_output_ratio: 0.0,
+                machinery_output: 0.0,
                 strike_days: 0,
                 regime_change_days: 0,
                 protest_active: false,
@@ -1089,6 +1091,8 @@ impl Scenario {
                 capital_flight_active: false,
                 national_focus: FACTION_NATIONAL_FOCUS_DEFAULT,
                 focus_transition_days: 0,
+                research_allocation: FACTION_RESEARCH_ALLOCATION_DEFAULT,
+                research_progress: [0.0; RESEARCH_AXIS_COUNT],
                 alive: true,
             })
             .collect();

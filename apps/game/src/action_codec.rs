@@ -33,6 +33,7 @@ use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::json::{self, Value};
 use archipelago_sim::military::Branch;
+use archipelago_sim::research::{ResearchAxis, ALL_RESEARCH_AXES};
 use archipelago_sim::world::{Domain, Station};
 
 fn good_key(good: Good) -> &'static str {
@@ -41,6 +42,14 @@ fn good_key(good: Good) -> &'static str {
 
 fn good_from_key(key: &str) -> Option<Good> {
     ALL_GOODS.iter().copied().find(|g| g.key() == key)
+}
+
+fn research_axis_key(a: ResearchAxis) -> &'static str {
+    a.key()
+}
+
+fn research_axis_from_key(key: &str) -> Option<ResearchAxis> {
+    ALL_RESEARCH_AXES.iter().copied().find(|a| a.key() == key)
 }
 
 fn layer_key(layer: Layer) -> &'static str {
@@ -208,6 +217,11 @@ pub fn action_to_value(action: &Action) -> Value {
             ("good", Value::str(good_key(good))),
             ("weight", Value::f32num(weight)),
         ]),
+        Action::SetResearchAllocation { axis, weight } => Value::obj(vec![
+            ("type", Value::str("set_research_allocation")),
+            ("axis", Value::str(research_axis_key(axis))),
+            ("weight", Value::f32num(weight)),
+        ]),
         Action::ProposeTreaty { to, treaty } => {
             Value::obj(vec![("type", Value::str("propose_treaty")), ("to", Value::num(to.0 as f64)), ("treaty", Value::str(treaty_key(treaty)))])
         }
@@ -301,6 +315,13 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             let good_key = v.get("good").and_then(Value::as_str).ok_or("expected string `good`")?;
             Ok(Action::SetLogisticsPriority {
                 good: good_from_key(good_key).ok_or_else(|| format!("unknown good `{good_key}`"))?,
+                weight: f32_field("weight")?,
+            })
+        }
+        "set_research_allocation" => {
+            let axis_key = v.get("axis").and_then(Value::as_str).ok_or("expected string `axis`")?;
+            Ok(Action::SetResearchAllocation {
+                axis: research_axis_from_key(axis_key).ok_or_else(|| format!("unknown research axis `{axis_key}`"))?,
                 weight: f32_field("weight")?,
             })
         }
@@ -534,6 +555,7 @@ mod tests {
             Action::CancelBuild { region: RegionId(2) },
             Action::SetImportPlan { good: Good::Food, rate: 12.5 },
             Action::SetLogisticsPriority { good: Good::Infantry, weight: 0.3 },
+            Action::SetResearchAllocation { axis: archipelago_sim::research::ResearchAxis::Equipment, weight: 0.4 },
             Action::ProposeTreaty { to: FactionId(1), treaty: Treaty::Alliance },
             Action::AcceptTreaty { from: FactionId(1), treaty: Treaty::Ceasefire },
             Action::RejectTreaty { from: FactionId(1), treaty: Treaty::NonAggression },

@@ -304,6 +304,11 @@ pub fn tick_economy(world: &mut World) {
         } else {
             0.0
         };
+        // Phase 12 (`Faction::machinery_output`'s own doc): the same
+        // `actual_machinery` figure, kept in absolute form for
+        // `research::tick_research` to read - see that field's doc for why
+        // the ratio above can't stand in for it.
+        faction.machinery_output = actual_machinery;
         let actual_munitions = pot[Good::Munitions.index()]
             .min(input_limit(steel_budget_munitions, MUNITIONS_INPUT_STEEL))
             .min(input_limit(energy_budget_munitions, MUNITIONS_INPUT_ENERGY))

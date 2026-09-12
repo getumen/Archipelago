@@ -1175,3 +1175,13 @@ pub const NODE_OPERATIONAL_THRESHOLD: f32 = 0.5;
 /// the region it sits in, not merely wear it down the way repeated raids
 /// along an entire spread-out route must.
 pub const NODE_STRIKE_DAMAGE: f32 = 0.6;
+
+/// Phase 12 (docs/phase12-spec.md §0 "ただし速度は経済に依存する"): scales
+/// this tick's absolute Machinery production and national labour ratio
+/// (`research::tick_research`) into research progress. Stage 12A ships no
+/// reader of `Faction::research_progress` at all, so this value cannot
+/// change any of today's three scenarios' behaviour either way - Stage 12D
+/// is where this actually gets tuned against real play, once Stage 12B
+/// gives progress somewhere to go (docs/conventions.md's own "測定してから
+/// 直す。推測で最適化しない").
+pub const RESEARCH_RATE_PER_MACHINERY: f32 = 0.05;
