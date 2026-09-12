@@ -74,12 +74,20 @@ only supported value, matching what the server implements.
   faction scalars, 3 factions x 9 diplomacy fields - see `observation.layout`
   in the schema response, or `crates/sim/src/observation.rs`'s doc comment,
   for the exact field order).
-- `env.action_space` is a `Discrete(M)`, flattening the categories
-  docs/phase5-spec.md calls for - unit move / recruit / reinforce / build /
-  policy change / treaty proposal / no-op - into one integer per concrete
-  action. `env.action_table.entries[i].label` gives a human-readable
-  description of action `i` (e.g. `"move_unit(unit=3, to=region:6)"`),
-  useful for inspecting what a trained policy actually does.
+- `env.action_space` is a `Discrete(M)`, flattening every action type
+  `GET /schema` advertises - unit move/hold/reinforce/disband/recruit,
+  build/cancel, policy change, treaty propose/accept/reject/break,
+  declare war, transport-line interdiction and node strikes, and
+  accepting (by signing one treaty) or rejecting a natural-language
+  proposal - into one integer per concrete action, with one deliberate
+  exception: `propose_in_natural_language` is not in this table, since its
+  only real content is free text, which has no finite `Discrete` encoding
+  that wouldn't misrepresent it (see `ActionTable`'s doc in
+  `python/env/schema.py`); it is still in `schema["actions"]` for non-RL
+  callers that can supply real text. `env.action_table.entries[i].label`
+  gives a human-readable description of action `i` (e.g.
+  `"move_unit(unit=3, to=region:6)"`), useful for inspecting what a trained
+  policy actually does.
   - Two client-side constants shape this table, since a fixed-size
     `Discrete` space can't accommodate a dynamically-growing unit id or a
     continuous field on its own: `max_unit_slots` (default 48 - unit slot
@@ -94,6 +102,27 @@ only supported value, matching what the server implements.
   `crates/api/src/action_codec.rs::action_error_key`. Only a genuinely
   out-of-range `Discrete` index (`action_space.n <= action`) raises
   `ValueError` - that is a bug in the caller, not a normal game outcome.
+
+## Per-layer control
+
+By default `faction` is controlled wholesale - every decision (military,
+economy, grand strategy, diplomacy). Pass `layers=[...]` to hand only some
+of those to the policy while the server's own built-in heuristic AI keeps
+driving the rest of that same faction - useful for a balance investigation
+that wants to isolate one system, e.g. train an economic-policy agent while
+the heuristic AI still fights that faction's war:
+
+```python
+env = ArchipelagoEnv(seed=1, faction=0, layers=["economy"])
+```
+
+`env.action_table.indices_for_layer("economy")` gives the subset of
+`action_table.entries` that actually belong to that layer (plus `no_op`),
+for building a smaller `Discrete` a single-layer policy can sample from
+instead of the full table - submitting an action outside the layers you
+were given back is not an error, it just comes back in
+`info["rejected"]` (`"faction 0 does not control layer ... in this
+session"`).
 
 ## Reward is swappable
 

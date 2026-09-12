@@ -67,6 +67,22 @@ class ActionTable:
     *per-layer* policy (e.g. a military-only RL agent) that only ever sees
     the slice of this table its layer actually needs, instead of the full
     flattened space.
+
+    Every `crates/sim/src/action.rs` action type `GET /schema` advertises is
+    represented here with one exception: `propose_in_natural_language`. Its
+    only substantive field is free text (`text`), which is not a finite
+    choice a `Discrete` index can address the way an enum or an id can - any
+    fixed set of canned strings this table could offer would misrepresent
+    what the action actually is (an arbitrary natural-language message), so
+    it is left out of the flattened space rather than faked. It still
+    appears in `schema["actions"]` for non-RL clients (`HumanAgent`/
+    `LlmAgent` callers of the same API) that can supply real text.
+    `respond_to_natural_language_proposal`'s own free-form `terms` field is
+    handled instead by discretizing it the same way `accept_treaty`/
+    `reject_treaty` already are: "accept, signing treaty T" (one entry per
+    `(from, treaty)` pair) and "reject" (one entry per `from`) - not every
+    possible response (an interpretation could also cede regions or delivery
+    goods), but a real, reachable subset rather than nothing at all.
     """
 
     def __init__(self, schema: dict[str, Any], max_unit_slots: int = DEFAULT_MAX_UNIT_SLOTS,
@@ -86,14 +102,16 @@ class ActionTable:
         self.region_count: int = scenario["region_count"]
         self.sea_zone_count: int = scenario["sea_zone_count"]
         self.faction_count: int = scenario["faction_count"]
+        self.transport_line_count: int = scenario["transport_line_count"]
+        self.transport_node_count: int = scenario["transport_node_count"]
 
         # Read off the same per-type `layer` the server's `/schema` already
         # reports for the actions this table's payloads use (`crates/api/src
         # /action_codec.rs::actions_schema`), rather than re-declaring the
         # military/economy/grand_strategy/diplomacy split a second time on
         # the Python side - a type this table doesn't otherwise reference
-        # (e.g. one only `Layer::Diplomacy`'s `declare_war`/`break_treaty`
-        # ever needs) simply never gets looked up.
+        # (today, only `propose_in_natural_language` - see `ActionTable`'s
+        # own doc for why) simply never gets looked up.
         type_to_layer: dict[str, str] = {entry["type"]: entry["layer"] for entry in schema["actions"]}
 
         self.entries: list[ActionEntry] = [
@@ -190,6 +208,41 @@ class ActionTable:
                     f"reject_treaty(from={frm}, treaty={treaty})",
                     {"type": "reject_treaty", "from": frm, "treaty": treaty},
                 )
+
+        for to in range(self.faction_count):
+            yield f"declare_war(to={to})", {"type": "declare_war", "to": to}
+
+        for with_ in range(self.faction_count):
+            for treaty in self.treaties:
+                yield (
+                    f"break_treaty(with={with_}, treaty={treaty})",
+                    {"type": "break_treaty", "with": with_, "treaty": treaty},
+                )
+
+        # `propose_in_natural_language` is deliberately absent - see
+        # `ActionTable`'s class doc.
+        for frm in range(self.faction_count):
+            for treaty in self.treaties:
+                yield (
+                    f"respond_to_natural_language_proposal(from={frm}, accept=True, sign={treaty})",
+                    {
+                        "type": "respond_to_natural_language_proposal",
+                        "from": frm,
+                        "accept": True,
+                        "terms": [{"kind": "sign", "treaty": treaty}],
+                    },
+                )
+        for frm in range(self.faction_count):
+            yield (
+                f"respond_to_natural_language_proposal(from={frm}, accept=False)",
+                {"type": "respond_to_natural_language_proposal", "from": frm, "accept": False, "terms": []},
+            )
+
+        for line in range(self.transport_line_count):
+            yield f"interdict_line(line={line})", {"type": "interdict_line", "line": line}
+
+        for node in range(self.transport_node_count):
+            yield f"strike_node(node={node})", {"type": "strike_node", "node": node}
 
     def __len__(self) -> int:
         return len(self.entries)

@@ -49,6 +49,7 @@ class ArchipelagoEnv(gym.Env):
         value_levels: tuple = DEFAULT_VALUE_LEVELS,
         idle_timeout_secs: int = 1800,
         request_timeout_secs: float = 30.0,
+        layers: Optional[list[str]] = None,
     ):
         super().__init__()
         if opponents != "heuristic":
@@ -62,6 +63,19 @@ class ArchipelagoEnv(gym.Env):
         self.default_seed = seed
         self.max_days = max_days
         self.reward_fn = reward_fn
+        # Playtest-defect fix wired through to Python: `POST /reset`'s
+        # `controlled` accepts either a bare faction id (full control of
+        # every `Layer`) or `{"faction":.., "layers":[...]}` (only the named
+        # `Layer`s - every other `Layer` for `faction` is then decided by the
+        # server's own built-in heuristic `Agent`, exactly like an
+        # uncontrolled faction). `layers=None` (the default) keeps the
+        # original whole-faction behaviour; passing e.g. `layers=["economy"]`
+        # is what lets a balance investigation train one layer (say,
+        # economic policy) while the heuristic AI fights that faction's own
+        # war - `env.action_table.indices_for_layer(layer)` gives the
+        # matching slice of the flattened action table to sample from.
+        # Validated against `enums.layer` below, once the schema is fetched.
+        self.layers = list(layers) if layers is not None else None
 
         self._managed_server: Optional[ManagedServer] = None
         if base_url is None:
@@ -87,6 +101,18 @@ class ArchipelagoEnv(gym.Env):
         schema = self.client.get("/schema")
         self.schema = schema
         self.action_table = ActionTable(schema, max_unit_slots=max_unit_slots, value_levels=value_levels)
+        if self.layers is not None:
+            # An empty list would construct fine here and then fail every
+            # `reset()` with HTTP 400, since the server rejects an empty
+            # `layers` array (`codex review`). An environment that builds must
+            # be usable: say what is wrong at construction, where the caller
+            # can see it, not on the first step of a training run. `None` is
+            # the way to say "control the whole faction".
+            if not self.layers:
+                raise ValueError("layers=[] controls nothing; pass layers=None to control the whole faction")
+            unknown = [l for l in self.layers if l not in self.action_table.layers]
+            if unknown:
+                raise ValueError(f"unknown layer(s) {unknown!r}, expected a subset of {self.action_table.layers}")
         obs_len = observation_length(schema)
 
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_len,), dtype=np.float32)
@@ -105,7 +131,8 @@ class ArchipelagoEnv(gym.Env):
         if effective_seed is None:
             effective_seed = random.SystemRandom().getrandbits(63)
 
-        body: dict[str, Any] = {"seed": int(effective_seed), "controlled": [self.faction]}
+        controlled_entry: Any = self.faction if self.layers is None else {"faction": self.faction, "layers": self.layers}
+        body: dict[str, Any] = {"seed": int(effective_seed), "controlled": [controlled_entry]}
         max_days = (options or {}).get("max_days", self.max_days)
         if max_days is not None:
             body["max_days"] = max_days
