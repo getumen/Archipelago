@@ -67,6 +67,7 @@ use archipelago_sim::focus::{NationalFocus, ALL_FOCI};
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use archipelago_sim::military::{Branch, ALL_BRANCHES};
+use archipelago_sim::research::ALL_RESEARCH_AXES;
 use archipelago_sim::world::{Domain, Station, World as SimWorld};
 
 use super::chrome;
@@ -1551,9 +1552,31 @@ pub(super) fn spawn_policy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &H
             });
             panel.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(TEXT_REASON), PolicyFocusReasonText));
 
+            // Stage 12C (docs/phase12-spec.md §3 "画面で研究が見える"):
+            // read-only for now (`docs/phase12-spec.md`'s own acceptance bar
+            // for this stage asks only that research be *visible*, not that
+            // the player edit it here - `HeuristicAgent::set_research_
+            // priority` and the RL action table (`Action::
+            // SetResearchAllocation`) are this stage's own answer for who
+            // sets it; a human `--play` faction reaching the same knob
+            // through this panel is a real gap worth a second look, but
+            // adding a fourth `PolicyField`-style tab/step-button rig here
+            // to close it is exactly the kind of unrequested abstraction
+            // docs/conventions.md §1 asks to raise rather than build, so
+            // this stage stops at display).
+            panel.spawn((Text::new("研究:"), text_font(11.0, font), TextColor(Color::srgb(0.8, 0.82, 0.85))));
+            panel.spawn((Text::new(String::new()), text_font(11.0, font), TextColor(TEXT_ENABLED), ResearchInfoText));
+
             panel.spawn((Text::new(String::new()), text_font(11.0, font), TextColor(TEXT_REASON), PolicyRejectionText));
         });
 }
+
+/// Stage 12C: displays `Faction::research_progress`/`research_allocation`
+/// for all three `research::ResearchAxis`, one line per axis - the read-only
+/// counterpart to the other `Policy*` value texts above (see `spawn_policy_
+/// panel`'s call site doc for why this one has no step buttons).
+#[derive(Component)]
+pub(super) struct ResearchInfoText;
 
 #[derive(Component)]
 pub(super) struct PolicyRejectionText;
@@ -1568,11 +1591,24 @@ pub(super) fn sync_policy_panel(
     rejection: Res<LastRejection>,
     mut root: Query<(&mut Visibility, &mut Node), With<PolicyPanelRoot>>,
     mut good_tabs: Query<(&GoodTabButton, &mut BackgroundColor)>,
-    mut value_texts: Query<(&PolicyValueText, &mut Text, &mut TextColor), (Without<PolicyRejectionText>, Without<PolicyFocusReasonText>)>,
+    mut value_texts: Query<
+        (&PolicyValueText, &mut Text, &mut TextColor),
+        (Without<PolicyRejectionText>, Without<PolicyFocusReasonText>, Without<ResearchInfoText>),
+    >,
     mut step_buttons: Query<(&PolicyStepButton, &mut BackgroundColor), Without<GoodTabButton>>,
     mut focus_buttons: Query<(&FocusButton, &mut BackgroundColor), (Without<GoodTabButton>, Without<PolicyStepButton>)>,
-    mut focus_reason: Query<&mut Text, (With<PolicyFocusReasonText>, Without<PolicyValueText>, Without<PolicyRejectionText>)>,
-    mut rejection_text: Query<&mut Text, (With<PolicyRejectionText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>)>,
+    mut focus_reason: Query<
+        &mut Text,
+        (With<PolicyFocusReasonText>, Without<PolicyValueText>, Without<PolicyRejectionText>, Without<ResearchInfoText>),
+    >,
+    mut rejection_text: Query<
+        &mut Text,
+        (With<PolicyRejectionText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<ResearchInfoText>),
+    >,
+    mut research_text: Query<
+        &mut Text,
+        (With<ResearchInfoText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<PolicyRejectionText>),
+    >,
 ) {
     let Ok((mut visibility, mut node)) = root.single_mut() else { return };
     let showing = player.0.is_some() && policy.0 && !diplomacy.open;
@@ -1627,6 +1663,26 @@ pub(super) fn sync_policy_panel(
     if let Ok(mut text) = rejection_text.single_mut() {
         let lines: Vec<&str> = rejection.0.iter().filter(|r| r.target == RejectionTarget::Policy).map(|r| r.reason).collect();
         text.0 = if lines.is_empty() { String::new() } else { format!("!! 却下 !!\n{}", lines.join("\n")) };
+    }
+
+    // Stage 12C (docs/phase12-spec.md §3 "画面で研究が見える"): one line
+    // per `research::ResearchAxis`, `progress`/`allocation` both read
+    // straight off `Faction` - no derived/cached value to fall out of sync
+    // (`ResearchInfoText`'s own doc explains why this is display-only for
+    // now).
+    if let Ok(mut text) = research_text.single_mut() {
+        let lines: Vec<String> = ALL_RESEARCH_AXES
+            .iter()
+            .map(|&axis| {
+                format!(
+                    "  {}: 進捗 {:.1}（配分 {:.2}）",
+                    axis.label(),
+                    faction.research_progress[axis.index()],
+                    faction.research_allocation[axis.index()].get(),
+                )
+            })
+            .collect();
+        text.0 = lines.join("\n");
     }
 }
 

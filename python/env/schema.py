@@ -97,6 +97,10 @@ class ActionTable:
         self.foci: list[str] = enums["focus"]
         self.domains: list[str] = enums["domain"]
         self.layers: list[str] = enums["layer"]
+        # Stage 12C (docs/phase12-spec.md §3, `crates/api/src/action_codec.rs`'s
+        # `research_axis` enum): read the same way every other enum here is -
+        # off `GET /schema` itself, never a hardcoded copy.
+        self.research_axes: list[str] = enums["research_axis"]
 
         scenario = schema["scenario"]
         self.region_count: int = scenario["region_count"]
@@ -186,6 +190,20 @@ class ActionTable:
                 yield (
                     f"set_logistics_priority(good={good}, weight={level})",
                     {"type": "set_logistics_priority", "good": good, "weight": level},
+                )
+        # Stage 12C: `set_research_allocation` (docs/phase12-spec.md §2) was
+        # already in `GET /schema`'s `actions[]` and `action_from_value`
+        # (Stage 12A) but missing from this table - exactly the "action
+        # exists in the schema/decoder but the flattened Discrete table never
+        # emits it" defect this file's own class doc calls out from Phase 11
+        # ("6 つの行動が黙って到達不能になっていた"). Same shape as
+        # `set_industry_priority`/`set_logistics_priority` just above: one
+        # entry per (axis, level) pair.
+        for axis in self.research_axes:
+            for level in self.value_levels:
+                yield (
+                    f"set_research_allocation(axis={axis}, weight={level})",
+                    {"type": "set_research_allocation", "axis": axis, "weight": level},
                 )
         for focus in self.foci:
             yield f"set_national_focus({focus})", {"type": "set_national_focus", "focus": focus}

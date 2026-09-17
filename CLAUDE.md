@@ -378,9 +378,16 @@ cargo test -p archipelago-game --test scenario_acceptance -- --ignored
 `docs/future-work.md` を参照。観測ベクトルのグラフ構造化、TLS 対応、
 艦隊移動の hostile 判定、カメラのフィットの余白、陸軍の中の兵科（歩兵・機甲・
 砲兵の区別）が未着手。輸送網の独立レイヤー化（Phase 9）・japan_hex の小国の
-永久破綻・兵科としての航空戦力（Phase 10）は解決済み（小国の破綻は無条件の
-兵力下限が原因だった）。観測ベクトルは Phase 10 で航空・制空権・ノード状態が
-加わり長さが変わった（mvp 505・japan47 2223・japan_hex 11411 floats）。
+永久破綻・兵科としての航空戦力（Phase 10）・陸軍の中の兵科（Phase 11）は
+解決済み（小国の破綻は無条件の兵力下限が原因だった）。観測ベクトルは Phase 10
+で航空・制空権・ノード状態が、Phase 11 で兵科の内訳と `Good` の増加
+（Arms → Infantry/Armour/Artillery）が、Stage 12C で研究 3 軸の進捗・配分が
+加わり長さが変わった。**現在値（Stage 12C 時点、`GET /schema` の
+`observation.length` を実測）: mvp 558・japan47 2424・japan_hex 12580 floats。**
+かつてここに Phase 10 時点の値（mvp 505・japan47 2223・japan_hex 11411）を
+書いていたが、Phase 11 の `Good` 増加分の反映を取り忘れたまま放置されていた
+——Stage 12C で確かめ直すまで誰も気づかなかった。**この数字も、書く前に
+自分で `GET /schema` を叩いて確かめること。**
 
 ### 特に注意: 試合時間の長さは欠陥ではない
 

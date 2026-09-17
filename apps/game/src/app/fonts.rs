@@ -453,9 +453,11 @@ mod tests {
         use archipelago_sim::ids::FactionId;
         use archipelago_sim::scenario;
 
+        use crate::app::panels::{sync_policy_panel, PolicyPanelRoot, ResearchInfoText};
         use crate::app::{
-            EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperState, PlayerFaction, PlayerPanelText,
-            ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, TopBarPlayerStatsText, TopBarText,
+            ActiveGood, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperState,
+            PlayerFaction, PlayerPanelText, PolicyPanel, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
+            TopBarPlayerStatsText, TopBarText,
         };
         use crate::sim_driver::{SimDriver, Speed};
 
@@ -486,6 +488,13 @@ mod tests {
         world.insert_resource(SelectedRegion(Some(some_region)));
         world.insert_resource(SelectedUnits::default());
         world.insert_resource(MenuRegion::default());
+        // Stage 12C: the minimum this test needs to make `sync_policy_panel`
+        // actually take its "showing" branch and populate `ResearchInfoText`
+        // below - `PolicyPanel`'s own doc: never shown without a `--play`ed
+        // faction (already true here) and this flag set.
+        world.insert_resource(PolicyPanel(true));
+        world.insert_resource(DiplomacyPanel { open: false, target: None });
+        world.insert_resource(ActiveGood::default());
 
         world.spawn((Text::new(String::new()), TopBarText));
         world.spawn((Text::new(String::new()), TopBarPlayerStatsText));
@@ -493,6 +502,13 @@ mod tests {
         world.spawn((Text::new(String::new()), PlayerPanelText));
         world.spawn((Text::new(String::new()), InspectText));
         world.spawn((Text::new(String::new()), EventLogText));
+        // Stage 12C (docs/phase12-spec.md §3 "画面で研究が見える"): the
+        // policy panel's own root plus its new research display - without
+        // `PolicyPanelRoot`, `sync_policy_panel` returns before reaching
+        // `ResearchInfoText` at all (`root.single_mut()` fails), so this
+        // test would silently cover none of the panel's own text.
+        world.spawn((Visibility::Hidden, Node::default(), PolicyPanelRoot));
+        world.spawn((Text::new(String::new()), ResearchInfoText));
 
         // A few real in-game days, through the actual per-frame system
         // (`sim_control::advance_simulation`) - populates `EventLog` with
@@ -507,6 +523,7 @@ mod tests {
         run(&mut world, super::super::ui::update_player_panel);
         run(&mut world, super::super::ui::update_inspect_panel);
         run(&mut world, super::super::ui::update_event_log);
+        run(&mut world, sync_policy_panel);
 
         let mut rendered_text = String::new();
         let mut texts = world.query::<&Text>();

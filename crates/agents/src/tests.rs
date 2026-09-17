@@ -12,12 +12,13 @@ use archipelago_sim::good::{Good, GOOD_COUNT};
 use archipelago_sim::ids::{FactionId, RegionId, UnitId};
 use archipelago_sim::military::{move_required, Branch, Movement, Unit};
 use archipelago_sim::observation::Observation;
+use archipelago_sim::research::ResearchAxis;
 use archipelago_sim::scenario;
 use archipelago_sim::trade;
 use archipelago_sim::transport::Condition;
 use archipelago_sim::world::Station;
 
-use crate::{cannot_interpret_nl, default_heuristic_agent, HeuristicAgent, DEFAULT_CAUTION};
+use crate::{cannot_interpret_nl, default_heuristic_agent, HeuristicAgent, DEFAULT_CAUTION, RESEARCH_FOCUSED_WEIGHT};
 
 /// A unit already under way toward a destination must not be re-issued a
 /// `MoveUnit` toward that same destination - doing so resets
@@ -1617,5 +1618,283 @@ fn heuristic_agent_recruit_branch_artillery_slot_survives_a_moderate_shortfall()
         severe_shortfall,
         Branch::Infantry,
         "a shortfall much closer to the DISBAND_SOLVENCY_SUPPLY_RATIO floor must still fall back to Infantry: got {severe_shortfall:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Stage 12C: HeuristicAgent research axis selection
+// (docs/phase12-spec.md §3 "最低限、状況に応じて軸を選ぶこと")
+// ---------------------------------------------------------------------
+
+/// Pulls out this decide() call's three `Action::SetResearchAllocation`
+/// weights, indexed by `ResearchAxis::index()` - a small helper shared by
+/// every lean test below so each one only has to state what it expects,
+/// not how to find it.
+fn research_weights(actions: &[Action]) -> [f32; archipelago_sim::research::RESEARCH_AXIS_COUNT] {
+    let mut weights = [f32::NAN; archipelago_sim::research::RESEARCH_AXIS_COUNT];
+    for action in actions {
+        if let Action::SetResearchAllocation { axis, weight } = action {
+            weights[axis.index()] = *weight;
+        }
+    }
+    assert!(
+        weights.iter().all(|w| w.is_finite()),
+        "set_research_priority must emit all three axes every tick it runs: {actions:?}"
+    );
+    weights
+}
+
+/// docs/phase12-spec.md §3's own criterion: at war, `research::ResearchAxis::
+/// Equipment` (the axis `military::tick_combat`'s land branch coefficient
+/// reads) must outweigh the other two - mvp's declared-empty blocs
+/// (`scenarios/mvp.json`'s `"diplomacy": {"blocs": []}`) leave every pair at
+/// `Diplomacy::new`'s own default `Stance::War`, so no extra setup is needed
+/// to put faction 0 at war with its rivals.
+///
+/// Checked this fails when broken: temporarily hardcoded `set_research_
+/// priority`'s `lean` to always be `ResearchAxis::Civilian`. This test then
+/// failed (`Equipment`'s weight read the unfocused `other_weight` instead of
+/// `RESEARCH_FOCUSED_WEIGHT`). Reverted before committing.
+#[test]
+fn research_priority_leans_equipment_while_at_war() {
+    let world = scenario::build_world();
+    let faction = FactionId(0);
+    let other = FactionId(1);
+    assert!(
+        world.diplomacy.is_at_war(faction, other),
+        "test setup: mvp's empty bloc declaration must leave every pair at war by default"
+    );
+
+    let mut agent = default_heuristic_agent(0);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    let weights = research_weights(&actions);
+
+    assert_eq!(
+        weights[ResearchAxis::Equipment.index()], RESEARCH_FOCUSED_WEIGHT,
+        "a faction at war must lean its research allocation toward Equipment: {weights:?}"
+    );
+    for axis in [ResearchAxis::Civilian, ResearchAxis::Munitions] {
+        assert!(
+            weights[axis.index()] < RESEARCH_FOCUSED_WEIGHT,
+            "the unfavoured axes must not also read the focused weight: {weights:?}"
+        );
+    }
+}
+
+/// `codex review` (P2): `Diplomacy::stance` is never cleared when a faction
+/// is eliminated (`sim::Simulation::step` only ever flips `Faction::alive`
+/// to `false`), so a stale `Stance::War` against a *dead* rival must not
+/// keep pinning this faction's research lean to Equipment once every living
+/// rival is at peace with it - the same "gate on `alive`" fix `research::
+/// tick_research`'s own catch-up scan already applies for an identical
+/// reason.
+///
+/// Checked this fails when broken: temporarily reverted `set_research_
+/// priority`'s `at_war` scan to the unfiltered `(0..world.factions.len())
+/// .any(|f| world.diplomacy.is_at_war(faction, FactionId(f as u32)))` form.
+/// This test then failed (`Equipment`'s weight read `RESEARCH_FOCUSED_
+/// WEIGHT` despite every *living* faction being at peace with faction 0).
+/// Reverted before committing.
+#[test]
+fn research_priority_ignores_a_stale_war_stance_against_an_eliminated_faction() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let dead = FactionId(2);
+    assert!(scenario::FACTION_COUNT >= 3, "test setup: mvp must have a third faction to eliminate");
+
+    // `dead` is eliminated without its diplomatic stance ever being
+    // touched - exactly what `sim::Simulation::step`'s own elimination
+    // branch does (flips `alive`, never calls into `diplomacy`).
+    world.faction_mut(dead).alive = false;
+    assert!(
+        world.diplomacy.is_at_war(faction, dead),
+        "test setup: mvp's empty bloc declaration leaves every pair at war by default, including a faction \
+         this test then eliminates without clearing that stance"
+    );
+
+    // Faction 0 is now at peace with every *living* rival (faction 1 is
+    // mvp's only other survivor).
+    for other in 1..scenario::FACTION_COUNT as u32 {
+        let other = FactionId(other);
+        if other == dead {
+            continue;
+        }
+        action::apply_action(&mut world, faction, Action::ProposeTreaty { to: other, treaty: Treaty::Ceasefire })
+            .expect("faction 0 proposing ceasefire must be accepted by apply_action");
+        action::apply_action(&mut world, other, Action::AcceptTreaty { from: faction, treaty: Treaty::Ceasefire })
+            .expect("the ceasefire accept must be accepted by apply_action");
+    }
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 1_000_000.0;
+
+    let mut agent = default_heuristic_agent(0);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    let weights = research_weights(&actions);
+
+    assert_eq!(
+        weights[ResearchAxis::Civilian.index()], RESEARCH_FOCUSED_WEIGHT,
+        "a stale War stance against an eliminated faction must not keep this faction leaning Equipment \
+         once every living rival is at peace with it: {weights:?}"
+    );
+}
+
+/// At peace but with Munitions running critically low, the AI must lean
+/// toward `ResearchAxis::Munitions` instead - the same `munitions_running_
+/// low` signal `set_policy` already reacts to for `industry_priority`.
+///
+/// Checked this fails when broken: temporarily swapped the `munitions_
+/// running_low` branch's result for `ResearchAxis::Civilian` inside `set_
+/// research_priority`. This test then failed (`Munitions`'s weight read the
+/// unfocused share). Reverted before committing.
+#[test]
+fn research_priority_leans_munitions_when_supply_is_critically_low() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    for other in 1..scenario::FACTION_COUNT as u32 {
+        let other = FactionId(other);
+        action::apply_action(&mut world, faction, Action::ProposeTreaty { to: other, treaty: Treaty::Ceasefire })
+            .expect("faction 0 proposing ceasefire must be accepted by apply_action");
+        action::apply_action(&mut world, other, Action::AcceptTreaty { from: faction, treaty: Treaty::Ceasefire })
+            .expect("the ceasefire accept must be accepted by apply_action");
+    }
+    for other in 1..scenario::FACTION_COUNT as u32 {
+        assert!(
+            !world.diplomacy.is_at_war(faction, FactionId(other)),
+            "test setup: faction 0 must be at peace with every rival before this test's own signal is isolated"
+        );
+    }
+
+    // mvp's starting units already draw nonzero daily Munitions demand
+    // (`munitions_daily_demand`); driving the stockpile itself to zero
+    // guarantees `munitions / daily_demand < LOW_SUPPLY_DAYS` regardless of
+    // that demand's exact size.
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
+
+    let mut agent = default_heuristic_agent(0);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    let weights = research_weights(&actions);
+
+    assert_eq!(
+        weights[ResearchAxis::Munitions.index()], RESEARCH_FOCUSED_WEIGHT,
+        "a peaceful faction critically short on Munitions must lean research toward Munitions: {weights:?}"
+    );
+}
+
+/// Neither at war nor short on Munitions, the AI's peacetime default is
+/// `ResearchAxis::Civilian` - the axis that grows Food/Energy/Machinery
+/// output (and, through `Faction::machinery_output`, its own future
+/// research rate).
+///
+/// Checked this fails when broken: temporarily swapped the fallback
+/// (`else` arm) inside `set_research_priority` for `ResearchAxis::
+/// Munitions`. This test then failed (`Civilian`'s weight read the
+/// unfocused share instead of `RESEARCH_FOCUSED_WEIGHT`). Reverted before
+/// committing.
+#[test]
+fn research_priority_leans_civilian_at_peace_with_ample_munitions() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    for other in 1..scenario::FACTION_COUNT as u32 {
+        let other = FactionId(other);
+        action::apply_action(&mut world, faction, Action::ProposeTreaty { to: other, treaty: Treaty::Ceasefire })
+            .expect("faction 0 proposing ceasefire must be accepted by apply_action");
+        action::apply_action(&mut world, other, Action::AcceptTreaty { from: faction, treaty: Treaty::Ceasefire })
+            .expect("the ceasefire accept must be accepted by apply_action");
+    }
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 1_000_000.0;
+
+    let mut agent = default_heuristic_agent(0);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    let weights = research_weights(&actions);
+
+    assert_eq!(
+        weights[ResearchAxis::Civilian.index()], RESEARCH_FOCUSED_WEIGHT,
+        "a faction at peace with ample Munitions must default its research lean to Civilian: {weights:?}"
+    );
+}
+
+/// Stage 12C's own acceptance bar (docs/phase12-spec.md §3 "選ばない版との
+/// 差を数値で示す"): the axis-selecting AI must produce a measurably
+/// different, and specifically *better-matched*, outcome than a version
+/// that never issues `Action::SetResearchAllocation` at all and therefore
+/// leaves `Faction::research_allocation` at `research::
+/// FACTION_RESEARCH_ALLOCATION_DEFAULT`'s even three-way split forever
+/// (docs/phase12-spec.md §3's own "選ばない版").
+///
+/// **Metric**: `research::coefficient` on the Equipment axis for a faction
+/// kept at war for the whole run - i.e. the actual multiplier `military::
+/// tick_combat` applies to that faction's land branches' combat power. This
+/// is the metric the spec calls for a reason: raw total `research_progress`
+/// summed across axes barely differs between the two runs (the daily rate
+/// itself depends on `machinery_output`/labour, not on the split), so it
+/// would hide the choice entirely - the split only decides *which* axis
+/// that same rate is spent on, and Equipment's own coefficient is exactly
+/// the number a war economy cares about.
+///
+/// mvp's factions are already at war with each other by default (empty
+/// bloc declaration - see `research_priority_leans_equipment_while_at_war`),
+/// so faction 0 needs no extra setup to stay at war for the run.
+///
+/// Confirmed this can fail: temporarily made the "axis-selecting" run also
+/// strip its own `SetResearchAllocation` actions (i.e. compared the
+/// baseline against itself). The two final coefficients then came out
+/// bit-for-bit identical and the assertion below failed. Reverted before
+/// committing.
+#[test]
+fn axis_selecting_ai_reaches_a_higher_equipment_coefficient_than_the_even_split_baseline() {
+    const DAYS: u32 = 300;
+    let faction = FactionId(0);
+
+    let run = |strip_research_actions: bool| {
+        let world = scenario::build_world();
+        let mut sim = archipelago_sim::sim::Simulation::with_world(world, 1);
+        let mut agents: Vec<HeuristicAgent> =
+            (0..scenario::FACTION_COUNT).map(default_heuristic_agent).collect();
+        for _ in 0..DAYS {
+            for agent in &mut agents {
+                let obs = Observation { faction: agent.faction(), world: &sim.world };
+                let mut actions = agent.decide(&obs);
+                if strip_research_actions {
+                    actions.retain(|a| !matches!(a, Action::SetResearchAllocation { .. }));
+                }
+                // Unlike the single-tick tests elsewhere in this file, this
+                // measurement runs the AI for real across many days - and a
+                // real run occasionally has the heuristic re-issue an action
+                // (e.g. `Build` against a project already under way) that
+                // `Simulation::apply` rejects. That's not a defect this test
+                // is about (`apps/headless`'s own driver discards `apply`'s
+                // errors the same way - docs/conventions.md §3's "`Simulation
+                // ::apply` が不正な行動を捨てて `ActionError` を返す挙動は
+                // フォールバックではない"), so this loop does too rather than
+                // asserting a stricter bar than real play holds itself to.
+                let f = agent.faction();
+                sim.apply(f, &actions);
+            }
+            sim.step();
+        }
+        sim.world.faction(faction).research_progress[ResearchAxis::Equipment.index()]
+    };
+
+    let baseline_progress = run(true);
+    let selecting_progress = run(false);
+    let baseline_coeff = archipelago_sim::research::coefficient(baseline_progress);
+    let selecting_coeff = archipelago_sim::research::coefficient(selecting_progress);
+
+    assert!(
+        selecting_coeff > baseline_coeff,
+        "the axis-selecting AI must reach a higher Equipment coefficient than an even-split baseline \
+         over {DAYS} days at war: baseline_progress={baseline_progress}, baseline_coeff={baseline_coeff}, \
+         selecting_progress={selecting_progress}, selecting_coeff={selecting_coeff}"
+    );
+    let percent_gain = (selecting_coeff / baseline_coeff - 1.0) * 100.0;
+    println!(
+        "Stage 12C metric: even-split Equipment coefficient={baseline_coeff:.4} \
+         (progress={baseline_progress:.2}), axis-selecting coefficient={selecting_coeff:.4} \
+         (progress={selecting_progress:.2}), gain={percent_gain:.2}%"
     );
 }

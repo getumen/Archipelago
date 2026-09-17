@@ -24,6 +24,7 @@ use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, TransportLineId, Unit
 use archipelago_sim::military::{self, Unit};
 use archipelago_sim::naval;
 use archipelago_sim::observation::Observation;
+use archipelago_sim::research::{ResearchAxis, ALL_RESEARCH_AXES};
 use archipelago_sim::transport::{TransportNode, TransportNodeKind};
 use archipelago_sim::world::{Domain, Station, World};
 
@@ -203,6 +204,19 @@ const LOGISTICS_PRESSURE_THRESHOLD: f32 = 0.75;
 /// on (the other gets `1.0 -` this); an even split when neither or both axes
 /// are under pressure, so neither ever gets a fixed unconditional priority.
 const LOGISTICS_FOCUSED_WEIGHT: f32 = 0.7;
+/// Stage 12C (docs/phase12-spec.md §3): the `research::ResearchAxis` weight
+/// `set_research_priority` gives the axis its situation currently favours;
+/// the other two axes split the remainder evenly (`(1.0 -
+/// RESEARCH_FOCUSED_WEIGHT) / 2.0` each), so neither ever drops to zero -
+/// the same "lean, don't exclude" shape `MUNITIONS_FOCUSED_WEIGHT`/
+/// `LOGISTICS_FOCUSED_WEIGHT` already use for their own two-way splits
+/// (docs/conventions.md §6 "希少な資源に固定の優先順位を置かない"), just
+/// three-way. `0.6` rather than those constants' `0.7`: with three
+/// contenders instead of two, an unfavoured axis here already gets `0.2`
+/// (vs. `0.3` in a two-way split) before this is even raised - going all
+/// the way to `0.7` would leave the other two at `0.15` each, a sharper cut
+/// than any existing two-way lean makes for its own losing side.
+const RESEARCH_FOCUSED_WEIGHT: f32 = 0.6;
 /// Stage 2D naval AI (docs/phase2-spec.md "Stage 2D" AI section, point 1):
 /// fleet count below which the agent keeps building fleets at a safe home
 /// port, mirroring `unit_cap`'s role for land recruitment but as a small
@@ -1201,6 +1215,7 @@ impl HeuristicAgent {
         set_policy(self.faction, obs, &mut actions);
         set_trade_policy(self.faction, obs, &mut actions);
         set_logistics_priority(obs, &mut actions);
+        set_research_priority(self.faction, obs, &mut actions);
         diplomacy_ai(self.faction, self.peace_disposition, obs, &mut actions);
 
         if let Some(doc) = doctrine {
@@ -1612,6 +1627,73 @@ fn set_logistics_priority(obs: &Observation, actions: &mut Vec<Action>) {
     };
     actions.push(Action::SetLogisticsPriority { good: Good::Munitions, weight: munitions_weight });
     actions.push(Action::SetLogisticsPriority { good: Good::Infantry, weight: arms_weight });
+}
+
+/// Stage 12C (docs/phase12-spec.md §3 "最低限、状況に応じて軸を選ぶこと"):
+/// picks which `research::ResearchAxis` this faction leans its research
+/// allocation toward this tick, reacting to its own situation rather than a
+/// fixed per-faction or per-scenario profile. Left unimplemented, the whole
+/// axis would sit at `research::FACTION_RESEARCH_ALLOCATION_DEFAULT`'s even
+/// split forever in AI-vs-AI play - CLAUDE.md's "繰り返し踏んだ欠陥" records
+/// a brand-new decision layer silently staying at its inert default this
+/// same way three times already (Phase 9D/10D/11C).
+///
+/// The three conditions checked, in priority order, mirror exactly what
+/// each axis feeds (`research::ResearchAxis`'s own doc table):
+///
+/// 1. **`Equipment`** while at war with anyone (`Diplomacy::is_at_war`) -
+///    `research::coefficient` on this axis raises a land branch's combat
+///    power directly (`military::tick_combat`), the fastest-paying-off
+///    place to invest while actually fighting. Checked first: staying alive
+///    in an active war outranks either economic concern below.
+/// 2. **`Munitions`** otherwise, when `munitions_running_low` (the same
+///    signal `set_policy` above already reacts to for `industry_priority`) -
+///    compounds with that existing Machinery/Munitions industry lean to
+///    relieve the same matériel shortage from the technology side too, not
+///    just the allocation side.
+/// 3. **`Civilian`** otherwise - a faction neither fighting nor short on war
+///    matériel leans toward the axis that grows Food/Energy/Machinery
+///    output (`economy::tick_economy`), which raises `machinery_output` and
+///    therefore, via `research::tick_research`'s own rate formula, this
+///    faction's *future* research speed as well - the AI's version of
+///    peacetime investment.
+///
+/// This is a priority *decision*, not a resource split the engine enforces -
+/// docs/conventions.md §6's "固定の優先順位を置かない" bans the simulation
+/// from hard-coding which contender wins a contended resource, not an
+/// agent's own if/else-if judgement about its situation (`set_policy`'s
+/// `machinery_weight`/`munitions_weight` cascade right above already reads
+/// the same way). The three axes' shares stay proportional either way
+/// (`RESEARCH_FOCUSED_WEIGHT`'s own doc): the two axes not leaned on this
+/// tick still draw a nonzero share of the daily research rate.
+fn set_research_priority(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    // `codex review` (P2): `Diplomacy::stance` isn't cleared when a faction
+    // is eliminated (`sim::Simulation::step` only ever flips `Faction::
+    // alive`), so an unfiltered scan over every faction id would keep
+    // reading `Stance::War` against a *dead* rival forever, permanently
+    // pinning this faction's lean to Equipment even once every living rival
+    // is at peace with it. Gate on `alive` the same way `tick_research`'s
+    // own catch-up scan (`research::tick_research`) already does for the
+    // identical reason.
+    let at_war = world.factions.iter().any(|other| other.alive && world.diplomacy.is_at_war(faction, other.id));
+    let daily_demand = munitions_daily_demand(faction, obs);
+    let munitions = world.faction(faction).stock[Good::Munitions.index()];
+    let munitions_running_low = daily_demand > 0.0 && munitions / daily_demand < LOW_SUPPLY_DAYS;
+
+    let lean = if at_war {
+        ResearchAxis::Equipment
+    } else if munitions_running_low {
+        ResearchAxis::Munitions
+    } else {
+        ResearchAxis::Civilian
+    };
+
+    let other_weight = (1.0 - RESEARCH_FOCUSED_WEIGHT) / 2.0;
+    for axis in ALL_RESEARCH_AXES {
+        let weight = if axis == lean { RESEARCH_FOCUSED_WEIGHT } else { other_weight };
+        actions.push(Action::SetResearchAllocation { axis, weight });
+    }
 }
 
 /// Tops up under-strength units (land or fleet) sitting safely in friendly,

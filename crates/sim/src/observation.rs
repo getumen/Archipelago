@@ -10,6 +10,7 @@ use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::logistics;
 use crate::military::ALL_BRANCHES;
 use crate::naval;
+use crate::research::{ALL_RESEARCH_AXES, RESEARCH_AXIS_COUNT};
 use crate::transport::TransportNodeKind;
 use crate::world::{Domain, Station, World};
 
@@ -54,8 +55,27 @@ pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 /// commodities each branch draws on are already observable via
 /// `stock[GOOD_COUNT]` (`Good::Infantry`/`Armour`/`Artillery`, Stage 11A),
 /// but nothing before this let a consumer see the *branch mix* of the force
-/// itself.
-pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2 + 1 + 3;
+/// itself. Then `research_progress[RESEARCH_AXIS_COUNT]` followed by
+/// `research_allocation[RESEARCH_AXIS_COUNT]` (Stage 12C,
+/// docs/phase12-spec.md §3 "3 軸の進捗と配分を出す"), both in
+/// `research::ResearchAxis::index()`'s fixed order
+/// (`research::ALL_RESEARCH_AXES`) - progress first, then allocation, as
+/// two separate same-length blocks rather than interleaved per axis, the
+/// same layout `stock`/`group_support` already use for their own
+/// same-shape sibling arrays elsewhere in this struct. `research_progress`
+/// is the raw cumulative value `research::coefficient` turns into the
+/// multiplier that actually reaches production/combat (`research::
+/// tick_research`'s own doc: progress only ever grows, by design - see
+/// `Faction::research_progress`), not that multiplier itself, so an
+/// observer that wants "how much stronger does this make me" derives it
+/// the same way `economy::tick_economy`/`military::tick_combat` do rather
+/// than being handed a second, redundant encoding of the same fact.
+/// `research_allocation` is each axis's current `ResearchWeight` (`0.0..=1.0`,
+/// unnormalized - `research::tick_research` divides by their sum itself),
+/// letting a consumer distinguish "no progress because unallocated" from
+/// "no progress because isolated/no machinery" (both zero the progress
+/// field alone would conflate).
+pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2 + 1 + 3 + 2 * RESEARCH_AXIS_COUNT;
 
 /// Stage 3B per-relation field count in `Observation::encode()`, one block
 /// per *other* faction (own row zeroed - see `encode`'s doc): `[stance_code,
@@ -352,9 +372,12 @@ impl<'a> Observation<'a> {
     /// enemy_power]`, then faction scalars `[manpower, stock[GOOD_COUNT]...,
     /// war_support, stability, group_support[GROUP_COUNT]..., unit_count,
     /// national_focus_code, focus_transition_days, air_unit_count,
-    /// infantry_count, armour_count, artillery_count]` (Stage 3A adds
+    /// infantry_count, armour_count, artillery_count,
+    /// research_progress[RESEARCH_AXIS_COUNT]..., research_allocation
+    /// [RESEARCH_AXIS_COUNT]...]` (Stage 3A adds
     /// `group_support`; Stage 3C adds the focus pair; Stage 10D adds
-    /// `air_unit_count`; Stage 11C adds the trailing per-branch triple -
+    /// `air_unit_count`; Stage 11C adds the trailing per-branch triple;
+    /// Stage 12C adds the trailing research pair -
     /// `FACTION_FIELD_COUNT`'s own doc has the full reasoning for each -
     /// `national_focus_code` is `NationalFocus::index()` as an `f32`,
     /// regardless of whether a switch is still transitioning - a consumer
@@ -453,6 +476,20 @@ impl<'a> Observation<'a> {
             out.push(count as f32);
         }
 
+        // Stage 12C (docs/phase12-spec.md §3 "3 軸の進捗と配分を出す"):
+        // `research_progress` first, then `research_allocation`, as two
+        // separate `RESEARCH_AXIS_COUNT`-sized blocks in `ALL_RESEARCH_AXES`
+        // order - `FACTION_FIELD_COUNT`'s own doc has the full reasoning for
+        // why they're two blocks rather than interleaved, and why the raw
+        // accumulator is exposed rather than the `research::coefficient`
+        // multiplier it feeds.
+        for axis in ALL_RESEARCH_AXES {
+            out.push(faction.research_progress[axis.index()]);
+        }
+        for axis in ALL_RESEARCH_AXES {
+            out.push(faction.research_allocation[axis.index()].get());
+        }
+
         // Stage 3B (docs/phase3-spec.md "Stage 3B"): one `DIPLOMACY_FIELD_
         // COUNT`-sized block per faction in ascending `FactionId` order
         // (including self, zeroed, so every faction's encoding has the same
@@ -545,6 +582,7 @@ mod tests {
     use super::*;
     use crate::ids::UnitId;
     use crate::military::Branch;
+    use crate::research::{ResearchAxis, ResearchWeight};
 
     /// Regression guard for exactly the defect class that used to be caught
     /// only by hashing a whole `--seed 1 --days 720` run
@@ -849,7 +887,8 @@ mod tests {
             + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
             + FACTION_FIELD_COUNT
             - 1
-            - 3; // Stage 11C appended 3 more trailing fields after this one
+            - 3 // Stage 11C appended 3 more trailing fields after this one
+            - 2 * RESEARCH_AXIS_COUNT; // Stage 12C appended 2*RESEARCH_AXIS_COUNT more after those
         assert_eq!(
             encoded[air_unit_count_offset], 1.0,
             "moving one unit to an airfield must show up as air_unit_count == 1"
@@ -905,12 +944,66 @@ mod tests {
         let branch_base = world.regions.len() * REGION_FIELD_COUNT
             + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
             + FACTION_FIELD_COUNT
-            - 3;
+            - 3 // the trailing [infantry_count, armour_count, artillery_count] triple
+            - 2 * RESEARCH_AXIS_COUNT; // Stage 12C appended research progress/allocation after that
         assert_eq!(
             encoded[branch_base], starting_infantry as f32,
             "infantry_count must count exactly the Infantry-branch units"
         );
         assert_eq!(encoded[branch_base + 1], 2.0, "armour_count must count the two newly-raised Armour units");
         assert_eq!(encoded[branch_base + 2], 0.0, "artillery_count must read zero with no Artillery unit raised");
+    }
+
+    /// Stage 12C (docs/phase12-spec.md §3 "3 軸の進捗と配分を出す"):
+    /// `research_progress`/`research_allocation` must both be observable,
+    /// at the trailing offsets `FACTION_FIELD_COUNT`'s own doc declares -
+    /// `research_progress[RESEARCH_AXIS_COUNT]` immediately followed by
+    /// `research_allocation[RESEARCH_AXIS_COUNT]`, both in `ALL_RESEARCH_
+    /// AXES` order.
+    ///
+    /// Checked this fails when broken: temporarily swapped `encode()`'s two
+    /// research loops to both push `faction.research_progress[axis.index()]`
+    /// (i.e. `research_allocation`'s own block silently re-reads progress
+    /// instead of the allocation weights). The allocation half of the
+    /// assertions below then failed (`weight == 0.75` read back as whatever
+    /// `research_progress[Munitions]` held instead). Reverted before
+    /// committing.
+    #[test]
+    fn research_progress_and_allocation_are_observable() {
+        let mut world = crate::scenario::build_world();
+        let faction = FactionId(0);
+
+        let mut progress = [0.0f32; RESEARCH_AXIS_COUNT];
+        progress[ResearchAxis::Civilian.index()] = 12.5;
+        progress[ResearchAxis::Munitions.index()] = 40.0;
+        progress[ResearchAxis::Equipment.index()] = 0.0;
+        world.faction_mut(faction).research_progress = progress;
+
+        world.faction_mut(faction).research_allocation[ResearchAxis::Civilian.index()] =
+            ResearchWeight::new(0.1).unwrap();
+        world.faction_mut(faction).research_allocation[ResearchAxis::Munitions.index()] =
+            ResearchWeight::new(0.75).unwrap();
+        world.faction_mut(faction).research_allocation[ResearchAxis::Equipment.index()] =
+            ResearchWeight::new(0.15).unwrap();
+
+        let obs = Observation { faction, world: &world };
+        let encoded = obs.encode();
+
+        let progress_base = world.regions.len() * REGION_FIELD_COUNT
+            + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+            + FACTION_FIELD_COUNT
+            - 2 * RESEARCH_AXIS_COUNT;
+        let allocation_base = progress_base + RESEARCH_AXIS_COUNT;
+
+        for axis in [ResearchAxis::Civilian, ResearchAxis::Munitions, ResearchAxis::Equipment] {
+            assert_eq!(
+                encoded[progress_base + axis.index()],
+                progress[axis.index()],
+                "research_progress for {axis:?} must be observable at its declared offset"
+            );
+        }
+        assert_eq!(encoded[allocation_base + ResearchAxis::Civilian.index()], 0.1);
+        assert_eq!(encoded[allocation_base + ResearchAxis::Munitions.index()], 0.75);
+        assert_eq!(encoded[allocation_base + ResearchAxis::Equipment.index()], 0.15);
     }
 }
