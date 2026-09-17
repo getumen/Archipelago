@@ -1185,3 +1185,100 @@ pub const NODE_STRIKE_DAMAGE: f32 = 0.6;
 /// gives progress somewhere to go (docs/conventions.md's own "測定してから
 /// 直す。推測で最適化しない").
 pub const RESEARCH_RATE_PER_MACHINERY: f32 = 0.05;
+
+/// Stage 12B (docs/phase12-spec.md §0): converts a single axis's cumulative
+/// `Faction::research_progress` into the multiplier `research::coefficient`
+/// applies to whatever that axis feeds - civilian/munitions production
+/// (`economy::tick_economy`) or a land branch's combat power
+/// (`military::tick_combat`). The shape is `1.0 + SCALE * progress.sqrt()`:
+///
+/// - **Diminishing returns, never a hard ceiling.** A square root grows
+///   without bound but ever more slowly - each additional unit of
+///   accumulated progress buys a smaller slice of extra output than the
+///   unit before it, the same shape real R&D productivity curves and
+///   `docs/phase12-spec.md §1`'s own economics ("先に発明するより、追いつく
+///   ほうが容易である") describe. A saturating curve (an asymptote this
+///   never crosses) was deliberately rejected: §1 is explicit that "効果に
+///   人為的な上限を置いて抑える形は採らない" - what stays bounded is the
+///   *gap* between factions (`RESEARCH_CATCHUP_RATE` below), never this
+///   value itself, so the leader's own effect must be free to keep climbing.
+/// - **`1.0` at `progress == 0.0`.** A faction that has made no progress on
+///   an axis gets exactly the pre-Stage-12B multiplier, which is what keeps
+///   Stage 12A's "3 シナリオの結果が変わらない" bar true up to this stage's
+///   boundary and makes every faction's starting point directly comparable.
+///
+/// `SCALE = 0.03` is sized against the actual progress this crate's systems
+/// produce (`research::tick_research`'s own doc), not against any single
+/// scenario's balance outcome: measured on `scenarios/japan_hex.json`
+/// (seed 1, 720 days, even three-way allocation - `research::tick_research`'s
+/// own default), the most industrious faction's own axis reaches
+/// `research_progress` in the high 50s/low 60s, which this scale turns into
+/// a +20-25% multiplier; a faction that commits its whole allocation to one
+/// axis instead of splitting three ways reaches the 100s-200s range on that
+/// axis, roughly +35-45%. Both are large enough to show up in play without
+/// making the axis a prerequisite for fielding a viable economy or army -
+/// this crate has no reader of `research_progress` before Stage 12B, so
+/// there is no existing scenario outcome this could have been reverse-fit
+/// to (docs/CLAUDE.md's "ハッシュ固定はやめた" records three separate times
+/// a constant got tuned to a scenario's outcome instead of its own meaning,
+/// which corrupted the design each time - this one is sized from the
+/// mechanism's own output, and is free to move once Stage 12D's real
+/// playtesting says otherwise).
+pub const RESEARCH_COEFF_SCALE: f32 = 0.03;
+
+/// Stage 12B (docs/phase12-spec.md §1 "抑えるのは上限ではなく「追いつき
+/// やすさ」"): the daily fraction of the *gap* to a contacted rival's
+/// `research_progress` on the same axis that a lagging faction closes -
+/// `research::tick_research`'s catch-up term, `RESEARCH_CATCHUP_RATE * (
+/// reference - own).max(0.0)`. This is the same target-approach shape
+/// `balance::GROUP_ADAPT_RATE`/`balance::UNREST_ADAPT_RATE` already use
+/// elsewhere in this file (a fixed fraction of the remaining distance per
+/// tick, never a fixed absolute amount that could overshoot or turn a
+/// negative gap positive) at the same order of magnitude those two already
+/// settled on (`0.04`/`0.05`) - research diffusion between contacted
+/// factions is not a mechanism this project has any reason to believe moves
+/// faster or slower than the opinion/unrest recovery it already ships, and
+/// re-using their proven rate avoids inventing a fourth unrelated constant.
+///
+/// This is what keeps a leader's advantage from compounding forever
+/// (docs/phase12-spec.md §1 "走り続ければ差は開くが、止まれば追われる"):
+/// against a rival advancing at a steady rate `R`, the gap this term fights
+/// converges to a *finite* steady state around `R / RESEARCH_CATCHUP_RATE`
+/// rather than growing without bound, even though neither side's own
+/// `research_progress` (or the `coefficient` it feeds) is ever capped.
+/// A faction with no contact on a given day (`research::faction_contact`)
+/// contributes no reference and therefore no catch-up term that day - see
+/// `tick_research`'s own doc for why this cannot ever turn a healthy
+/// faction's own unaided rate into zero.
+///
+/// **その定常状態は、追う側に追いつくだけの経済がある場合の話である。**
+/// 実際の詰め幅は `RESEARCH_CATCHUP_ABSORPTION_MULTIPLE` が自力の速度の
+/// 倍数で頭打ちにするので、工業と労働力を失った勢力では
+/// `R / RESEARCH_CATCHUP_RATE` に収束せず、差は開き続ける。それが
+/// docs/phase12-spec.md §0 の「工業地帯を取られたり、補給を断たれたり、
+/// 徴兵で労働力を削れば、自然に遅くなる」の意味するところである。
+pub const RESEARCH_CATCHUP_RATE: f32 = 0.04;
+
+/// Stage 12B: `research::tick_research` の追いつきの項が、その勢力自身の
+/// 自力の研究速度（`rate * share`）の何倍まで出てよいか。
+///
+/// **他人の知識を取り込むのも、自分の工場と労働者がやる。** 追いつきは
+/// 「差があること」だけでは起きない - 図面を読み、治具を作り、工員に
+/// 教える主体が要る。したがって追いつきの上限は、その勢力が自分で発明
+/// するときの速度に比例する量でなければならない。`machinery_output` か
+/// 労働力のどちらかが 0 なら自力の速度も 0 になり、**追いつきも 0 に
+/// なる。** これが docs/phase12-spec.md §0 の「これにより新しい攻撃目標を
+/// 作らずに、既存の戦争が研究に効く」を成立させている唯一の経路である。
+/// この上限がないと、工業地帯を焼かれた勢力が同盟国の水準を眺めている
+/// だけで最高速で追いつく。**この min を「差だけで決まる形」に戻しては
+/// いけない**（codex review が P1 として挙げ、実際に領土ゼロの勢力が
+/// 1 日で 20.0 進んでいた。`tests::faction_with_no_territory_makes_no_
+/// research_progress` がその値ごと固定している）。
+///
+/// `3.0` は §1 の「先に発明するより、追いつくほうが容易である」を数にした
+/// もので、**どのシナリオの結果にも合わせていない。** 模倣の費用は発明の
+/// 費用の数分の 1 という、技術伝播そのものについての一般的な見立てから
+/// 採っている - 同じ工場と労働者で、既にあるものを写すほうが速い。倍率
+/// なので、追う側の経済が健全なら追いつきは自力の 3 倍まで出て §1 の
+/// 「追いつきやすさ」は本物のまま残り、経済が細れば同じ割合で細る。
+pub const RESEARCH_CATCHUP_ABSORPTION_MULTIPLE: f32 = 3.0;

@@ -8020,12 +8020,27 @@ fn research_rate_scales_with_national_labour() {
 /// progress on genuine current territory, not merely happen to see
 /// `machinery_output` itself go to zero.
 ///
-/// Confirmed this can fail: temporarily changed `tick_research`'s
-/// zero-population fallback from `0.0` to `1.0` (`let labor = if
-/// total_pop[f] > 0.0 { .. } else { 1.0 };`) and re-ran - the
-/// territory-less faction's stale `machinery_output` (`500.0`) produced
-/// `[8.333334, 8.333334, 8.333334]` instead of `[0.0, 0.0, 0.0]`, and the
-/// assertion below failed. Reverted before committing.
+/// **この不変条件は追いつきの経路にも等しくかかる。** Stage 12B でこの
+/// テストは一度「穴を焼き込んだテスト」になっていた。領土を剥がすだけで
+/// **条約も同盟も張らなかった**ため、`tick_research` の追いつきの項を
+/// 一度も通らず、その項が経済の門を素通りしていても緑のままだった
+/// （CLAUDE.md「穴を運動させるテストは、その穴を仕様として固定して
+/// しまう」）。いまは全部を持っている相手と `Stance::Alliance` と
+/// `Treaty::TradeAgreement` の両方を張り、相手に最大の進捗を持たせて、
+/// **追いつきの経路を実際に開いたうえで**ゼロを要求する。
+///
+/// Confirmed this can fail, twice over:
+/// - 自力の経路: temporarily changed `tick_research`'s zero-population
+///   fallback from `0.0` to `1.0` (`let labor = if total_pop[f] > 0.0
+///   { .. } else { 1.0 };`) - the territory-less faction's stale
+///   `machinery_output` (`500.0`) produced `[8.333334, 8.333334,
+///   8.333334]` instead of `[0.0, 0.0, 0.0]`.
+/// - 追いつきの経路: 経済の門を外した Stage 12B 当初の
+///   `catchup = RESEARCH_CATCHUP_RATE * gap` に戻すと `[20.0, 20.0,
+///   20.0]` になる（`RESEARCH_CATCHUP_RATE` 0.04 × 差 500）。**これが
+///   codex review が P1 として挙げた欠陥そのものである。**
+///
+/// Reverted both before committing.
 #[test]
 fn faction_with_no_territory_makes_no_research_progress() {
     let mut world = scenario::build_world();
@@ -8039,13 +8054,405 @@ fn faction_with_no_territory_makes_no_research_progress() {
     }
     world.faction_mut(f).machinery_output = 500.0;
 
+    // 追いつきの経路を開く。相手は全領土を持ち、進捗も最大で、こちらとは
+    // 同盟と貿易協定の両方で繋がっている - `faction_contact` の 3 つの
+    // channel のうち 2 つが立っている状態である。
+    action::apply_action(&mut world, f, Action::ProposeTreaty { to: other, treaty: Treaty::Ceasefire })
+        .expect("a ceasefire is the precondition an alliance proposal checks");
+    action::apply_action(&mut world, other, Action::AcceptTreaty { from: f, treaty: Treaty::Ceasefire })
+        .expect("accepting the just-proposed ceasefire");
+    action::apply_action(&mut world, f, Action::ProposeTreaty { to: other, treaty: Treaty::Alliance })
+        .expect("proposing an alliance from a ceasefire");
+    action::apply_action(&mut world, other, Action::AcceptTreaty { from: f, treaty: Treaty::Alliance })
+        .expect("accepting the just-proposed alliance");
+    action::apply_action(&mut world, f, Action::ProposeTreaty { to: other, treaty: Treaty::TradeAgreement })
+        .expect("proposing a trade agreement");
+    action::apply_action(&mut world, other, Action::AcceptTreaty { from: f, treaty: Treaty::TradeAgreement })
+        .expect("accepting the just-proposed trade agreement");
+    assert_eq!(
+        world.diplomacy.stance(f, other),
+        diplomacy::Stance::Alliance,
+        "sanity: the contact channel must actually be open, or this test is back to baking in the hole"
+    );
+    assert!(
+        world.diplomacy.has_trade_agreement(f, other),
+        "sanity: the second contact channel must be open too"
+    );
+    world.faction_mut(other).research_progress = [500.0; RESEARCH_AXIS_COUNT];
+
     research::tick_research(&mut world);
 
     assert_eq!(
         world.faction(f).research_progress,
         [0.0; RESEARCH_AXIS_COUNT],
-        "a faction with no territory at all must make zero research progress, regardless of a stale machinery_output"
+        "a faction with no territory at all must make zero research progress - neither from a stale \
+         machinery_output on its own path, nor from catch-up against a far-advanced ally it still has \
+         treaties with: absorbing someone else's know-how takes factories and workers it no longer has"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 12B (docs/phase12-spec.md §0/§1): the three axes' effects
+// (`research::coefficient` wired into `economy::tick_economy`/`military::
+// tick_combat`) and the contact-gated catch-up mechanic
+// (`research::faction_contact`/`faction_adjacency`, `tick_research`'s
+// updated body). Every Stage 12A test above is untouched by this section -
+// this is additive, exactly the "12A ships no reader" boundary the 12A
+// module doc drew.
+// ---------------------------------------------------------------------------
+
+/// docs/phase12-spec.md §0: `1.0 + SCALE * progress.sqrt()`'s diminishing-
+/// returns shape, checked algebraically rather than against a magic number:
+/// quadrupling `progress` must exactly double the *bonus* (the part over
+/// `1.0`), since `sqrt(4p) == 2 * sqrt(p)` - a linear law would instead
+/// quadruple it. `coefficient(0.0)` must be exactly the pre-Stage-12B
+/// `1.0`, the baseline every other Stage 12B test's "boosted" run is
+/// compared against.
+///
+/// Confirmed this can fail: temporarily changed `coefficient` to
+/// `1.0 + RESEARCH_COEFF_SCALE * progress` (a bare linear multiplier, the
+/// exact shape docs/phase12-spec.md §0 rules out) and re-ran - quadrupling
+/// `progress` then quadrupled the bonus instead of doubling it, and the
+/// doubling assertion failed (bonus_p=0.75, bonus_4p=3.0, expected 1.5).
+/// Reverted before committing.
+#[test]
+fn coefficient_has_diminishing_returns_and_is_one_at_zero_progress() {
+    assert_eq!(research::coefficient(0.0), 1.0, "no progress must mean no change from Stage 12A's behaviour");
+    assert!(research::coefficient(-5.0).is_finite(), "a defensively-clamped negative progress must never produce NaN");
+
+    let p = 25.0;
+    let bonus_p = research::coefficient(p) - 1.0;
+    let bonus_4p = research::coefficient(4.0 * p) - 1.0;
+    assert!(bonus_p > 0.0, "sanity: positive progress must move the coefficient off 1.0: {bonus_p}");
+    assert!(
+        (bonus_4p - 2.0 * bonus_p).abs() < 1e-4,
+        "quadrupling progress must exactly double the bonus under sqrt's diminishing returns: \
+         bonus_p={bonus_p}, bonus_4p={bonus_4p}"
+    );
+}
+
+/// docs/phase12-spec.md §5 Stage 12B, "3 軸それぞれが、対応する値を実際に
+/// 動かす": Civilian research must raise `economy::tick_economy`'s Food,
+/// Energy and Machinery production specifically (the spec's own table) -
+/// two otherwise-identical worlds, differing only in faction 0's Civilian
+/// `research_progress`, must diverge on exactly these three goods' stock
+/// after one tick.
+///
+/// Confirmed this can fail: temporarily deleted the `civilian_mult` block
+/// in `economy::tick_economy` (kept `munitions_mult`) and re-ran - `boosted`
+/// and `baseline` produced byte-identical Food/Energy/Machinery stock, and
+/// every assertion below failed (e.g. Food: 217.36 vs 217.36). Reverted before
+/// committing.
+#[test]
+fn civilian_research_raises_food_energy_machinery_production() {
+    let f = FactionId(0);
+    let mut baseline = scenario::build_world();
+    baseline.faction_mut(f).research_progress[ResearchAxis::Civilian.index()] = 0.0;
+    let mut boosted = baseline.clone();
+    boosted.faction_mut(f).research_progress[ResearchAxis::Civilian.index()] = 400.0;
+
+    economy::tick_economy(&mut baseline);
+    economy::tick_economy(&mut boosted);
+
+    for good in [Good::Food, Good::Energy, Good::Machinery] {
+        let base_stock = baseline.faction(f).stock[good.index()];
+        let boosted_stock = boosted.faction(f).stock[good.index()];
+        assert!(
+            boosted_stock > base_stock,
+            "Civilian research must raise {good:?} production: boosted={boosted_stock}, baseline={base_stock}"
+        );
+    }
+}
+
+/// docs/phase12-spec.md §5 Stage 12B, same acceptance line: Munitions
+/// research must raise the Munitions good itself *and* every one of the
+/// five per-branch/domain equipment goods (`good::Good`'s "○○装備" family) -
+/// the "軍需品と装備の生産" half of the spec's table, kept in its own test
+/// from Civilian's so a defect confined to only one axis's wiring can't
+/// hide behind the other axis accidentally covering for it.
+///
+/// Confirmed this can fail: temporarily deleted the `munitions_mult` block
+/// in `economy::tick_economy` (kept `civilian_mult`) and re-ran - `boosted`
+/// and `baseline` matched exactly on all six goods (e.g. Munitions: 403.25
+/// vs 403.25), and every assertion below failed. Reverted before committing.
+#[test]
+fn munitions_research_raises_munitions_and_equipment_production() {
+    let f = FactionId(0);
+    let mut baseline = scenario::build_world();
+    baseline.faction_mut(f).research_progress[ResearchAxis::Munitions.index()] = 0.0;
+    let mut boosted = baseline.clone();
+    boosted.faction_mut(f).research_progress[ResearchAxis::Munitions.index()] = 400.0;
+
+    economy::tick_economy(&mut baseline);
+    economy::tick_economy(&mut boosted);
+
+    for good in [Good::Munitions, Good::Infantry, Good::Armour, Good::Artillery, Good::Naval, Good::Aircraft] {
+        let base_stock = baseline.faction(f).stock[good.index()];
+        let boosted_stock = boosted.faction(f).stock[good.index()];
+        assert!(
+            boosted_stock > base_stock,
+            "Munitions research must raise {good:?} production: boosted={boosted_stock}, baseline={base_stock}"
+        );
+    }
+}
+
+/// docs/phase12-spec.md §5 Stage 12B, "Equipment" row: raising the
+/// *defending* faction's Equipment research must let its land branches
+/// deal more damage this tick - `military::tick_combat`'s `research_mult`
+/// multiplies a side's own `combat_power`, which feeds `enemy_power` (and
+/// therefore casualties) on the *opposing* side, so the opposing faction's
+/// `CombatReport::casualties` is what should move. Reuses
+/// `combat_reduces_organization`'s exact setup (an intruder from faction 1
+/// dropped into faction 0's `RegionId(3)` core territory, already at war by
+/// mvp's default) with a fixed `Rng` seed so the only difference between
+/// the two runs is faction 0's Equipment `research_progress`.
+///
+/// Confirmed this can fail: temporarily dropped the `* research_mult`
+/// factor from `tick_combat`'s per-unit power expression and re-ran -
+/// `boosted` and `baseline` dealt byte-identical damage (casualties
+/// 0.0784 both runs), and the assertion below failed. Reverted before
+/// committing.
+#[test]
+fn equipment_research_raises_defender_land_combat_power() {
+    fn intruder_casualties(defender_equipment_progress: f32) -> f32 {
+        let mut world = scenario::build_world();
+        let intruder = world.units.iter().position(|u| u.owner == FactionId(1)).unwrap();
+        world.units[intruder].station = Station::Region(RegionId(3));
+        world.units[intruder].movement = None;
+        world.faction_mut(FactionId(0)).research_progress[ResearchAxis::Equipment.index()] = defender_equipment_progress;
+
+        let mut rng = Rng::new(1);
+        let mut events = Vec::new();
+        let report = military::tick_combat(&mut world, &mut rng, &mut events);
+        report.casualties[FactionId(1).index()]
+    }
+
+    let baseline = intruder_casualties(0.0);
+    let boosted = intruder_casualties(400.0);
+
+    assert!(
+        boosted > baseline,
+        "faction 0's Equipment research must raise the damage its land branches deal to the intruder: \
+         boosted={boosted}, baseline={baseline}"
+    );
+}
+
+/// Strips any land link directly between a region `a` owns and a region
+/// `b` owns, in both directions - the test-only tool every catch-up test
+/// below uses to control `research::faction_adjacency`'s reading of a pair
+/// without touching `Diplomacy` at all. Reads each region's *current*
+/// owner into a snapshot first, since mutating `region.links` while also
+/// reading another region's `owner` through the same `world.regions`
+/// borrow would conflict - the owners themselves never change here, only
+/// the graph on top of them.
+fn sever_adjacency(world: &mut World, a: FactionId, b: FactionId) {
+    let owners: Vec<FactionId> = world.regions.iter().map(|r| r.owner).collect();
+    for region in world.regions.iter_mut() {
+        let this = region.owner;
+        let other = if this == a {
+            b
+        } else if this == b {
+            a
+        } else {
+            continue;
+        };
+        region.links.retain(|link| owners[link.to.index()] != other);
+    }
+}
+
+/// docs/phase12-spec.md §5 Stage 12B, "遅れている勢力の進みが速い。同じ
+/// 配分でも、先行する接触相手がいる勢力のほうが伸びる": mvp's faction 0
+/// (`kanto` etc.) and faction 1 (`shinetsu_hokuriku`/`tokai` etc.) already
+/// share a land link by default (`kanto` <-> `shinetsu_hokuriku`/`tokai`),
+/// so - per `faction_contact`'s own "領土の隣接" branch - they are in
+/// contact with no treaty needed. Two worlds cloned from the same starting
+/// state (faction 1 far behind faction 0 on every axis, identical
+/// `machinery_output`/labour/allocation so their *unaided* rate is
+/// identical) differ only in whether that one link survives; severing it
+/// (`sever_adjacency`) is the only way left, in mvp's default diplomatic
+/// state (no treaty, still at War), for the pair to stop being "in
+/// contact" - see `faction_contact`'s own doc for why an existing `War`
+/// stance never blocks the adjacency channel on its own.
+///
+/// Confirmed this can fail: temporarily made `faction_contact` always
+/// return `false` (the "no channel ever counts" defect this test exists to
+/// catch) and re-ran - `with_contact`/`without_contact` produced identical
+/// progress (both 0.1667), and the assertion below failed. Reverted
+/// before committing.
+#[test]
+fn contact_gated_catchup_speeds_up_a_lagging_faction() {
+    let leader = FactionId(0);
+    let follower = FactionId(1);
+
+    let mut base = scenario::build_world();
+    base.faction_mut(leader).research_progress = [500.0; RESEARCH_AXIS_COUNT];
+    base.faction_mut(follower).research_progress = [0.0; RESEARCH_AXIS_COUNT];
+    base.faction_mut(leader).machinery_output = 10.0;
+    base.faction_mut(follower).machinery_output = 10.0;
+
+    let mut with_contact = base.clone();
+    let mut without_contact = base.clone();
+    sever_adjacency(&mut without_contact, leader, follower);
+
+    research::tick_research(&mut with_contact);
+    research::tick_research(&mut without_contact);
+
+    for axis in ALL_RESEARCH_AXES {
+        let contacted = with_contact.faction(follower).research_progress[axis.index()];
+        let isolated = without_contact.faction(follower).research_progress[axis.index()];
+        assert!(
+            contacted > isolated,
+            "{axis:?}: a follower in contact with a far-ahead faction must gain more this tick than the exact \
+             same follower with that one contact severed: contacted={contacted}, isolated={isolated}"
+        );
+    }
+}
+
+/// docs/phase12-spec.md §5 Stage 12B, "接触がなければ追いつきが効かない":
+/// with every channel absent (mvp's faction 0 and faction 2 share no land
+/// link at all, and mvp's default diplomatic state has no treaty between
+/// any pair), a trailing faction's progress must come out to *exactly* its
+/// own unaided `rate * share` - not merely "less than the contacted case"
+/// (the previous test already shows that), but bit-for-bit what
+/// `tick_research`'s pre-Stage-12B formula alone would have produced, i.e.
+/// the catch-up term contributes precisely `0.0`.
+///
+/// Confirmed this can fail: temporarily changed the catch-up term's `gap`
+/// computation to skip the `faction_contact` check (apply catch-up to
+/// every pair unconditionally) and re-ran - the isolated faction's progress
+/// came out far above the computed `expected` (20.12 vs an expected 0.117),
+/// and the assertion below failed. Reverted before committing.
+#[test]
+fn no_contact_means_only_the_unaided_rate() {
+    let leader = FactionId(0);
+    let follower = FactionId(2);
+
+    let mut world = scenario::build_world();
+    world.faction_mut(leader).research_progress = [500.0; RESEARCH_AXIS_COUNT];
+    world.faction_mut(follower).research_progress = [0.0; RESEARCH_AXIS_COUNT];
+    world.faction_mut(leader).machinery_output = 10.0;
+    world.faction_mut(follower).machinery_output = 7.0;
+    // mvp's faction 1 sits geographically between 0 and 2 - sever its links
+    // to faction 2 too so this measures "no contact with anyone", not just
+    // "no contact with the leader specifically".
+    sever_adjacency(&mut world, FactionId(1), follower);
+
+    let total_pop: f32 = world.regions.iter().filter(|r| r.owner == follower).map(|r| r.population).sum();
+    let labor_weighted: f32 = world
+        .regions
+        .iter()
+        .filter(|r| r.owner == follower)
+        .map(|r| r.labor_ratio() * r.population)
+        .sum();
+    let labor = labor_weighted / total_pop;
+    let expected_total = world.faction(follower).machinery_output * labor * crate::balance::RESEARCH_RATE_PER_MACHINERY;
+    let expected_per_axis = expected_total / RESEARCH_AXIS_COUNT as f32;
+
+    research::tick_research(&mut world);
+
+    for axis in ALL_RESEARCH_AXES {
+        let actual = world.faction(follower).research_progress[axis.index()];
+        assert!(
+            (actual - expected_per_axis).abs() < 1e-4,
+            "{axis:?}: with no contact at all, progress must equal exactly the unaided rate*share \
+             (expected={expected_per_axis}, actual={actual})"
+        );
+    }
+}
+
+/// docs/phase12-spec.md §1's own risk callout, and §5 Stage 12B's
+/// "孤立した勢力が技術で詰まないこと": an isolated faction (no adjacency,
+/// no treaty with anyone) must still make *positive, growing* progress
+/// from its own unaided rate alone - isolation must cost it the catch-up
+/// bonus, never zero it out entirely. Ticks twice to show growth, not just
+/// a single nonzero sample.
+///
+/// Confirmed this can fail: temporarily changed `tick_research`'s own-rate
+/// term to multiply by `(faction_contact-count > 0)` (i.e. an isolated
+/// faction's *own* rate silently dropped to zero, not merely losing
+/// catch-up) and re-ran - both ticks produced exactly `[0.0, 0.0, 0.0]`,
+/// and the growth assertion failed. Reverted before committing.
+#[test]
+fn isolated_faction_still_progresses_on_its_own() {
+    let isolated = FactionId(2);
+    let mut world = scenario::build_world();
+    sever_adjacency(&mut world, FactionId(1), isolated);
+    world.faction_mut(isolated).machinery_output = 10.0;
+
+    research::tick_research(&mut world);
+    let after_one = world.faction(isolated).research_progress;
+    assert!(
+        after_one.iter().all(|&p| p > 0.0),
+        "an isolated faction must still make positive progress on every axis from its own unaided rate: {after_one:?}"
+    );
+
+    research::tick_research(&mut world);
+    let after_two = world.faction(isolated).research_progress;
+    for axis in ALL_RESEARCH_AXES {
+        assert!(
+            after_two[axis.index()] > after_one[axis.index()],
+            "{axis:?}: an isolated faction's progress must keep growing tick over tick, not stall: \
+             after_one={:?}, after_two={:?}",
+            after_one[axis.index()],
+            after_two[axis.index()]
+        );
+    }
+}
+
+/// docs/phase12-spec.md §1 "貿易協定・同盟・領土の隣接のいずれか": a live
+/// `Treaty::TradeAgreement` alone, with no shared land link at all, must be
+/// enough to create contact - the OR predicate's other branch from the
+/// adjacency tests above. Faction 0 and faction 2 share no land link in
+/// mvp (`sever_adjacency` isn't even needed - see the sanity assertion),
+/// so the only way this pair can be in contact is the treaty itself.
+///
+/// Confirmed this can fail: temporarily changed `faction_contact` to check
+/// only `adjacency` (dropped the `has_treaty`/`Stance::Alliance` clauses)
+/// and re-ran - the trailing faction's progress matched
+/// `no_contact_means_only_the_unaided_rate`'s isolated formula instead of
+/// showing a catch-up boost, and the assertion below failed. Reverted
+/// before committing.
+#[test]
+fn trade_agreement_alone_creates_contact_without_adjacency() {
+    let leader = FactionId(0);
+    let follower = FactionId(2);
+
+    let mut world = scenario::build_world();
+    let n = world.factions.len();
+    let adjacency = research::faction_adjacency(&world, n);
+    assert!(
+        !adjacency[leader.index() * n + follower.index()],
+        "sanity: mvp's faction 0 and faction 2 must not already share a land link, or this test proves nothing"
+    );
+
+    action::apply_action(&mut world, leader, Action::ProposeTreaty { to: follower, treaty: Treaty::TradeAgreement })
+        .expect("proposing a trade agreement while at war is allowed - Treaty::TradeAgreement carries no stance guard");
+    action::apply_action(&mut world, follower, Action::AcceptTreaty { from: leader, treaty: Treaty::TradeAgreement })
+        .expect("accepting the just-proposed trade agreement");
+    assert!(world.diplomacy.has_trade_agreement(leader, follower), "sanity: the treaty must now be active");
+
+    world.faction_mut(leader).research_progress = [500.0; RESEARCH_AXIS_COUNT];
+    world.faction_mut(follower).research_progress = [0.0; RESEARCH_AXIS_COUNT];
+    world.faction_mut(leader).machinery_output = 10.0;
+    world.faction_mut(follower).machinery_output = 10.0;
+
+    let mut with_treaty = world.clone();
+    let mut without_treaty = world;
+    // Drop back to no channel at all, to isolate the treaty's own effect.
+    without_treaty.diplomacy = diplomacy::Diplomacy::new(without_treaty.factions.len());
+
+    research::tick_research(&mut with_treaty);
+    research::tick_research(&mut without_treaty);
+
+    for axis in ALL_RESEARCH_AXES {
+        let treaty_progress = with_treaty.faction(follower).research_progress[axis.index()];
+        let no_treaty_progress = without_treaty.faction(follower).research_progress[axis.index()];
+        assert!(
+            treaty_progress > no_treaty_progress,
+            "{axis:?}: a live trade agreement alone, with no adjacency, must still speed up the follower's \
+             catch-up: with_treaty={treaty_progress}, without_treaty={no_treaty_progress}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

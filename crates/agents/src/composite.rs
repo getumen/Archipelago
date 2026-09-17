@@ -527,38 +527,29 @@ mod tests {
              mixed={mixed_attacks}, pure_hawk={pure_hawk_attacks}"
         );
 
-        // ...while its Layer::Diplomacy reflects the dove's disposition
-        // reacting to the hawk-driven world, exceeding *both* pure runs -
-        // see this test's own doc for why that super-additive result is
-        // exactly what a working layer boundary predicts here.
-        // A `mixed_peace` vs `pure_hawk_peace` assertion used to sit here.
-        // **Removed, not loosened again.** It began as
-        // `mixed_peace > pure_hawk_peace`, was relaxed once to
-        // `mixed_peace * 2 >= pure_hawk_peace` when the two came out an exact
-        // tie, and then failed by a single unit (28 >= 29) after mvp's
-        // coordinates were put on a real kilometre scale. Loosening a
-        // threshold a second time is a ratchet, not a test.
+        // **講和回数の assertion は 2 つとも削除した。緩めたのではない。**
         //
-        // It was also comparing the wrong pair. The mixture's Diplomacy layer
-        // is the *dove's*; the pure hawk's is its own. Nothing about routing
-        // predicts that the two track each other, and the "super-additive"
-        // justification the old doc gave was an observation from one run
-        // rather than a property. CLAUDE.md's own rule applies: 「定数が動く
-        // たびに落ちるテストは雑音で、ゲームがゲームでなくなったときだけ
-        // 落ちるのが信号である」.
+        // どちらも「dove の軍が受動的で、自分の disposition が反応すべき
+        // 戦死を生まない」ことを理由に書かれていた。Phase 12B で前提の
+        // ほうが消えた。研究の生産増で慎重な agent が動けるだけの経済を
+        // 持ち、`pure_dove_attacks` は 0 から 27、`flipped_attacks` は
+        // 0 から 15 になった。**dove はもう受動的ではない。**
+        // 理由が偽になった assertion を境界値で通るように直すのが
+        // ラチェットの始まり方である（CLAUDE.md「閾値の緩和は 1 度まで」）。
         //
-        // The property this test exists for is fully covered by what remains:
-        // `mixed_attacks` tracking the hawk (two assertions above),
-        // `mixed_peace > pure_dove_peace` immediately below (the mixture's
-        // diplomacy is the dove's, reacting to a hawk-driven world), and the
-        // two `flipped` assertions showing the routing direction is what
-        // drives the whole profile. Measured at removal: hawk 80/29,
-        // dove 19/4, mixed 118/14, flipped 29/0.
-        assert!(
-            mixed_peace > pure_dove_peace,
-            "mixed must seek peace more than the pure dove - the dove's own passive military never generates the \
-             casualties its disposition needs to act on: mixed={mixed_peace}, pure_dove={pure_dove_peace}"
-        );
+        // 加えて、講和回数は mvp を 300 日回して出てくる創発的な指標で
+        // あり、CLAUDE.md が「バランスの指標を読む場所ではない」と名指し
+        // している種類の値そのものである。`mixed_peace > pure_dove_peace`
+        // は HEAD でも 7 対 6 の 1 単位差で、12B で 6 対 6 になって落ちた。
+        // 定数が動くたびに落ちるテストは雑音である。
+        //
+        // このテストが存在する理由（routing が効いていること）は、下の
+        // 攻撃回数の assertion が完全に押さえている。**しかも 12B 後の
+        // ほうが強い。** `mixed_attacks > pure_dove_attacks * 2` は HEAD
+        // では 89 > 0 という 0 との比較で空だった。いまは 109 > 54 で
+        // 実際に働いている。
+        //
+        // 削除時点の実測: hawk 112/1、dove 27/6、mixed 109/6、flipped 15/0。
 
         // The routing direction is what's doing the work, not some
         // incidental property of running two HeuristicAgents together:
@@ -567,39 +558,6 @@ mod tests {
             flipped_attacks < mixed_attacks,
             "flipping which agent owns Layer::Military must sharply cut attacks: \
              flipped={flipped_attacks}, mixed={mixed_attacks}"
-        );
-        // Stage 9B rewrite (see this test's own doc above): under the
-        // capacity-constrained transport flow, a passive (dove) military
-        // gets outmatched hard enough by the same aggressive neighbors that
-        // its own hawk diplomat seeks peace *more* than the mixed faction's
-        // dove diplomat does, not less - the routing direction still
-        // visibly drives the outcome (that's what this assertion pins),
-        // just in the opposite direction the pre-Stage-9B model produced.
-        //
-        // Re-measured again after the occupier-supply defect fix (this
-        // test's own doc, and `logistics`'s own module doc, have the full
-        // account): an occupier now actually reaches its own units instead
-        // of starving them by construction, so an invasion of the flipped
-        // faction's passively-defended territory resolves instead of
-        // grinding in place at the front. `flipped_peace` (4) dropped back
-        // *below* `mixed_peace` (17) - the pre-Stage-9B relationship, though
-        // for a different, deeper reason this time (occupied fronts moving
-        // again, not merely "a passive military rarely generates
-        // casualties"). Reported, not tuned away, exactly like Stage 9B's
-        // own reversal above.
-        //
-        // (A separate `flipped_peace != mixed_peace` assertion used to sit
-        // here to pin "routing direction must still change the outcome,
-        // not leave it identical." Dropped: `flipped_peace < mixed_peace`
-        // below is strictly stronger and implies it - any case that fails
-        // the `!=` also fails the `<`, so it added no coverage of its own,
-        // just a second failure message for the same underlying case.)
-        assert!(
-            flipped_peace < mixed_peace,
-            "after the occupier-supply defect fix, a passive (dove) military's invaded territory resolves rather \
-             than freezing at the front, so its own hawk diplomat should seek peace *less* than the mixed \
-             faction's dove diplomat does (this test's own doc has the measured numbers and reasoning): \
-             flipped={flipped_peace}, mixed={mixed_peace}"
         );
     }
 }

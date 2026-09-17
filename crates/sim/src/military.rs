@@ -21,6 +21,7 @@ use crate::focus::{self, NationalFocus};
 use crate::good::Good;
 use crate::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use crate::naval;
+use crate::research::{self, ResearchAxis};
 use crate::rng::Rng;
 use crate::world::{Domain, OccupationKind, Region, Station, Terrain, World};
 
@@ -517,6 +518,24 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
         for (i, &f) in factions_present.iter().enumerate() {
             let is_defender = f == defender;
             let terrain_mult = if is_defender { defense_bonus } else { 1.0 };
+            // Stage 12B (docs/phase12-spec.md §0's table, "兵科ごとの装備"
+            // row): the Equipment research axis is exactly this side's land
+            // `Branch` combat coefficient - one multiplier per faction per
+            // battle (every unit on a side shares its owner's
+            // `research_progress`), not per unit, applied alongside the
+            // terrain/posture/branch-terrain multipliers already computed
+            // per side here. Naval/air `combat_power()` callers elsewhere
+            // (`air.rs`/`naval.rs`) and `politics.rs`'s garrison-power/
+            // `observation.rs`'s RL feature deliberately do **not** read
+            // this: the spec names `military::Branch`'s combat coefficient
+            // specifically, and `Branch` (Infantry/Armour/Artillery) only
+            // exists for land units - extending Equipment research to
+            // Sea/Air combat power or to a non-combat reading of the same
+            // number would be a design decision the spec doesn't ask for
+            // (docs/conventions.md §1's "抽象化が必要だと判断したら... 相談
+            // してから決める").
+            let research_mult =
+                research::coefficient(world.faction(f).research_progress[ResearchAxis::Equipment.index()]);
             let units: Vec<(UnitId, Branch, f32)> = world
                 .units_in(region_id)
                 .filter(|u| u.owner == f)
@@ -525,7 +544,7 @@ pub fn tick_combat(world: &mut World, rng: &mut Rng, events: &mut Vec<Event>) ->
                         "units_in only yields land units, which always carry Some(branch) - see Unit::branch's own doc",
                     );
                     let branch_mult = branch_terrain_mult(branch, region_terrain, is_defender);
-                    (u.id, branch, u.combat_power() * terrain_mult * side_mult[i] * branch_mult)
+                    (u.id, branch, u.combat_power() * terrain_mult * side_mult[i] * branch_mult * research_mult)
                 })
                 .collect();
             let side_power = units.iter().fold(0.0, |acc, &(_, _, p)| acc + p);

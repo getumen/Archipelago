@@ -54,6 +54,7 @@ use crate::balance::{
 };
 use crate::focus::{self, NationalFocus};
 use crate::good::{Good, ALL_GOODS, GOOD_COUNT};
+use crate::research::{self, ResearchAxis};
 use crate::world::World;
 
 /// `stock[good] -> min(stock[good], input_budget / coefficient)`, treating a
@@ -207,6 +208,27 @@ pub fn tick_economy(world: &mut World) {
         // construction's own share is applied in `construction.rs`).
         if faction.capital_flight_active {
             pot[Good::Machinery.index()] *= CAPITAL_FLIGHT_MACHINERY_MULT;
+        }
+
+        // Stage 12B (docs/phase12-spec.md §0's table): the two
+        // production-side research axes, each a straight multiplier on
+        // `pot` exactly like every other factor in this block
+        // (`research::coefficient`'s own doc has the diminishing-returns
+        // shape). Civilian covers the good's own "食料・エネルギー・機械"
+        // wording; Munitions covers "軍需品と装備" - the Munitions good
+        // itself plus every one of the five per-branch/domain equipment
+        // goods (`good::Good`'s own "○○装備" naming already groups these
+        // as one family). Read fresh from `faction.research_progress`
+        // every tick - never sampled once and cached - so this always
+        // reflects the faction's current standing, including on a tick
+        // where it just lost the territory that was funding it.
+        let civilian_mult = research::coefficient(faction.research_progress[ResearchAxis::Civilian.index()]);
+        for good in [Good::Food, Good::Energy, Good::Machinery] {
+            pot[good.index()] *= civilian_mult;
+        }
+        let munitions_mult = research::coefficient(faction.research_progress[ResearchAxis::Munitions.index()]);
+        for good in [Good::Munitions, Good::Infantry, Good::Armour, Good::Artillery, Good::Naval, Good::Aircraft] {
+            pot[good.index()] *= munitions_mult;
         }
 
         let ration = faction.civilian_ration;
