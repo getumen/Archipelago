@@ -96,6 +96,7 @@ import constants
 import dem
 import hexgrid
 import port_data
+import prefecture_manufacturing
 import prefecture_population
 import rail_data
 import regions as region_mod
@@ -467,6 +468,42 @@ def distribute_population(hexes: dict, pref_of: dict, log=print) -> tuple[dict, 
     return population, weight
 
 
+def distribute_manufacturing(hexes: dict, pref_of: dict, weight: dict, log=print) -> dict:
+    """Manufacturing (Machinery/Aircraft capacity signal) per hex: each
+    prefecture's real `prefecture_manufacturing.MANUFACTURING` total, spread
+    across that prefecture's hexes with the exact same per-hex weight
+    (`flat_area_weight`, already computed once by `distribute_population`
+    and passed in here) that `distribute_population` itself uses for
+    population - "the way the population table itself is already spread",
+    not a newly invented weighting. Replaces the old
+    `population ** MACHINERY_DENSITY_EXPONENT` guess (see
+    `prefecture_manufacturing`'s module doc for why) with the real
+    inter-prefecture distribution while leaving the *intra*-prefecture
+    spread to the same land-quality weight population uses - this table has
+    no finer-than-prefecture resolution to do otherwise.
+
+    Same exact-sum assertion as `distribute_population`: each prefecture's
+    hex totals must sum back to exactly its known national figure."""
+    by_pref: dict[str, list] = defaultdict(list)
+    for hid, pref in pref_of.items():
+        by_pref[pref].append(hid)
+
+    manufacturing: dict[tuple, float] = {}
+    for pref in sorted(by_pref):
+        hids = by_pref[pref]
+        total_w = sum(weight[h] for h in hids)
+        target = prefecture_manufacturing.MANUFACTURING[pref]
+        for hid in hids:
+            manufacturing[hid] = target * weight[hid] / total_w
+        achieved = sum(manufacturing[h] for h in hids)
+        assert abs(achieved - target) < 1e-2, (
+            f"manufacturing distribution for {pref} sums to {achieved}, not {target}"
+        )
+    log(f"  manufacturing distributed across {len(hexes)} hexes over {len(by_pref)} prefectures "
+        f"(every prefecture's hex total matches its known 製造品出荷額等 exactly)")
+    return manufacturing
+
+
 def coastal_info(hexes: dict) -> tuple[dict, dict]:
     """hex id -> (is this hex coastal, how many of its 6 lattice directions
     open onto water/off-map). A hex is coastal if part of its own footprint
@@ -520,7 +557,7 @@ def artillery_coastal_factor(is_coastal: bool) -> float:
 
 
 def solve_capacity_coefficients(
-    hexes: dict, population: dict, weight: dict, coastal: dict, ports: dict, log=print
+    hexes: dict, population: dict, weight: dict, coastal: dict, ports: dict, manufacturing: dict, log=print
 ) -> dict:
     """Solves every `*_COEF` so the resulting national total exactly hits
     this module's docstring targets (`constants.TARGET_INDUSTRY_TOTAL` split
@@ -531,7 +568,13 @@ def solve_capacity_coefficients(
     sum_pop = sum(population.values())
     sum_food_w = sum(weight.values())
     sum_steel_w = sum(population[hid] * steel_factor(hexes[hid]["terrain"], coastal[hid]) for hid in hexes)
-    sum_machinery_w = sum(population[hid] ** constants.MACHINERY_DENSITY_EXPONENT for hid in hexes)
+    # Machinery/Aircraft: real `prefecture_manufacturing` distribution
+    # (`distribute_manufacturing`'s own doc), not a population-density
+    # guess - `manufacturing[hid]` is already in real-world units
+    # (百万円), so the coefficient here is purely a rescale to
+    # `TARGET_INDUSTRY_TOTAL`'s abstract units, same role `coef["food"]`
+    # plays for `weight`.
+    sum_machinery_w = sum(manufacturing.values())
     sum_infantry_w = sum(population[hid] ** constants.INFANTRY_DENSITY_EXPONENT for hid in hexes)
     # Stage 11A: independent of the `TARGET_INDUSTRY_TOTAL` pie above (see
     # `constants.TARGET_ARMOUR_TOTAL`'s own doc for why) - their own weight
@@ -544,7 +587,10 @@ def solve_capacity_coefficients(
     # Stage 11B: same independent-of-the-pie treatment, own weight shapes -
     # see `constants.TARGET_NAVAL_TOTAL`'s own doc.
     sum_naval_w = sum(population[hid] * ports[hid] for hid in hexes)
-    sum_aircraft_w = sum(population[hid] ** constants.MACHINERY_DENSITY_EXPONENT for hid in hexes)
+    # Aircraft explicitly reuses Machinery's own weight shape (`constants.
+    # TARGET_AIRCRAFT_TOTAL`'s doc) - now the real manufacturing
+    # distribution, same as Machinery just above.
+    sum_aircraft_w = sum_machinery_w
 
     total = constants.TARGET_INDUSTRY_TOTAL
     energy_target = total * constants.CAPACITY_SHARE_ENERGY
@@ -583,22 +629,23 @@ def solve_capacity_coefficients(
 
 
 def build_capacities(
-    hexes: dict, population: dict, weight: dict, coastal: dict, ports: dict, coef: dict
+    hexes: dict, population: dict, weight: dict, coastal: dict, ports: dict, manufacturing: dict, coef: dict
 ) -> dict:
     capacities = {}
     for hid, h in hexes.items():
         pop = population[hid]
+        mfg = manufacturing[hid]
         capacities[hid] = dict(
             food=coef["food"] * weight[hid],
             energy=coef["energy_pop"] * pop + coef["energy_area"],
             steel=coef["steel"] * pop * steel_factor(h["terrain"], coastal[hid]),
-            machinery=coef["machinery"] * (pop ** constants.MACHINERY_DENSITY_EXPONENT),
+            machinery=coef["machinery"] * mfg,
             munitions=coef["munitions_pop"] * pop + coef["munitions_area"],
             infantry=coef["infantry"] * (pop ** constants.INFANTRY_DENSITY_EXPONENT),
             armour=coef["armour"] * (pop ** constants.ARMOUR_DENSITY_EXPONENT) * armour_terrain_factor(h["terrain"]),
             artillery=coef["artillery"] * pop * artillery_coastal_factor(coastal[hid]),
             naval=coef["naval"] * pop * ports[hid],
-            aircraft=coef["aircraft"] * (pop ** constants.MACHINERY_DENSITY_EXPONENT),
+            aircraft=coef["aircraft"] * mfg,
         )
     return capacities
 
@@ -894,6 +941,7 @@ def main():
     print("Stage 8B: population, capacity, terrain, port, infrastructure, factions, sea zones ...")
     pref_of = assign_prefectures(hexes)
     population, weight = distribute_population(hexes, pref_of, log=print)
+    manufacturing = distribute_manufacturing(hexes, pref_of, weight, log=print)
     coastal, sea_dir_count = coastal_info(hexes)
     # Stage 11B: `ports` now has to exist before `solve_capacity_
     # coefficients`/`build_capacities` - Naval's own weight shape reads each
@@ -902,8 +950,8 @@ def main():
     # `sea_dir_count`, never on `capacities`, so moving it earlier changes
     # nothing about what it computes - only when.
     ports = build_ports(hexes, population, coastal, sea_dir_count)
-    coef = solve_capacity_coefficients(hexes, population, weight, coastal, ports, log=print)
-    capacities = build_capacities(hexes, population, weight, coastal, ports, coef)
+    coef = solve_capacity_coefficients(hexes, population, weight, coastal, ports, manufacturing, log=print)
+    capacities = build_capacities(hexes, population, weight, coastal, ports, manufacturing, coef)
     terrain_final = apply_urban_override(hexes, population, log=print)
     final_counts: dict = {}
     for t in terrain_final.values():
@@ -924,6 +972,10 @@ def main():
 
     total_pop = sum(population.values())
     print(f"national population: {total_pop:.1f}万人 (target {prefecture_population.TOTAL_POPULATION:.1f}万人)")
+    total_mfg = sum(manufacturing.values())
+    print(f"national manufacturing signal: {total_mfg:.1f}百万円 "
+          f"(target {prefecture_manufacturing.TOTAL_MANUFACTURING:.1f}百万円, "
+          "real 工業統計調査 2013 figures - see prefecture_manufacturing.py)")
     for good in ("food", "energy", "steel", "machinery", "munitions", "infantry", "armour", "artillery", "naval", "aircraft"):
         total = sum(capacities[hid][good] for hid in hexes)
         print(f"national capacity[{good}]: {total:.2f}")

@@ -353,13 +353,27 @@ ENERGY_AREA_SHARE = 0.2
 # population).
 MUNITIONS_AREA_SHARE = 0.65
 
-# Machinery/Infantry concentrate super-linearly in dense hexes ("人口密度に
-# 強く比例（都市圏に集中）" / "人口密度に比例、Machinery より集中" -
-# section 2): capacity_h ∝ population_h ** exponent. Infantry's (ex-Arms,
-# Stage 11A rename - see `CAPACITY_SHARE_INFANTRY`'s own doc) exponent is
-# the larger of the two so the same population difference concentrates it
-# harder, per the spec's explicit ordering.
-MACHINERY_DENSITY_EXPONENT = 1.6
+# Infantry concentrates super-linearly in dense hexes ("人口密度に比例、
+# Machinery より集中" - section 2): capacity_h ∝ population_h ** exponent.
+#
+# Machinery used to be defined the same way, with its own smaller exponent
+# (`MACHINERY_DENSITY_EXPONENT = 1.6`, so the same population difference
+# concentrated it less hard than Infantry) - a guess read off the design
+# document's prose ("人口密度に強く比例（都市圏に集中）") that was never
+# checked against real data. It has been: against 工業統計調査 2013
+# 製造品出荷額等 (`prefecture_manufacturing.py`'s own module doc has the
+# full measurement), the real log-log slope of manufacturing against this
+# file's own population table is ~0.989 (essentially proportional, not
+# super-linear at 1.6) with R² only ~0.657 - population is a weak proxy for
+# manufacturing even at the "right" exponent. Machinery (and Aircraft,
+# which explicitly reused this same signal - see `TARGET_AIRCRAFT_TOTAL`'s
+# doc below) has been switched to `distribute_manufacturing`'s real
+# per-prefecture distribution instead, so `MACHINERY_DENSITY_EXPONENT` is
+# gone - nothing reads it any more. Infantry keeps its own exponent
+# unchanged: that is a separate balance decision the owner has not
+# revisited, not the one this note is about. Same for `ARMOUR_DENSITY_
+# EXPONENT` below, which happens to share Machinery's old value (1.6) but
+# is Armour's own independent constant, untouched by this change.
 INFANTRY_DENSITY_EXPONENT = 2.0
 
 # --- Stage 11A: Armour/Artillery (docs/phase11-spec.md §3) ------------------
@@ -411,10 +425,12 @@ ARTILLERY_COASTAL_FACTOR_INLAND = 0.6
 #     coastal-direction count and population) - a shipyard's capacity is a
 #     function of the harbor it sits on, not population alone the way
 #     Artillery's flat coastal bonus is.
-#   - Aircraft reuses Machinery's own "concentrates super-linearly in dense
-#     hexes" signal (`MACHINERY_DENSITY_EXPONENT`) with no coastal or port
-#     term at all - airframe manufacturing draws on the same advanced,
-#     population-dense industrial base Machinery does, landlocked or not.
+#   - Aircraft reuses Machinery's own signal (`sum_machinery_w`/
+#     `coef["machinery"]`'s real-manufacturing distribution in
+#     `build_scenario.py`, since Machinery stopped being exponent-based -
+#     see `INFANTRY_DENSITY_EXPONENT`'s doc above) with no coastal or port
+#     term at all - airframe manufacturing draws on the same advanced
+#     industrial base Machinery does, landlocked or not.
 TARGET_NAVAL_TOTAL = TARGET_INDUSTRY_TOTAL * 0.07
 TARGET_AIRCRAFT_TOTAL = TARGET_INDUSTRY_TOTAL * 0.06
 

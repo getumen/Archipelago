@@ -10,11 +10,29 @@ use archipelago_sim::good::ALL_GOODS;
 use archipelago_sim::group::ALL_GROUPS;
 use archipelago_sim::ids::FactionId;
 use archipelago_sim::military::Branch;
+use archipelago_sim::research::ALL_RESEARCH_AXES;
 use archipelago_sim::sim::Outcome;
 use archipelago_sim::world::{Domain, Station, VictoryCondition, World};
 
 /// Renders a `[f32; GOOD_COUNT]`-shaped array as a JSON object keyed by
 /// `Good::key()`, e.g. `{"food":1.0,"energy":2.0,...}`.
+/// Renders a `[f32; RESEARCH_AXIS_COUNT]`-shaped array as a JSON object keyed
+/// by axis, mirroring `good_object`/`group_object`.
+///
+/// Phase 12C wired `research_progress`/`research_allocation` into the
+/// *observation vector* but not into this dump. Stage 12D then had to build a
+/// throwaway measurement harness to read the very numbers that justified
+/// re-deriving japan_hex's machinery capacity - `--json` is what this project
+/// measures and compares regressions with, so research being absent from it
+/// made the layer effectively unmeasurable from outside the engine.
+fn research_object(values: &[f32]) -> String {
+    let items: Vec<String> = ALL_RESEARCH_AXES
+        .iter()
+        .map(|a| format!("{}:{}", string(a.key()), number(values[a.index()])))
+        .collect();
+    format!("{{{}}}", items.join(","))
+}
+
 fn good_object(values: &[f32]) -> String {
     let items: Vec<String> = ALL_GOODS
         .iter()
@@ -240,7 +258,7 @@ fn serialize_factions(world: &World) -> String {
                 world.units.iter().filter(|u| u.alive && u.owner == f.id && u.branch == Some(Branch::Artillery)).count(),
             );
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"branch_units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"branch_units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{},\"research_progress\":{},\"research_allocation\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
@@ -271,6 +289,8 @@ fn serialize_factions(world: &World) -> String {
                 string(f.national_focus.key()),
                 f.focus_transition_days,
                 focus::active(f).is_some(),
+                research_object(&f.research_progress),
+                research_object(&f.research_allocation.map(|w| w.get())),
             )
         })
         .collect();
