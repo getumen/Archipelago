@@ -353,28 +353,50 @@ ENERGY_AREA_SHARE = 0.2
 # population).
 MUNITIONS_AREA_SHARE = 0.65
 
-# Infantry concentrates super-linearly in dense hexes ("人口密度に比例、
-# Machinery より集中" - section 2): capacity_h ∝ population_h ** exponent.
+# Infantry used to concentrate super-linearly in dense hexes ("人口密度に
+# 比例、Machinery より集中" - docs/phase11-spec.md §3/design doc prose):
+# capacity_h ∝ population_h ** 2.0, chosen only to exceed Machinery's own
+# old guessed exponent (1.6) - neither exponent was ever checked against
+# real data. Phase 12D fixed Machinery/Aircraft by switching them to
+# `distribute_manufacturing`'s real 工業統計調査 per-prefecture
+# 製造品出荷額等 distribution (that file's own module doc has the
+# measurement: manufacturing's real log-log slope against population is
+# ~0.989, not the 1.6 that had been guessed). Left alone at the time,
+# Infantry's own untouched 2.0 exponent was measured afterward (in the
+# *regenerated*, Phase-12D map) at a 462.2x faction spread and a 1.960
+# hex-vs-population log-log slope - population's own faction spread is
+# 12.05x, so this was an order of magnitude out of line with every other
+# good, including Machinery's now-real 12.8x/1.114. Infantry equipment is
+# consumed by every land unit (`SUPPLY_NEED_PER_MANPOWER`,
+# `crates/sim/src/balance.rs`), so a 462x spread meant most factions were
+# structurally unable to produce the single most-needed good.
 #
-# Machinery used to be defined the same way, with its own smaller exponent
-# (`MACHINERY_DENSITY_EXPONENT = 1.6`, so the same population difference
-# concentrated it less hard than Infantry) - a guess read off the design
-# document's prose ("人口密度に強く比例（都市圏に集中）") that was never
-# checked against real data. It has been: against 工業統計調査 2013
-# 製造品出荷額等 (`prefecture_manufacturing.py`'s own module doc has the
-# full measurement), the real log-log slope of manufacturing against this
-# file's own population table is ~0.989 (essentially proportional, not
-# super-linear at 1.6) with R² only ~0.657 - population is a weak proxy for
-# manufacturing even at the "right" exponent. Machinery (and Aircraft,
-# which explicitly reused this same signal - see `TARGET_AIRCRAFT_TOTAL`'s
-# doc below) has been switched to `distribute_manufacturing`'s real
-# per-prefecture distribution instead, so `MACHINERY_DENSITY_EXPONENT` is
-# gone - nothing reads it any more. Infantry keeps its own exponent
-# unchanged: that is a separate balance decision the owner has not
-# revisited, not the one this note is about. Same for `ARMOUR_DENSITY_
-# EXPONENT` below, which happens to share Machinery's old value (1.6) but
-# is Armour's own independent constant, untouched by this change.
-INFANTRY_DENSITY_EXPONENT = 2.0
+# Fixed the same way Machinery was: Infantry now uses
+# `distribute_manufacturing`'s real per-hex manufacturing signal directly
+# (`build_capacities`'s `infantry=coef["infantry"] * mfg`), with no extra
+# per-hex factor - military equipment is manufactured in factories, and
+# this table is the actual distribution of factories. This ties Infantry's
+# concentration to Machinery's rather than exceeding it (Armour, below,
+# keeps a real per-hex differentiator that Infantry deliberately doesn't
+# get, so Infantry reads as the least concentrated of the equipment goods -
+# "light manufacturing", spread across the same industrial base without a
+# heavy-industry bonus).
+#
+# **Explicit departure from docs/phase11-spec.md §3 / the design document,
+# recorded rather than silently applied (CLAUDE.md's japan_hex section has
+# the same account with the full before/after table):** both specify
+# Infantry as *more* concentrated than Machinery - that ordering is
+# literally where the old 2.0 exponent came from (picked to exceed
+# Machinery's old 1.6). Putting Infantry on Machinery's own real signal
+# ties their concentration instead, inverting the spec's stated ordering.
+# The owner judged the spec's ordering a guess that produced a 462x spread
+# nothing supports, and asked for this fix (2026-09-18) after Phase 12D's
+# real-data pattern proved out on Machinery. Reverse this by giving
+# Infantry its own per-hex multiplier (paralleling Armour's `steel_factor`
+# below) if the owner decides the design document's ordering should hold
+# after all - re-measure before changing it back, per this file's own
+# header rule. `INFANTRY_DENSITY_EXPONENT` is gone - nothing reads it any
+# more.
 
 # --- Stage 11A: Armour/Artillery (docs/phase11-spec.md §3) ------------------
 # `Good::Armour`/`Good::Artillery` are genuinely new commodities - Stage 11A
@@ -392,20 +414,38 @@ INFANTRY_DENSITY_EXPONENT = 2.0
 # The two use *differently shaped* weights, not just different totals, so
 # they read as genuinely different industries rather than one rescaled copy
 # of the other:
-#   - Armour favors flat, populous hexes (`flat_area_weight` - the same
-#     "plain area" signal Food already uses - times population density):
-#     tanks concentrate in industrial lowlands the way Steel/Machinery do.
 #   - Artillery scales *linearly* with population (no density exponent) and
 #     favors coastal hexes (the same coastal signal Steel uses, `coastal_
-#     info`): a broader, less concentrated industry than Armour's, present
-#     in modest amount almost everywhere people are, heavier near coastal
-#     heavy industry.
+#     info`): a broad, only mildly concentrated industry, present in modest
+#     amount almost everywhere people are, heavier near coastal industry.
+#     Left as-is by the fix below (see that fix's own note on why).
+#   - Armour was originally `population_h ** 1.6 * armour_terrain_factor`
+#     (a terrain-only weight paralleling Steel's own flat/hill/mountain
+#     split - `ARMOUR_TERRAIN_FACTOR_*` here and `armour_terrain_factor` in
+#     `build_scenario.py`, both now gone, see the fix below). Measured after
+#     Phase 12D's real-manufacturing switch to Machinery (a switch this
+#     constant predates and was never re-checked against), that guessed
+#     exponent produced a 99.7x faction spread and a 1.921 hex-vs-population
+#     log-log slope - population's own faction spread is 12.05x, so this
+#     was as far out of line as Infantry's own guessed exponent (see that
+#     constant's own note just above for the full account and the design-
+#     document departure this shares with Infantry).
+#
+#     Fixed the same way: Armour now uses `distribute_manufacturing`'s real
+#     per-hex manufacturing signal, same as Infantry/Machinery/Aircraft, but
+#     keeps a genuine differentiator sourced from data already in the
+#     scenario rather than a new invented exponent - it multiplies that
+#     signal by `steel_factor` (`build_scenario.py`, already computed per
+#     hex for Steel's own capacity just above: flat terrain * coastal, i.e.
+#     臨海工業地帯). Heavy industry (armour plate, tank plants) clusters in
+#     the same steel-rich lowlands Steel itself does, so Armour comes out
+#     *more* concentrated than plain manufacturing/Machinery/Infantry rather
+#     than tied with them - CLAUDE.md has the measured before/after.
+#     `ARMOUR_DENSITY_EXPONENT`/`ARMOUR_TERRAIN_FACTOR_*` are gone - nothing
+#     reads them any more; Armour reuses Steel's own `STEEL_TERRAIN_FACTOR_*`/
+#     `STEEL_COASTAL_FACTOR_*` (via `steel_factor`) instead of a second copy.
 TARGET_ARMOUR_TOTAL = TARGET_INDUSTRY_TOTAL * 0.10
 TARGET_ARTILLERY_TOTAL = TARGET_INDUSTRY_TOTAL * 0.08
-ARMOUR_DENSITY_EXPONENT = 1.6
-ARMOUR_TERRAIN_FACTOR_FLAT = 1.0
-ARMOUR_TERRAIN_FACTOR_HILL = 0.4
-ARMOUR_TERRAIN_FACTOR_MOUNTAIN = 0.15
 ARTILLERY_COASTAL_FACTOR_COASTAL = 1.0
 ARTILLERY_COASTAL_FACTOR_INLAND = 0.6
 
@@ -428,9 +468,9 @@ ARTILLERY_COASTAL_FACTOR_INLAND = 0.6
 #   - Aircraft reuses Machinery's own signal (`sum_machinery_w`/
 #     `coef["machinery"]`'s real-manufacturing distribution in
 #     `build_scenario.py`, since Machinery stopped being exponent-based -
-#     see `INFANTRY_DENSITY_EXPONENT`'s doc above) with no coastal or port
-#     term at all - airframe manufacturing draws on the same advanced
-#     industrial base Machinery does, landlocked or not.
+#     see the Infantry note above, which records that Phase 12D switch)
+#     with no coastal or port term at all - airframe manufacturing draws on
+#     the same advanced industrial base Machinery does, landlocked or not.
 TARGET_NAVAL_TOTAL = TARGET_INDUSTRY_TOTAL * 0.07
 TARGET_AIRCRAFT_TOTAL = TARGET_INDUSTRY_TOTAL * 0.06
 

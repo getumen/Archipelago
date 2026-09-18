@@ -536,18 +536,6 @@ def steel_factor(terrain: Terrain, is_coastal: bool) -> float:
     return terrain_f * coastal_f
 
 
-def armour_terrain_factor(terrain: Terrain) -> float:
-    """Stage 11A (docs/phase11-spec.md §3): Armour favors flat, industrial
-    terrain the same way Steel does, but with no coastal term of its own -
-    tank/vehicle plants cluster in industrial lowlands regardless of
-    shoreline."""
-    if terrain in (Terrain.PLAIN, Terrain.URBAN):
-        return constants.ARMOUR_TERRAIN_FACTOR_FLAT
-    if terrain is Terrain.HILL:
-        return constants.ARMOUR_TERRAIN_FACTOR_HILL
-    return constants.ARMOUR_TERRAIN_FACTOR_MOUNTAIN
-
-
 def artillery_coastal_factor(is_coastal: bool) -> float:
     """Stage 11A (docs/phase11-spec.md §3): Artillery gets a smaller coastal
     bonus than Steel's own (`STEEL_COASTAL_FACTOR_INLAND` vs
@@ -575,14 +563,20 @@ def solve_capacity_coefficients(
     # `TARGET_INDUSTRY_TOTAL`'s abstract units, same role `coef["food"]`
     # plays for `weight`.
     sum_machinery_w = sum(manufacturing.values())
-    sum_infantry_w = sum(population[hid] ** constants.INFANTRY_DENSITY_EXPONENT for hid in hexes)
+    # Infantry: real manufacturing signal too, with no extra per-hex
+    # multiplier (`constants.INFANTRY_DENSITY_EXPONENT`'s doc has the full
+    # account of the guessed-exponent defect this replaces and the resulting
+    # departure from docs/phase11-spec.md §3's stated ordering) - so its
+    # weight sum is exactly Machinery's.
+    sum_infantry_w = sum_machinery_w
     # Stage 11A: independent of the `TARGET_INDUSTRY_TOTAL` pie above (see
     # `constants.TARGET_ARMOUR_TOTAL`'s own doc for why) - their own weight
-    # sums, solved the same way every other good's coefficient is.
-    sum_armour_w = sum(
-        population[hid] ** constants.ARMOUR_DENSITY_EXPONENT * armour_terrain_factor(hexes[hid]["terrain"])
-        for hid in hexes
-    )
+    # sums, solved the same way every other good's coefficient is. Armour:
+    # real manufacturing signal times `steel_factor` (already computed per
+    # hex for Steel above) - see `constants.TARGET_ARMOUR_TOTAL`'s doc for
+    # why this differentiator (not `ARMOUR_DENSITY_EXPONENT`/
+    # `armour_terrain_factor`, both gone) was chosen.
+    sum_armour_w = sum(manufacturing[hid] * steel_factor(hexes[hid]["terrain"], coastal[hid]) for hid in hexes)
     sum_artillery_w = sum(population[hid] * artillery_coastal_factor(coastal[hid]) for hid in hexes)
     # Stage 11B: same independent-of-the-pie treatment, own weight shapes -
     # see `constants.TARGET_NAVAL_TOTAL`'s own doc.
@@ -641,8 +635,8 @@ def build_capacities(
             steel=coef["steel"] * pop * steel_factor(h["terrain"], coastal[hid]),
             machinery=coef["machinery"] * mfg,
             munitions=coef["munitions_pop"] * pop + coef["munitions_area"],
-            infantry=coef["infantry"] * (pop ** constants.INFANTRY_DENSITY_EXPONENT),
-            armour=coef["armour"] * (pop ** constants.ARMOUR_DENSITY_EXPONENT) * armour_terrain_factor(h["terrain"]),
+            infantry=coef["infantry"] * mfg,
+            armour=coef["armour"] * mfg * steel_factor(h["terrain"], coastal[hid]),
             artillery=coef["artillery"] * pop * artillery_coastal_factor(coastal[hid]),
             naval=coef["naval"] * pop * ports[hid],
             aircraft=coef["aircraft"] * mfg,
