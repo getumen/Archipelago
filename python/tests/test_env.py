@@ -31,22 +31,64 @@ def test_fixed_action_sequence_is_deterministic(server_url):
         obs, _ = env.reset(seed=7)
         trajectory = [obs.copy()]
         rewards = []
+        days = []
         for a in actions:
             obs, reward, terminated, truncated, info = env.step(a)
             trajectory.append(obs.copy())
             rewards.append(reward)
+            days.append(info["day"])
             if terminated or truncated:
                 break
         env.close()
-        return trajectory, rewards
+        return trajectory, rewards, days
 
-    traj1, rewards1 = run()
-    traj2, rewards2 = run()
+    traj1, rewards1, days1 = run()
+    traj2, rewards2, days2 = run()
 
     assert len(traj1) == len(traj2)
     for a, b in zip(traj1, traj2):
         np.testing.assert_array_equal(a, b)
     assert rewards1 == rewards2
+
+    # Non-degeneracy. Everything above only compares run 1 against run 2, so
+    # a server (or an `ArchipelagoEnv.step()`) that silently did nothing -
+    # e.g. returned a cached observation and never advanced the session -
+    # would make both runs agree trivially and this test would still pass,
+    # having actually verified nothing about determinism (CLAUDE.md's
+    # "検証についての教訓": two runs agreeing with each other is
+    # "reproducible" only if at least one of them also differs from having
+    # never stepped at all). Two independent, narrow checks, since either
+    # could fail without the other (`info["day"]` advancing while the
+    # observation encoding itself stays frozen, or vice versa):
+    #   - `info["day"]` must have moved past 0 at least once - a session
+    #     that never advances would report the reset-time day forever.
+    #   - at least one observation in the trajectory must differ from the
+    #     very first one (`traj1[0]`, the post-`reset()` observation) -
+    #     a `step()` that returned a cached/stale observation would keep
+    #     every entry byte-identical to it.
+    # Deliberately not asserting *which* fields moved or by how much: this
+    # is a network-facing smoke check on the plumbing, not a balance
+    # assertion, and the observation encoding's own shape is already covered
+    # by test_observation_space_length_matches_schema.
+    #
+    # Known limit, measured rather than assumed: this proves at least one
+    # observation moved, not that the pipeline keeps working. Freezing
+    # `_extract_observation` from the very first call does make it fail
+    # (verified). Freezing it only from the *second* step onward does not -
+    # the single real step-1 observation already satisfies the `any(...)`.
+    # Left as is: the realistic failures here (a cached observation, a dead
+    # extractor, a stale decode) all freeze from the start and are caught,
+    # while "works once then freezes" is contrived. Tightening this to
+    # "at least N distinct observations" would start failing whenever the
+    # simulation legitimately produces two identical ticks, which is the
+    # noise CLAUDE.md's 「許容幅は広く取る」 warns against. If a
+    # freeze-after-first-step defect is ever actually observed, measure it
+    # first, then tighten.
+    assert max(days1) > 0, "info['day'] never advanced past 0 across the whole fixed action sequence"
+    assert any(not np.array_equal(o, traj1[0]) for o in traj1[1:]), (
+        "every observation in the trajectory is byte-identical to the post-reset observation - "
+        "step() looks like it's returning a cached/frozen observation"
+    )
 
 
 def test_random_policy_completes_one_episode(server_url):

@@ -408,18 +408,64 @@ fn japan_hex_world_keeps_moving() {
 // `apps/game/tests/scenario_acceptance.rs` (gated, see that file).
 // ---------------------------------------------------------------------
 
+/// `run_with_scripted_opening`'s result: `final_state` is the full `World`
+/// `Debug` snapshot at the end, for byte comparison between two runs of the
+/// same seed and actions. `final_research_total` exists purely for
+/// the non-degeneracy check in
+/// `mvp_full_run_with_scripted_policy_changes_is_deterministic`, and are
+/// deliberately kept separate from (rather than read back out of) that
+/// `Debug` snapshot for two reasons: `world.day` is itself part of it, so a
+/// `step()` that advances `day` but changes nothing else would still make a
+/// full initial/final `Debug` comparison report a difference; and region
+/// ownership is the one piece of `World` state that only ever changes
+/// inside `step()`'s own combat/occupation resolution, never as a direct
+/// effect of an applied `Action` the way e.g. `Faction::manpower` does
+/// (`RecruitUnit` spends it immediately on `apply()`, independent of
+/// whether `step()` does anything at all) - so unlike manpower, "owners
+/// differ from the pre-run snapshot" is a signal that can only mean `step()`
+/// actually ran its systems, not that 720 rounds of action application
+/// alone moved something.
+struct ScriptedRun {
+    final_state: String,
+    /// Every faction's `research_progress`, summed, at the end of the run.
+    ///
+    /// This is the non-degeneracy signal, and it went through two wrong
+    /// choices before this one - both caught by actually stubbing `step()`
+    /// out and watching what happened, not by reading the code:
+    ///
+    /// - `Faction::manpower` **stayed green with `step()` stubbed.**
+    ///   `apply_recruit` spends manpower directly inside
+    ///   `Simulation::apply()`, so 720 rounds of action application move it
+    ///   whether or not any tick system ever runs.
+    /// - Region ownership does only ever change inside `step()`, but
+    ///   `codex review` correctly objected that territory turnover is a
+    ///   **balance outcome**: a legitimate future change that leaves mvp at
+    ///   war without completing an occupation would fail this test for the
+    ///   wrong reason, against CLAUDE.md's 「許容幅は広く取る」 and its rule
+    ///   that mvp is not a place to read balance from.
+    ///
+    /// `research_progress` has neither problem. `research::tick_research`
+    /// runs only inside `step()`, and **no `Action` can write it** - the
+    /// only research action, `SetResearchAllocation`, writes
+    /// `research_allocation` instead. It rises for any faction with
+    /// machinery and labour, so it does not depend on anyone winning a
+    /// battle or taking a region.
+    final_research_total: f32,
+    final_day: u32,
+}
+
 /// Runs `world` with faction 0 receiving a small scripted policy-change
 /// opening on day 0 (shift industry priority toward Munitions, cut
 /// conscription) and every other faction on `HeuristicAgent` as usual -
 /// then hands faction 0 back to `HeuristicAgent`-equivalent silence for the
 /// rest of the run (no further scripted actions), same shape as the
-/// player-agency test in `apps/game/tests/scenario_acceptance.rs`. Returns
-/// the full `World` `Debug` snapshot at the end, for byte comparison.
-fn run_with_scripted_opening(world: World, seed: u64, days: u32, scripted_faction: FactionId) -> String {
+/// player-agency test in `apps/game/tests/scenario_acceptance.rs`.
+fn run_with_scripted_opening(world: World, seed: u64, days: u32, scripted_faction: FactionId) -> ScriptedRun {
     use archipelago_sim::action::Action;
 
     let n = world.factions.len();
     let mut sim = Simulation::with_world(world, seed);
+
     let mut agents: Vec<Box<dyn Agent>> = (0..n).map(|i| Box::new(default_heuristic_agent(i)) as Box<dyn Agent>).collect();
 
     loop {
@@ -446,14 +492,52 @@ fn run_with_scripted_opening(world: World, seed: u64, days: u32, scripted_factio
         }
         sim.step();
     }
-    format!("{:?}", sim.world)
+    ScriptedRun {
+        final_state: format!("{:?}", sim.world),
+        final_research_total: sim
+            .world
+            .factions
+            .iter()
+            .flat_map(|f| f.research_progress.iter().copied())
+            .fold(0.0, |acc, p| acc + p),
+        final_day: sim.world.day,
+    }
 }
 
 #[test]
 fn mvp_full_run_with_scripted_policy_changes_is_deterministic() {
     let run_a = run_with_scripted_opening(scenario::build_world(), 1, 720, FactionId(0));
     let run_b = run_with_scripted_opening(scenario::build_world(), 1, 720, FactionId(0));
-    assert_eq!(run_a, run_b, "the same seed and the same scripted player actions must reach byte-identical final state");
+    assert_eq!(
+        run_a.final_state, run_b.final_state,
+        "the same seed and the same scripted player actions must reach byte-identical final state"
+    );
+
+    // Non-degeneracy: the `assert_eq!` above only compares run_a against
+    // run_b, so a `Simulation::step()` that silently did nothing would make
+    // both runs sit frozen at the identical starting state and this test
+    // would still pass, having actually verified nothing (CLAUDE.md
+    // "検証についての教訓" - the same gap the `crates/sim::tests::
+    // determinism` non-degeneracy check closes for the plain no-input case).
+    // Deliberately *not* pinning `final_day` to the full 720: the loop
+    // (`run_with_scripted_opening`) exits the moment `sim.outcome(days)`
+    // stops being `Ongoing`, so a legitimate balance change that makes this
+    // scenario reach `Outcome::Victory` earlier would be a real, valid
+    // conclusion, not a sign anything is frozen - requiring exactly 720
+    // would fail that run for the wrong reason, exactly what CLAUDE.md's
+    // "許容幅は広く取る" and "早期決着は欠陥ではない" both warn against. `day >
+    // 0` only rules out the loop exiting before a single `step()` ran. The
+    // owner comparison is what actually carries the non-degeneracy proof: it
+    // stays structural (any difference from the pre-run snapshot, on a field
+    // that doesn't include `day` itself and can't be moved by action
+    // application alone - see `ScriptedRun`'s doc) rather than pinned to
+    // which region flips or when, since that is exactly the kind of number
+    // ordinary balance tuning is expected to change.
+    assert!(run_a.final_day > 0, "the run ended before a single day passed - step() never ran");
+    assert!(
+        run_a.final_research_total > 0.0,
+        "no faction accumulated any research over the whole run - step() looks like a no-op          (research::tick_research runs only inside step(), and no Action can write research_progress)"
+    );
 }
 
 #[cfg(test)]

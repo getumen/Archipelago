@@ -1230,6 +1230,14 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             // `ActiveGood`'s own "対象品目: 行クリック/G" row one line above
             // already closes for `G`.
             row("徴募兵科: C ボタン/キー", label_color);
+            // Stage 12C follow-up: `ActiveResearchAxis`'s own `R` binding
+            // (`input::keyboard_input`'s doc) - the same discoverability gap
+            // `ActiveGood`/`ActiveBranch`'s own rows above already close for
+            // `G`/`C`. No "ボタン" here (unlike the two rows above): this
+            // selector has no clickable tab row of its own, only the `R`
+            // key - the policy panel's own "対象軸 [R で切替]:" label names
+            // the same key, not a button.
+            row("研究対象軸切替: R", label_color);
             row("政策パネル: P ボタン/キー", label_color);
             row("外交パネル: D ボタン/キー", label_color);
             row("部隊待機/補充: ボタン/H/J", label_color);

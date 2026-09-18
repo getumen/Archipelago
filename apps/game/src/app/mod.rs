@@ -31,6 +31,7 @@ use archipelago_sim::action::Action;
 use archipelago_sim::good::{Good, ALL_GOODS};
 use archipelago_sim::ids::{FactionId, RegionId, SeaZoneId, UnitId};
 use archipelago_sim::military::Branch;
+use archipelago_sim::research::ResearchAxis;
 use archipelago_sim::world::{LinkKind, World as SimWorld};
 
 use crate::sim_driver::{Ai, SimDriver, Speed};
@@ -237,6 +238,38 @@ impl Default for ActiveBranch {
         // scenario's starting units are already raised as, is the safest
         // default: affordable everywhere, penalized nowhere.
         ActiveBranch(Branch::Infantry)
+    }
+}
+
+/// Stage 12C follow-up (docs/phase12-spec.md §3 only asked that research be
+/// *visible*, not player-editable - this closes the gap CLAUDE.md's own
+/// premise ("人間・ヒューリスティック AI・LLM・強化学習エージェントが、同じ
+/// Observation → Action のインターフェースで同じ世界に触れる") leaves open
+/// otherwise: `Action::SetResearchAllocation` already existed and was
+/// already reachable by every other agent kind, just not a `--play`ed
+/// human): which `research::ResearchAxis` the research-
+/// allocation policy keys (`input::keyboard_input`) act on, cycled with `R`
+/// - `ActiveGood`/`ActiveBranch`'s exact pattern (one shared pointer, cycled
+/// by a single key) for the identical reason: there are only three axes, so
+/// a keybinding per axis would grow the keymap for no real benefit over a
+/// cycle. Unlike those two, this selector has no observer-mode use
+/// (`input::keyboard_input` places its `R` binding after the `--play`
+/// gate, not alongside `G`/`C`) - it exists only to target `Faction::
+/// research_allocation`, itself only ever written by a `--play`ed faction.
+#[derive(Resource)]
+pub(crate) struct ActiveResearchAxis(pub ResearchAxis);
+
+impl Default for ActiveResearchAxis {
+    fn default() -> Self {
+        // `Civilian` - `ALL_RESEARCH_AXES[0]`. Unlike `ActiveGood`/
+        // `ActiveBranch`, `ResearchAxis`'s own doc names no axis as more
+        // contended than another (`FACTION_RESEARCH_ALLOCATION_DEFAULT`'s
+        // even three-way split) - so there is no "the good every faction
+        // fights over" or "the branch every scenario starts with" reason to
+        // prefer one axis's default over another. Declaration order is the
+        // only tiebreaker left, and it is the same one `ALL_RESEARCH_AXES`
+        // itself already commits to (`research::ResearchAxis`'s own doc).
+        ActiveResearchAxis(ResearchAxis::Civilian)
     }
 }
 
@@ -708,6 +741,7 @@ pub fn run(
         .insert_resource(PolicyPanel(debug_open_policy))
         .insert_resource(debug_industry_good.map(ActiveGood).unwrap_or_default())
         .insert_resource(ActiveBranch::default())
+        .insert_resource(ActiveResearchAxis::default())
         .insert_resource(LastRejection::default())
         .insert_resource(map_mode::MapModeRes(debug_map_mode))
         .insert_resource(NlCompose::default())

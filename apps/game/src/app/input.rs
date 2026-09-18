@@ -43,12 +43,13 @@ use archipelago_sim::focus::ALL_FOCI;
 use archipelago_sim::good::{ALL_GOODS, GOOD_COUNT};
 use archipelago_sim::ids::RegionId;
 use archipelago_sim::military::{Branch, ALL_BRANCHES};
+use archipelago_sim::research::ALL_RESEARCH_AXES;
 use archipelago_sim::world::{Domain, Station};
 
 use super::map_mode::MapModeRes;
 use super::setup::sea_zone_radius;
 use super::{
-    ActiveBranch, ActiveGood, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose,
+    ActiveBranch, ActiveGood, ActiveResearchAxis, DiplomacyPanel, MainCamera, MenuRegion, NewspaperState, NlCompose,
     PlayerFaction, RegionLayout, RegionRadii, SeaZoneCenters, SelectedFaction, SelectedRegion,
     SelectedSeaZone, SelectedUnits, SimRes, Speed, SpeedRes, UnitMarker,
 };
@@ -107,8 +108,17 @@ pub(super) fn keyboard_input(
     mut menu: ResMut<MenuRegion>,
     mut diplomacy: ResMut<DiplomacyPanel>,
     mut policy: ResMut<super::PolicyPanel>,
-    mut active_good: ResMut<ActiveGood>,
-    mut active_branch: ResMut<ActiveBranch>,
+    // Bevy's `SystemParam` tuple impl only covers 0..=16 flat parameters
+    // (`bevy_ecs::system::system_param`'s own `all_tuples!(..., 0, 16, P)`) -
+    // adding `ActiveResearchAxis` as an 17th flat parameter here stopped
+    // this function compiling as a system at all. Grouping these three
+    // "which target does a cycle key currently point at" resources into one
+    // nested-tuple parameter (itself well within the limit) works around
+    // that without changing anything about how they're used below - the
+    // destructuring pattern here keeps every call site identical to a flat
+    // parameter (`active_good.0`, `active_branch.0`, `active_research_axis.0`
+    // unchanged).
+    (mut active_good, mut active_branch, mut active_research_axis): (ResMut<ActiveGood>, ResMut<ActiveBranch>, ResMut<ActiveResearchAxis>),
     player: Res<PlayerFaction>,
     mut sim: ResMut<SimRes>,
     mut nl_compose: ResMut<NlCompose>,
@@ -365,6 +375,42 @@ pub(super) fn keyboard_input(
         let good = active_good.0;
         let cur = sim.0.world().faction(player_faction).import_plan[good.index()];
         sim.0.push_human_action(Action::SetImportPlan { good, rate: cur + IMPORT_PLAN_STEP });
+    }
+    // Stage 12C follow-up: gives a `--play`ed human the same
+    // `Action::SetResearchAllocation` control the heuristic/LLM/RL agents
+    // already have (`ActiveResearchAxis`'s own doc has the full background).
+    // `R` cycles which axis the two keys below act on - placed here, after
+    // the `let Some(player_faction)` gate above, rather than alongside `G`/
+    // `C` near the top of this function: unlike `ActiveGood`/`ActiveBranch`,
+    // this selector has no use in observer mode (nothing reads it besides
+    // `Action::SetResearchAllocation`, which only a played faction can ever
+    // issue), so there is no reason to make it reachable before a faction
+    // is being played. `R` collides with nothing: `handle_diplomacy_keys`
+    // binds the same letter to "reject treaty", but only reads it after
+    // `diplomacy.open` has already returned out of this function above, so
+    // the two `just_pressed(KeyCode::KeyR)` checks can never both fire from
+    // one keypress.
+    if keys.just_pressed(KeyCode::KeyR) {
+        let cur = ALL_RESEARCH_AXES.iter().position(|&a| a == active_research_axis.0).expect("ActiveResearchAxis always holds one of ALL_RESEARCH_AXES");
+        active_research_axis.0 = ALL_RESEARCH_AXES[(cur + 1) % ALL_RESEARCH_AXES.len()];
+    }
+    // `` `/`\` `` - the two remaining free symbol keys once every adjacent
+    // punctuation pair on this row (`-`/`=`, `[`/`]`, `;`/`'`, `,`/`.`) was
+    // already claimed by conscription/ration/industry/logistics above (the
+    // same reason `Digit8`/`Digit9` above are digits rather than another
+    // symbol pair for the import plan). `PRIORITY_STEP` (0.1) is the same
+    // step `Semicolon`/`Quote`/`Comma`/`Period` above already use for the
+    // other `0.0..=1.0`-bounded per-slot weights (`ResearchWeight`'s own
+    // doc names it the same "bounded newtype" shape as those raw priorities).
+    if keys.just_pressed(KeyCode::Backquote) {
+        let axis = active_research_axis.0;
+        let cur = sim.0.world().faction(player_faction).research_allocation[axis.index()].get();
+        sim.0.push_human_action(Action::SetResearchAllocation { axis, weight: (cur - PRIORITY_STEP).clamp(0.0, 1.0) });
+    }
+    if keys.just_pressed(KeyCode::Backslash) {
+        let axis = active_research_axis.0;
+        let cur = sim.0.world().faction(player_faction).research_allocation[axis.index()].get();
+        sim.0.push_human_action(Action::SetResearchAllocation { axis, weight: (cur + PRIORITY_STEP).clamp(0.0, 1.0) });
     }
 }
 
@@ -1090,6 +1136,7 @@ mod tests {
         world.insert_resource(super::super::PolicyPanel::default());
         world.insert_resource(ActiveGood::default());
         world.insert_resource(ActiveBranch::default());
+        world.insert_resource(ActiveResearchAxis::default());
         world.insert_resource(PlayerFaction(None));
         world.insert_resource(SimRes(SimDriver::new(archipelago_sim::scenario::build_world(), 1)));
         world.insert_resource(NlCompose::default());
@@ -1139,6 +1186,105 @@ mod tests {
             world.resource::<ActiveGood>().0,
             ALL_GOODS[(ActiveGood::default().0.index() + 1) % GOOD_COUNT],
             "G must cycle ActiveGood to the next good even with no faction being played"
+        );
+    }
+
+    /// Regression guard for `R` cycling `ActiveResearchAxis` - unlike `G`/
+    /// `C` above, this binding lives after the `let Some(player_faction)`
+    /// gate (`ActiveResearchAxis`'s own doc explains why), so this test
+    /// overrides `PlayerFaction`/`SimRes` to a played faction the same way
+    /// `conscription_keys_are_suppressed_while_ctrl_is_held` does. Checked
+    /// this fails when broken: temporarily changed the assignment to
+    /// `active_research_axis.0 = ALL_RESEARCH_AXES[cur];` (an accidental
+    /// no-op cycle - `cur` re-used instead of `cur + 1`) - the assertion
+    /// below then failed with `Civilian` on both sides of the comparison
+    /// instead of advancing to `Munitions`, restored after.
+    #[test]
+    fn r_key_cycles_active_research_axis_for_a_played_faction() {
+        let mut world = keyboard_input_world(KeyCode::KeyR);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SimRes(SimDriver::new_with_player(archipelago_sim::scenario::build_world(), 1, Some(FactionId(0)), None)));
+
+        let mut system = IntoSystem::into_system(keyboard_input);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        assert_eq!(
+            world.resource::<ActiveResearchAxis>().0,
+            ALL_RESEARCH_AXES[(ActiveResearchAxis::default().0.index() + 1) % ALL_RESEARCH_AXES.len()],
+            "R must cycle ActiveResearchAxis to the next axis for a played faction"
+        );
+    }
+
+    /// Regression guard for `` ` `` decreasing `Faction::research_allocation`
+    /// on whichever axis `ActiveResearchAxis` currently targets - the same
+    /// "current value minus `PRIORITY_STEP`, clamped" formula `;` already
+    /// uses for `SetIndustryPriority`. Checked this fails when broken:
+    /// temporarily built the action with `button.increase` hardcoded `true`
+    /// equivalent (`weight: cur + PRIORITY_STEP`) - the assertion below then
+    /// fails (queues an increase instead), restored after.
+    #[test]
+    fn backquote_key_decreases_research_allocation_for_the_active_axis() {
+        let axis = ALL_RESEARCH_AXES[2];
+        let mut world = keyboard_input_world(KeyCode::Backquote);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SimRes(SimDriver::new_with_player(archipelago_sim::scenario::build_world(), 1, Some(FactionId(0)), None)));
+        world.insert_resource(ActiveResearchAxis(axis));
+        let current = world.resource::<SimRes>().0.world().faction(FactionId(0)).research_allocation[axis.index()].get();
+
+        let mut system = IntoSystem::into_system(keyboard_input);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        world.resource_mut::<SimRes>().0.tick();
+        let sim = world.resource::<SimRes>();
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::SetResearchAllocation { axis, weight: (current - PRIORITY_STEP).clamp(0.0, 1.0) }],
+            "backquote must enqueue SetResearchAllocation at one step below the pre-press value, for whichever axis is currently active"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty());
+        // Enqueuing the right `Action` is necessary but not sufficient - it
+        // still has to actually reach `Faction::research_allocation`, the
+        // same standard `sim_driver::tests::client_run_matches_headless`
+        // holds every other action to. `tick()` above already ran
+        // `Simulation::apply` for it (`SimDriver::tick`'s own doc), so this
+        // reads real post-tick world state, not the action queue.
+        assert_eq!(
+            sim.0.world().faction(FactionId(0)).research_allocation[axis.index()].get(),
+            (current - PRIORITY_STEP).clamp(0.0, 1.0),
+            "the faction's real research_allocation must have actually moved, not just been queued"
+        );
+    }
+
+    /// Same shape as the backquote test above, for the increase key -
+    /// together they cover both halves of the `` `/\ `` pair
+    /// `input::keyboard_input`'s own doc for this binding names.
+    #[test]
+    fn backslash_key_increases_research_allocation_for_the_active_axis() {
+        let axis = ALL_RESEARCH_AXES[1];
+        let mut world = keyboard_input_world(KeyCode::Backslash);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SimRes(SimDriver::new_with_player(archipelago_sim::scenario::build_world(), 1, Some(FactionId(0)), None)));
+        world.insert_resource(ActiveResearchAxis(axis));
+        let current = world.resource::<SimRes>().0.world().faction(FactionId(0)).research_allocation[axis.index()].get();
+
+        let mut system = IntoSystem::into_system(keyboard_input);
+        system.initialize(&mut world);
+        system.run((), &mut world).unwrap();
+
+        world.resource_mut::<SimRes>().0.tick();
+        let sim = world.resource::<SimRes>();
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::SetResearchAllocation { axis, weight: (current + PRIORITY_STEP).clamp(0.0, 1.0) }],
+            "backslash must enqueue SetResearchAllocation at one step above the pre-press value, for whichever axis is currently active"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty());
+        assert_eq!(
+            sim.0.world().faction(FactionId(0)).research_allocation[axis.index()].get(),
+            (current + PRIORITY_STEP).clamp(0.0, 1.0),
+            "the faction's real research_allocation must have actually moved, not just been queued"
         );
     }
 

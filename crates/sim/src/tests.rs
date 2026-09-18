@@ -217,6 +217,18 @@ fn occupation_flips_owner() {
 fn determinism() {
     let mut sim_a = Simulation::new(7);
     let mut sim_b = Simulation::new(7);
+
+    // Non-degeneracy baseline, taken before either `Simulation` has stepped
+    // once. CLAUDE.md's own "検証についての教訓" names this exact gap: the
+    // `assert_eq!`s below only compare sim_a against sim_b, so a `step()`
+    // that silently did nothing would make both sit frozen at the identical
+    // starting state and this test would still pass, having proven nothing
+    // about determinism at all. Comparing against this pre-loop snapshot
+    // after the loop is what tells "reproducible" apart from "frozen".
+    let initial_day = sim_a.world.day;
+    let initial_owners: Vec<_> = sim_a.world.regions.iter().map(|r| r.owner).collect();
+    let initial_manpower: Vec<_> = sim_a.world.factions.iter().map(|f| f.manpower).collect();
+
     for _ in 0..200 {
         sim_a.step();
         sim_b.step();
@@ -233,6 +245,25 @@ fn determinism() {
         assert_eq!(fa.stability, fb.stability);
         assert_eq!(fa.alive, fb.alive);
     }
+
+    // Non-degeneracy check itself. `world.day` advancing by exactly the
+    // number of `step()` calls is an unconditional engine invariant
+    // (`Simulation::step_timed` increments it exactly once per call, no
+    // matter what any tick system does), not a balance figure that drifts
+    // with tuning, so asserting it exactly stays inside this repo's
+    // "許容幅は広く取る" rule rather than fighting it. That alone would
+    // still pass for a `step()` that advances `day` and touches nothing
+    // else, so it's paired with a coarse, structural check that *something*
+    // about the world actually moved - deliberately not pinned to a
+    // specific owner/manpower value, since which region flips or by how
+    // much manpower drops is exactly the kind of number ordinary balance
+    // tuning is expected to change.
+    let manpower_a: Vec<_> = sim_a.world.factions.iter().map(|f| f.manpower).collect();
+    assert_eq!(sim_a.world.day, initial_day + 200, "world.day must advance exactly once per step() call");
+    assert!(
+        owners_a != initial_owners || manpower_a != initial_manpower,
+        "200 days of simulation left every region owner and every faction's manpower exactly as they started - step() looks like a no-op"
+    );
 }
 
 #[test]

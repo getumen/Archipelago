@@ -453,9 +453,11 @@ mod tests {
         use archipelago_sim::ids::FactionId;
         use archipelago_sim::scenario;
 
-        use crate::app::panels::{sync_policy_panel, PolicyPanelRoot, ResearchInfoText};
+        use bevy::ecs::world::CommandQueue;
+
+        use crate::app::panels::sync_policy_panel;
         use crate::app::{
-            ActiveGood, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperState,
+            ActiveGood, ActiveResearchAxis, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperState,
             PlayerFaction, PlayerPanelText, PolicyPanel, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
             TopBarPlayerStatsText, TopBarText,
         };
@@ -495,6 +497,7 @@ mod tests {
         world.insert_resource(PolicyPanel(true));
         world.insert_resource(DiplomacyPanel { open: false, target: None });
         world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveResearchAxis::default());
 
         world.spawn((Text::new(String::new()), TopBarText));
         world.spawn((Text::new(String::new()), TopBarPlayerStatsText));
@@ -502,13 +505,29 @@ mod tests {
         world.spawn((Text::new(String::new()), PlayerPanelText));
         world.spawn((Text::new(String::new()), InspectText));
         world.spawn((Text::new(String::new()), EventLogText));
-        // Stage 12C (docs/phase12-spec.md §3 "画面で研究が見える"): the
-        // policy panel's own root plus its new research display - without
-        // `PolicyPanelRoot`, `sync_policy_panel` returns before reaching
-        // `ResearchInfoText` at all (`root.single_mut()` fails), so this
-        // test would silently cover none of the panel's own text.
-        world.spawn((Visibility::Hidden, Node::default(), PolicyPanelRoot));
-        world.spawn((Text::new(String::new()), ResearchInfoText));
+        // Stage 12C follow-up: spawns the *real* policy panel
+        // (`panels::spawn_policy_panel`) rather than hand-building a minimal
+        // stand-in for just `PolicyPanelRoot`/`ResearchInfoText` (this
+        // test's pre-Stage-12C-follow-up shape) - that stand-in never
+        // exercised the panel's own static Japanese labels
+        // ("対象品目 [G で切替]:", "対象軸 [R で切替]:", "国家方針 [F で循環]:",
+        // every `PolicyField::label()`, ...) at all, only the handful of
+        // dynamic value texts a hand-picked marker component list happened
+        // to cover. Calling the real function closes that gap and means any
+        // future new label here is covered automatically, with no test
+        // update needed. `ChildSpawnerCommands` (`spawn_policy_panel`'s own
+        // parameter type) only comes from `Commands`, not a bare `World`, so
+        // this uses the same `Commands`+`CommandQueue` pattern `setup::
+        // right_column_tests` already established for the identical need.
+        let font = Handle::<Font>::default();
+        let mut queue = CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            commands.spawn(Node::default()).with_children(|parent| {
+                crate::app::panels::spawn_policy_panel(parent, &font);
+            });
+        }
+        queue.apply(&mut world);
 
         // A few real in-game days, through the actual per-frame system
         // (`sim_control::advance_simulation`) - populates `EventLog` with

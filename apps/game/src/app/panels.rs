@@ -75,8 +75,8 @@ use super::input::MENU_ITEMS;
 use super::map_mode::MapModeRes;
 use super::setup::{text_font, RIGHT_COLUMN_WIDTH};
 use super::{
-    ActiveBranch, ActiveGood, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion, SelectedUnits, SimRes,
-    SpeedRes,
+    ActiveBranch, ActiveGood, ActiveResearchAxis, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion,
+    SelectedUnits, SimRes, SpeedRes,
 };
 use crate::action_codec::action_error_ja;
 use crate::sim_driver::Speed;
@@ -1552,18 +1552,31 @@ pub(super) fn spawn_policy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &H
             });
             panel.spawn((Text::new(String::new()), text_font(10.0, font), TextColor(TEXT_REASON), PolicyFocusReasonText));
 
-            // Stage 12C (docs/phase12-spec.md §3 "画面で研究が見える"):
-            // read-only for now (`docs/phase12-spec.md`'s own acceptance bar
-            // for this stage asks only that research be *visible*, not that
-            // the player edit it here - `HeuristicAgent::set_research_
-            // priority` and the RL action table (`Action::
-            // SetResearchAllocation`) are this stage's own answer for who
-            // sets it; a human `--play` faction reaching the same knob
-            // through this panel is a real gap worth a second look, but
-            // adding a fourth `PolicyField`-style tab/step-button rig here
-            // to close it is exactly the kind of unrequested abstraction
-            // docs/conventions.md §1 asks to raise rather than build, so
-            // this stage stops at display).
+            // Stage 12C follow-up: display-only was Stage 12C's own scope
+            // (docs/phase12-spec.md §3 "画面で研究が見える" asks only that
+            // research be *visible*), but a `--play`ed human is otherwise
+            // the only one of CLAUDE.md's four agent kinds (human/
+            // heuristic/LLM/RL) with no way to set `Action::
+            // SetResearchAllocation` - `HeuristicAgent::set_research_
+            // priority` and the RL action table already reach it. Closed
+            // with `ActiveResearchAxis` - `ActiveGood`'s exact target-
+            // selector pattern (`対象品目 [G で切替]:` above), not a fourth
+            // `PolicyField`-style enum (research is keyed by `ResearchAxis`,
+            // not `Good`, so it cannot share that match arm - inventing a
+            // generic field abstraction just to unify the two would be the
+            // unrequested abstraction docs/conventions.md §1 warns against,
+            // not this small bespoke row).
+            panel.spawn((Text::new("対象軸 [R で切替]:"), text_font(11.0, font), TextColor(Color::srgb(0.8, 0.82, 0.85))));
+            panel.spawn(row_node()).with_children(|row| {
+                row.spawn((Text::new(String::new()), text_font(12.0, font), TextColor(TEXT_ENABLED), ResearchWeightText));
+                row.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), ResearchStepButton { increase: false })).with_children(|b| {
+                    b.spawn((Text::new("-"), text_font(12.0, font), TextColor(TEXT_ENABLED)));
+                });
+                row.spawn((Button, button_node(), BackgroundColor(COLOR_ENABLED), ResearchStepButton { increase: true })).with_children(|b| {
+                    b.spawn((Text::new("+"), text_font(12.0, font), TextColor(TEXT_ENABLED)));
+                });
+            });
+
             panel.spawn((Text::new("研究:"), text_font(11.0, font), TextColor(Color::srgb(0.8, 0.82, 0.85))));
             panel.spawn((Text::new(String::new()), text_font(11.0, font), TextColor(TEXT_ENABLED), ResearchInfoText));
 
@@ -1572,11 +1585,31 @@ pub(super) fn spawn_policy_panel(parent: &mut ChildSpawnerCommands<'_>, font: &H
 }
 
 /// Stage 12C: displays `Faction::research_progress`/`research_allocation`
-/// for all three `research::ResearchAxis`, one line per axis - the read-only
-/// counterpart to the other `Policy*` value texts above (see `spawn_policy_
-/// panel`'s call site doc for why this one has no step buttons).
+/// for all three `research::ResearchAxis`, one line per axis - unchanged by
+/// the Stage 12C follow-up below; still useful to see every axis's progress
+/// at once even though only the `ActiveResearchAxis`-selected one is
+/// editable at a time.
 #[derive(Component)]
 pub(super) struct ResearchInfoText;
+
+/// Stage 12C follow-up: the label+value half of the research row -
+/// `PolicyValueText`'s exact role, but for `Faction::research_allocation
+/// [ActiveResearchAxis]` instead of a `PolicyField`. Recomputed every frame
+/// in `sync_policy_panel` from live state (current axis *and* current
+/// weight) - never baked in at spawn time, matching every other value text
+/// in this panel (docs/conventions.md §6 "発令時点の値を焼き込まない").
+#[derive(Component)]
+pub(super) struct ResearchWeightText;
+
+/// `PolicyStepButton`'s exact shape, minus the `field`/`good` targeting -
+/// there is only one research row, and which axis it acts on comes from
+/// `ActiveResearchAxis` (read fresh by both `sync_policy_panel` and
+/// `handle_policy_button_clicks`), not from anything this component itself
+/// carries.
+#[derive(Component, Clone, Copy)]
+pub(super) struct ResearchStepButton {
+    increase: bool,
+}
 
 #[derive(Component)]
 pub(super) struct PolicyRejectionText;
@@ -1588,26 +1621,31 @@ pub(super) fn sync_policy_panel(
     policy: Res<PolicyPanel>,
     diplomacy: Res<DiplomacyPanel>,
     active_good: Res<ActiveGood>,
+    active_research_axis: Res<ActiveResearchAxis>,
     rejection: Res<LastRejection>,
     mut root: Query<(&mut Visibility, &mut Node), With<PolicyPanelRoot>>,
     mut good_tabs: Query<(&GoodTabButton, &mut BackgroundColor)>,
     mut value_texts: Query<
         (&PolicyValueText, &mut Text, &mut TextColor),
-        (Without<PolicyRejectionText>, Without<PolicyFocusReasonText>, Without<ResearchInfoText>),
+        (Without<PolicyRejectionText>, Without<PolicyFocusReasonText>, Without<ResearchInfoText>, Without<ResearchWeightText>),
     >,
     mut step_buttons: Query<(&PolicyStepButton, &mut BackgroundColor), Without<GoodTabButton>>,
     mut focus_buttons: Query<(&FocusButton, &mut BackgroundColor), (Without<GoodTabButton>, Without<PolicyStepButton>)>,
     mut focus_reason: Query<
         &mut Text,
-        (With<PolicyFocusReasonText>, Without<PolicyValueText>, Without<PolicyRejectionText>, Without<ResearchInfoText>),
+        (With<PolicyFocusReasonText>, Without<PolicyValueText>, Without<PolicyRejectionText>, Without<ResearchInfoText>, Without<ResearchWeightText>),
     >,
     mut rejection_text: Query<
         &mut Text,
-        (With<PolicyRejectionText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<ResearchInfoText>),
+        (With<PolicyRejectionText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<ResearchInfoText>, Without<ResearchWeightText>),
     >,
     mut research_text: Query<
         &mut Text,
-        (With<ResearchInfoText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<PolicyRejectionText>),
+        (With<ResearchInfoText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<PolicyRejectionText>, Without<ResearchWeightText>),
+    >,
+    mut research_weight_text: Query<
+        &mut Text,
+        (With<ResearchWeightText>, Without<PolicyValueText>, Without<PolicyFocusReasonText>, Without<PolicyRejectionText>, Without<ResearchInfoText>),
     >,
 ) {
     let Ok((mut visibility, mut node)) = root.single_mut() else { return };
@@ -1684,15 +1722,28 @@ pub(super) fn sync_policy_panel(
             .collect();
         text.0 = lines.join("\n");
     }
+
+    // Stage 12C follow-up: the interactive counterpart to the read-only
+    // block above - `PolicyValueText`'s exact "label plus live value" shape,
+    // but naming which axis is current (`ActiveResearchAxis`) since that,
+    // unlike `ActiveGood`, has no clickable tab row of its own to show it.
+    if let Ok(mut text) = research_weight_text.single_mut() {
+        let axis = active_research_axis.0;
+        let weight = faction.research_allocation[axis.index()].get();
+        text.0 = format!("研究配分 [\u{60}/\u{5c}]（対象:{}）: {:.2}", axis.label(), weight);
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_policy_button_clicks(
     mut sim: ResMut<SimRes>,
     player: Res<PlayerFaction>,
     mut active_good: ResMut<ActiveGood>,
+    active_research_axis: Res<ActiveResearchAxis>,
     good_tabs: Query<(&Interaction, &GoodTabButton), Changed<Interaction>>,
     step_buttons: Query<(&Interaction, &PolicyStepButton), Changed<Interaction>>,
     focus_buttons: Query<(&Interaction, &FocusButton), Changed<Interaction>>,
+    research_step_buttons: Query<(&Interaction, &ResearchStepButton), Changed<Interaction>>,
 ) {
     for (interaction, tab) in &good_tabs {
         if *interaction == Interaction::Pressed {
@@ -1720,6 +1771,18 @@ pub(super) fn handle_policy_button_clicks(
             continue;
         }
         sim.0.push_human_action(Action::SetNationalFocus(button.0));
+    }
+    // Stage 12C follow-up: the mouse half of the research row -
+    // `input::keyboard_input`'s `` `/\ `` keys are the keyboard half, same
+    // "current value plus/minus PRIORITY_STEP, clamped" formula.
+    for (interaction, button) in &research_step_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let axis = active_research_axis.0;
+        let cur = sim.0.world().faction(player_faction).research_allocation[axis.index()].get();
+        let step = if button.increase { PRIORITY_STEP } else { -PRIORITY_STEP };
+        sim.0.push_human_action(Action::SetResearchAllocation { axis, weight: (cur + step).clamp(0.0, 1.0) });
     }
 }
 
@@ -2831,8 +2894,9 @@ mod tests {
         world.insert_resource(PlayerFaction(Some(FactionId(0))));
         world.insert_resource(ActiveGood::default());
         world.insert_resource(ActiveBranch::default());
+        world.insert_resource(ActiveResearchAxis::default());
         world.spawn((Interaction::Pressed, PolicyStepButton { field: PolicyField::Conscription, increase: true }));
-        // The other two click sources `handle_policy_button_clicks` reads -
+        // The other three click sources `handle_policy_button_clicks` reads -
         // spawned empty so the system's other `Query`s simply match nothing.
 
         run(&mut world, handle_policy_button_clicks);
@@ -2845,6 +2909,49 @@ mod tests {
             "the click must queue SetConscription at exactly one step above the pre-click value"
         );
         assert!(sim.0.last_human_action_errors().is_empty());
+    }
+
+    /// Regression guard for the policy panel's research `-` button
+    /// (`handle_policy_button_clicks`'s `research_step_buttons` loop): must
+    /// enqueue `SetResearchAllocation` for whichever axis `ActiveResearchAxis`
+    /// currently targets, one `PRIORITY_STEP` below its pre-click value, and
+    /// that action must actually move `Faction::research_allocation` once
+    /// applied - seeing the click enqueue the right `Action` is not by
+    /// itself evidence the mechanism works end to end. Checked this fails
+    /// when broken: temporarily swapped `PRIORITY_STEP` for `-PRIORITY_STEP`
+    /// in the `step` computation (the same sign flip as the increase branch)
+    /// - both assertions below then fail (queues/applies an increase
+    /// instead), restored after.
+    #[test]
+    fn research_step_button_click_enqueues_and_applies_a_decrease_for_the_active_axis() {
+        let axis = ALL_RESEARCH_AXES[2];
+        let mut world = World::new();
+        let sim = player_sim();
+        let current = sim.0.world().faction(FactionId(0)).research_allocation[axis.index()].get();
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveResearchAxis(axis));
+        world.spawn((Interaction::Pressed, ResearchStepButton { increase: false }));
+        // The other three click sources `handle_policy_button_clicks` reads -
+        // spawned empty so the system's other `Query`s simply match nothing.
+
+        run(&mut world, handle_policy_button_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        let expected = (current - PRIORITY_STEP).clamp(0.0, 1.0);
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::SetResearchAllocation { axis, weight: expected }],
+            "the click must queue SetResearchAllocation at exactly one step below the pre-click value, for the currently active axis"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty());
+        assert_eq!(
+            sim.0.world().faction(FactionId(0)).research_allocation[axis.index()].get(),
+            expected,
+            "the faction's real research_allocation must have actually moved, not just been queued"
+        );
     }
 
     /// Regression guard for the diplomacy panel's target tabs
