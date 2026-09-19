@@ -172,6 +172,7 @@ name = "archipelago-headless"
 version = "0.1.0"
 dependencies = [
  "archipelago-agents",
+ "archipelago-api",
  "archipelago-sim",
 ]
 

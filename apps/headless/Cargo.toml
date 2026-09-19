@@ -13,3 +13,15 @@ archipelago-agents = { path = "../../crates/agents" }
 # `MockBackend`/`ScriptedBackend`, both defined in `archipelago-agents`
 # itself. See `crates/llm/src/lib.rs`'s module doc for why nothing in this
 # workspace depends on that crate.
+
+[dev-dependencies]
+# Stage B (docs/soak-spec.md §2, `tests/soak.rs`'s `valid-fuzz`/`chaos-fuzz`
+# modes): the fuzz action generator builds every action through
+# `archipelago_api::action_codec`'s `schema()`/`action_from_value` - the same
+# pair the RL action table (`python/env/schema.py`) and every other external
+# caller (`GET /schema`, `POST /action`) go through - rather than a second,
+# hand-maintained list of `Action` variants (soak-spec.md §2: "同じ源から
+# 引く"). `archipelago-api` itself has zero external dependencies (its own
+# `Cargo.toml`), so this stays a *test-only* dependency of a binary-only
+# crate, never something `archipelago-headless` itself links against.
+archipelago-api = { path = "../../crates/api" }

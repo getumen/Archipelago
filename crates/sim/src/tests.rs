@@ -4392,6 +4392,40 @@ fn trade_agreement_moves_surplus_to_deficit() {
 }
 
 /// `opinion` (docs/phase3-spec.md "関係": "-100..100 の非対称な感情"):
+/// 存在しない勢力 id を載せた `Action::BreakTreaty` は**拒否される。
+/// パニックしない。**
+///
+/// `action` モジュールの doc 自身が「Invalid actions are rejected, never
+/// panicked on」と書いている。実際には `apply_break_treaty` にだけ境界検査が
+/// 無く、`Diplomacy::has_treaty` がフラットな `Vec` をそのまま添字アクセス
+/// して落ちていた。**HTTP API からも到達する**（`action_codec` は wire 上の
+/// id に上限を置かない）。
+///
+/// `apps/headless/tests/soak.rs` の chaos-fuzz が japan47 seed 1 day 353 で
+/// 見つけた（`len is 36 but the index is 4294967295`）。**ヒューリスティック
+/// AI は `BreakTreaty` を一度も出さない**ので、通常の対戦では何 seed 回しても
+/// 露出しない——soak-spec.md §0 の自己遮蔽そのものである。
+///
+/// fuzz が再発見してくれることに依存させないため、名前のついた回帰として
+/// 固定する。境界検査を外すと `index out of bounds` で落ちることを確認済み。
+#[test]
+fn break_treaty_with_a_nonexistent_faction_is_rejected_not_a_panic() {
+    let mut world = scenario::build_world();
+    let a = FactionId(0);
+    let beyond = FactionId(u32::MAX);
+    let past_end = FactionId(world.factions.len() as u32);
+
+    for bogus in [beyond, past_end] {
+        let err = action::apply_action(
+            &mut world,
+            a,
+            Action::BreakTreaty { with: bogus, treaty: Treaty::TradeAgreement },
+        )
+        .expect_err("a faction id that names nobody must be rejected");
+        assert_eq!(err, ActionError::InvalidValue, "bogus id {bogus:?} must be InvalidValue");
+    }
+}
+
 /// `Action::BreakTreaty` must damage it, never improve or leave it
 /// unchanged - the opposite of what accepting a treaty does.
 #[test]

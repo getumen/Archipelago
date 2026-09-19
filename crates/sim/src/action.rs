@@ -1398,6 +1398,25 @@ fn apply_break_treaty(
     if with == faction || treaty == Treaty::Ceasefire {
         return Err(ActionError::InvalidValue);
     }
+    // **境界検査。** これが無く、存在しない勢力 id がそのまま
+    // `Diplomacy::has_treaty` に渡ってフラットな `Vec` を添字アクセスし、
+    // パニックしていた。このモジュールの doc 自身が
+    // 「Invalid actions are rejected, never panicked on」と書いている。
+    //
+    // 兄弟の `apply_declare_war`・`apply_propose_treaty`・`apply_propose_nl`
+    // は同じ検査を持っていた。`AcceptTreaty`/`RejectTreaty`/`RespondToNl` は
+    // pending の照合を通るので構造上安全。**7 つのうちここだけが無防備
+    // だった**——全部列挙して 1 つずつ確認した。
+    //
+    // 見つけたのは `apps/headless/tests/soak.rs` の chaos-fuzz。
+    // japan47 seed 1 day 353 で `BreakTreaty { with: FactionId(4294967295) }`
+    // を出し、`len is 36 but the index is 4294967295` で落ちた。
+    // **HTTP API からも到達する**（`action_codec` は wire 上の id に上限を
+    // 置かない）。ヒューリスティック AI は `BreakTreaty` を一度も出さないので、
+    // 通常の対戦を何 seed 回しても露出しない。
+    if world.factions.get(with.index()).is_none_or(|f| !f.alive) {
+        return Err(ActionError::InvalidValue);
+    }
     if !world.diplomacy.has_treaty(faction, with, treaty) {
         return Err(ActionError::InvalidValue);
     }
