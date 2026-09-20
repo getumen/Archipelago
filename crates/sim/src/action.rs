@@ -1035,16 +1035,51 @@ fn apply_reinforce(
         // order multiple *different* arriving units get processed in here is
         // not a "fixed priority" in the sense this project's conventions
         // forbid.
-        match domain {
-            Domain::Land => {
-                logistics::commit_instantaneous_land_grant(world, unit_id);
-            }
-            Domain::Sea => {
-                logistics::commit_instantaneous_sea_grant(world, unit_id);
-            }
-            Domain::Air => {
-                logistics::commit_instantaneous_air_grant(world, unit_id);
-            }
+        // Conservation check (soak-spec.md stage C): capture exactly what
+        // `instantaneous_arms_delivery`/`instantaneous_fleet_arms_delivery`/
+        // `instantaneous_air_arms_delivery` peeked a moment ago (`avail_peek`,
+        // debug-only - re-deriving it is the same on-demand-not-threaded
+        // style this file's own comment above already accepts for `ratio`/
+        // `budget`) and compare it against what the matching
+        // `commit_instantaneous_*_grant` call actually deducts from the real,
+        // shared `world.supply_leftover` for this exact same claim. Nothing
+        // mutates that shared leftover between the peek above and the commit
+        // below, so a correct implementation must derive numerically the same
+        // figure both times; a caller (`avail_peek`, folded into `ratio`/
+        // `budget` above) credited with *more* than the ledger the commit
+        // actually spent (`granted`) says it was given is exactly Phase 9's
+        // "N simultaneous arrivals" defect (CLAUDE.md '繰り返し踏んだ欠陥' #3,
+        // 「1 tick の許容量は減る予算として持つ。残量に比率を掛け直す実装は
+        // 行動の連打で破られる」) - each arrival trusting a peek that has
+        // drifted from what the shared pool's own commit path is actually
+        // spending.
+        #[cfg(debug_assertions)]
+        let avail_peek = match domain {
+            Domain::Land => logistics::land_unit_supply_avail(world, unit_id),
+            Domain::Sea => naval::fleet_unit_supply_avail(world, unit_id),
+            Domain::Air => air::air_unit_supply_avail(world, unit_id),
+        };
+        let granted = match domain {
+            Domain::Land => logistics::commit_instantaneous_land_grant(world, unit_id),
+            Domain::Sea => logistics::commit_instantaneous_sea_grant(world, unit_id),
+            Domain::Air => logistics::commit_instantaneous_air_grant(world, unit_id),
+        };
+        // `granted`'s only reader is the debug-only conservation check right
+        // below - this keeps it a real, named binding (rather than folding
+        // the match back into a discarded statement the way this block used
+        // to be) without an "unused variable" warning in a release build,
+        // where that check compiles away entirely.
+        let _ = granted;
+        #[cfg(debug_assertions)]
+        {
+            let tol = avail_peek.abs().max(granted.abs()) * 1e-3 + 1e-3;
+            assert!(
+                avail_peek <= granted + tol,
+                "apply_reinforce: pre-commit peek of unit {unit_id:?}'s own network availability ({avail_peek}) \
+                 exceeds what commit_instantaneous_*_grant's own ledger says the shared per-tick supply leftover \
+                 actually granted for the identical claim ({granted}) - peek and commit must agree since nothing \
+                 mutates the shared leftover between them"
+            );
         }
         let unit = world.unit_mut(unit_id);
         unit.arms_delivery = ratio;

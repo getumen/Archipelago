@@ -204,6 +204,48 @@ pub(crate) struct SupplyLeftover {
     residual_line_faction: Vec<Vec<f32>>,
 }
 
+/// Whether every individual resource `instantaneous_grant` can draw from
+/// shrank (or held steady), comparing `before` against `after` entry by
+/// entry - used only by the `debug_assert!` conservation check in
+/// `commit_instantaneous_land_grant`/`_sea_grant`/`_air_grant` immediately
+/// below. `instantaneous_grant`'s own per-resource decrement (`(*budget -
+/// granted).max(0.0)`, this module's own `instantaneous_grant` body) can only
+/// ever shrink each individual entry it touches, never grow one - so every
+/// entry is, by construction, monotonically non-increasing across any single
+/// correct call that spends from `world.supply_leftover`. This is CLAUDE.md's
+/// own "繰り返し踏んだ欠陥" #3 stated as a checked invariant, not merely an
+/// incidental property: 「1 tick の許容量は減る予算として持つ。残量に比率を
+/// 掛け直す実装は行動の連打で破られる」.
+///
+/// **`codex review` P2 fix:** the first cut of this summed every entry into
+/// one scalar and compared the two totals. `residual_line_faction` holds
+/// `f32::INFINITY` for a non-`Sea` line under no active air interdiction
+/// (`TransportGraph::line_faction_factor`'s own doc - the common case for
+/// every `Rail`/`Road` line in every shipped scenario, since none commits
+/// enough air power to push any region's `air_superiority` to the interdicting
+/// threshold most of the time). On any scenario with even one such line, that
+/// sum is `+inf` on both sides of every call, and `inf <= inf + tol` is
+/// vacuously true regardless of what the *finite* entries did. Comparing
+/// entry-by-entry instead of summing means an infinite `before` simply passes
+/// (nothing to over-grant past infinity) without swallowing a finite entry
+/// elsewhere that actually grew.
+#[cfg(debug_assertions)]
+fn leftover_did_not_grow(before: &SupplyLeftover, after: &SupplyLeftover) -> bool {
+    fn ok(before: f32, after: f32) -> bool {
+        if !before.is_finite() {
+            return true;
+        }
+        after <= before + before.abs() * 1e-4 + SUPPLY_FLOW_EPSILON * 10.0
+    }
+    before.vertex_budget.iter().zip(&after.vertex_budget).all(|(&b, &a)| ok(b, a))
+        && before.residual_line.iter().zip(&after.residual_line).all(|(&b, &a)| ok(b, a))
+        && before
+            .residual_line_faction
+            .iter()
+            .zip(&after.residual_line_faction)
+            .all(|(bl, al)| bl.iter().zip(al).all(|(&b, &a)| ok(b, a)))
+}
+
 /// A single arriving unit's own grant, sized against `leftover`'s *current*
 /// residuals and (always) spent back down against `leftover` by exactly what
 /// it grants - the arrival-day counterpart of `compute_transport_flow`'s own
@@ -480,26 +522,59 @@ pub(crate) fn instantaneous_air_avail(world: &World, unit_id: UnitId) -> f32 {
 /// - is pinned by `simultaneous_arrivals_share_one_ticks_allocation_not_n_
 /// times_it`.
 pub(crate) fn commit_instantaneous_land_grant(world: &mut World, unit_id: UnitId) -> f32 {
+    // Conservation check (soak-spec.md stage C): snapshot the *persisted*
+    // `world.supply_leftover` before this call touches it at all, and compare
+    // against what it holds after being written back below - see
+    // `leftover_did_not_grow`'s own doc for why every individual entry can
+    // only ever shrink across a single correct call. Debug-only: `Clone`ing
+    // the whole structure just to check it is not a cost release play pays.
+    #[cfg(debug_assertions)]
+    let before = world.supply_leftover.clone();
     let mut leftover = std::mem::take(&mut world.supply_leftover);
     let granted = instantaneous_land_grant(world, unit_id, &mut leftover);
     world.supply_leftover = leftover;
+    #[cfg(debug_assertions)]
+    assert!(
+        leftover_did_not_grow(&before, &world.supply_leftover),
+        "commit_instantaneous_land_grant: shared per-tick supply leftover grew instead of shrinking - a tick's \
+         allowance must be held as a decreasing budget (CLAUDE.md '繰り返し踏んだ欠陥' #3), never re-derived fresh \
+         mid-tick"
+    );
     granted
 }
 
 /// Sea-domain twin of `commit_instantaneous_land_grant` immediately above.
 pub(crate) fn commit_instantaneous_sea_grant(world: &mut World, unit_id: UnitId) -> f32 {
+    #[cfg(debug_assertions)]
+    let before = world.supply_leftover.clone();
     let mut leftover = std::mem::take(&mut world.supply_leftover);
     let granted = instantaneous_sea_grant(world, unit_id, &mut leftover);
     world.supply_leftover = leftover;
+    #[cfg(debug_assertions)]
+    assert!(
+        leftover_did_not_grow(&before, &world.supply_leftover),
+        "commit_instantaneous_sea_grant: shared per-tick supply leftover grew instead of shrinking - a tick's \
+         allowance must be held as a decreasing budget (CLAUDE.md '繰り返し踏んだ欠陥' #3), never re-derived fresh \
+         mid-tick"
+    );
     granted
 }
 
 /// Air-domain twin of `commit_instantaneous_land_grant`/`commit_
 /// instantaneous_sea_grant` immediately above (Stage 10A).
 pub(crate) fn commit_instantaneous_air_grant(world: &mut World, unit_id: UnitId) -> f32 {
+    #[cfg(debug_assertions)]
+    let before = world.supply_leftover.clone();
     let mut leftover = std::mem::take(&mut world.supply_leftover);
     let granted = instantaneous_air_grant(world, unit_id, &mut leftover);
     world.supply_leftover = leftover;
+    #[cfg(debug_assertions)]
+    assert!(
+        leftover_did_not_grow(&before, &world.supply_leftover),
+        "commit_instantaneous_air_grant: shared per-tick supply leftover grew instead of shrinking - a tick's \
+         allowance must be held as a decreasing budget (CLAUDE.md '繰り返し踏んだ欠陥' #3), never re-derived fresh \
+         mid-tick"
+    );
     granted
 }
 

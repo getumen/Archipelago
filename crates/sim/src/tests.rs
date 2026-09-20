@@ -11718,6 +11718,106 @@ fn a_region_keeps_working_while_any_node_of_that_kind_stands() {
     );
 }
 
+/// soak-spec.md stage C: the test immediately above proves the *mechanism*
+/// (`port_node_operational`/`apply_recruit`'s `Domain::Air` arm) judges every
+/// node of a kind, not just the lowest-id one - but it only ever does so
+/// against a `World` two nodes were pushed onto **at runtime**, by the test
+/// itself. CLAUDE.md's own account of this defect calls it out as hit *four*
+/// times (imports, recruitment, AI redeploy, the client's strike panel) and
+/// currently untestable **end-to-end**, because "no shipped scenario
+/// declares two same-kind nodes in one region, and no action creates or
+/// reassigns transport-node topology at runtime" - so nothing exercises this
+/// through the one path every one of those four call sites is actually
+/// reached from in a real game: `Scenario::validate`/`load_file` loading a
+/// scenario a human or the map data pipeline actually wrote.
+///
+/// `crates/sim/tests/fixtures/duplicate_nodes.json` closes that gap: it is
+/// `scenarios/mvp.json` verbatim plus two extra transport nodes
+/// (`hokkaido_port_2`, `hokkaido_airfield_2`), so 北海道 declares two `Port`
+/// nodes and two `Airfield` nodes. It lives under `crates/sim/tests/`, not
+/// `scenarios/` - `docs/soak-spec.md`'s own scenarios are named and explained
+/// in `CLAUDE.md`'s "3 つの地図" table, and this file is neither balanced nor
+/// meant to be played; keeping it out of `scenarios/` means it can never be
+/// picked up by a `--scenario` tab-complete, a "for every shipped scenario"
+/// sweep (`shipped_scenarios_all_declare_transport_networks`'s own hardcoded
+/// path list, for instance), or CLAUDE.md's own documented map table, while
+/// still going through the exact same `Scenario::validate`/`load_str` this
+/// test calls below - "load like any other" per this stage's own brief.
+///
+/// This re-asserts the two claims the test above already pins (a region with
+/// its lowest-id `Port`/`Airfield` wrecked but a second one standing keeps
+/// reporting operational, and can still raise a fleet/squadron there), now
+/// reached by loading that real file rather than mutating an in-memory
+/// `World` - proving the defect shape is reachable through the scenario
+/// pipeline itself, not just a hand-built test fixture. `Domain::Sea`
+/// recruiting is added here too (the sibling of `Domain::Air`, sharing the
+/// exact same `port_node_operational` gate `apply_recruit` is documented to
+/// use), which the runtime-mutation test above never happened to cover.
+///
+/// **Confirmed this test can fail** the same two ways the test above
+/// documents its own two "Confirmed this can fail" reversions do: reverting
+/// `port_node_operational` to `self.port_node(region).is_some_and(|n|
+/// n.operational())` trips the first `assert!` (第二港/第二飛行場 are intact,
+/// but 北海道's *lowest-id* port/airfield were wrecked below, so the buggy
+/// single-node read reports "not operational"); reverting `apply_recruit`'s
+/// `Domain::Air` arm to `world.airfield_node(region).filter(|n|
+/// n.operational())` (existence-then-operational-check of the lowest-id node
+/// alone, instead of searching every airfield for one that's operational)
+/// turns the `RecruitUnit`/`Domain::Air` assertion into `Err(NoAirfield)`.
+/// Both reversions were applied and reverted one at a time to confirm this;
+/// restored before committing either time.
+#[test]
+fn a_region_from_a_real_scenario_keeps_working_while_any_node_of_that_kind_stands() {
+    let json_text = std::fs::read_to_string("tests/fixtures/duplicate_nodes.json")
+        .expect("crates/sim/tests/fixtures/duplicate_nodes.json must exist and be readable");
+    let scenario = scenario::Scenario::parse(&json_text).expect("duplicate_nodes.json must parse");
+    scenario.validate().expect("duplicate_nodes.json must be a valid scenario - two nodes of the same kind in one region is allowed by docs/phase9-spec.md");
+    let mut world = scenario::load_str(&json_text).expect("duplicate_nodes.json must load");
+
+    let faction = FactionId(0); // 東方連合 owns 北海道, this fixture's duplicated region.
+    let region = world.regions_of(faction)[0];
+    assert_eq!(world.region(region).name, "北海道", "sanity: this fixture's duplicated region is still the first one 東方連合 owns");
+
+    let ports: Vec<_> = world.transport_nodes.iter().filter(|n| n.region == region && n.kind == TransportNodeKind::Port).map(|n| n.id).collect();
+    let airfields: Vec<_> = world.transport_nodes.iter().filter(|n| n.region == region && n.kind == TransportNodeKind::Airfield).map(|n| n.id).collect();
+    assert_eq!(ports.len(), 2, "sanity: the fixture must actually declare two Port nodes for 北海道");
+    assert_eq!(airfields.len(), 2, "sanity: the fixture must actually declare two Airfield nodes for 北海道");
+
+    // Wreck the *lowest-id* node of each kind (`hokkaido_port`/
+    // `hokkaido_airfield`, declared before the fixture's added
+    // `hokkaido_port_2`/`hokkaido_airfield_2`) - the one a buggy
+    // lowest-id-only lookup would consult.
+    for &id in [ports[0], airfields[0]].iter() {
+        world.transport_nodes[id.index()].condition = Condition::new(0.0).unwrap();
+    }
+
+    assert!(
+        world.port_node_operational(region),
+        "a region loaded from a real scenario, whose second port is undamaged, must still count as having a \
+         working port"
+    );
+    assert!(
+        world.airfield_node_operational(region),
+        "a region loaded from a real scenario, whose second airfield is undamaged, must still count as having a \
+         working airfield"
+    );
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Infantry.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Naval.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+    assert_eq!(
+        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Air, branch: military::Branch::Infantry }),
+        Ok(()),
+        "a squadron must still be raisable at 北海道's surviving airfield, loaded from a real scenario file"
+    );
+    assert_eq!(
+        action::apply_action(&mut world, faction, Action::RecruitUnit { region, domain: Domain::Sea, branch: military::Branch::Infantry }),
+        Ok(()),
+        "a fleet must still be raisable at 北海道's surviving port, loaded from a real scenario file"
+    );
+}
+
 #[test]
 fn recruit_air_unit_at_a_struck_airfield_is_rejected_until_repaired() {
     let mut world = scenario::build_world();

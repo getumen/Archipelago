@@ -1,0 +1,914 @@
+{
+  "regions": [
+    {
+      "id": "hokkaido",
+      "name": "北海道",
+      "position": [
+        1034.98,
+        897.24
+      ],
+      "terrain": "plain",
+      "population": 510.0,
+      "capacity": {
+        "food": 12.0,
+        "energy": 2.0,
+        "steel": 0.5,
+        "machinery": 0.3,
+        "munitions": 0.2,
+        "infantry": 0.0,
+        "armour": 0.18,
+        "artillery": 0.165,
+        "naval": 0.7812,
+        "aircraft": 0.0847
+      },
+      "infrastructure": 0.55,
+      "port": 1.0,
+      "links": [
+        {
+          "to": "kita_tohoku",
+          "kind": "strait",
+          "strait_zone": "hoppou"
+        }
+      ]
+    },
+    {
+      "id": "kita_tohoku",
+      "name": "北東北",
+      "position": [
+        972.37,
+        565.51
+      ],
+      "terrain": "hill",
+      "population": 330.0,
+      "capacity": {
+        "food": 9.0,
+        "energy": 1.5,
+        "steel": 0.5,
+        "machinery": 0.3,
+        "munitions": 0.2,
+        "infantry": 0.0,
+        "armour": 0.18,
+        "artillery": 0.165,
+        "naval": 0.4687,
+        "aircraft": 0.0847
+      },
+      "infrastructure": 0.5,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "hokkaido",
+          "kind": "strait",
+          "strait_zone": "hoppou"
+        },
+        {
+          "to": "minami_tohoku",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "minami_tohoku",
+      "name": "南東北",
+      "position": [
+        963.55,
+        343.61
+      ],
+      "terrain": "hill",
+      "population": 550.0,
+      "capacity": {
+        "food": 8.0,
+        "energy": 2.5,
+        "steel": 1.5,
+        "machinery": 0.8,
+        "munitions": 0.5,
+        "infantry": 0.2,
+        "armour": 0.505,
+        "artillery": 0.475,
+        "naval": 0.5468,
+        "aircraft": 0.2259
+      },
+      "infrastructure": 0.65,
+      "port": 0.7,
+      "links": [
+        {
+          "to": "kita_tohoku",
+          "kind": "rail"
+        },
+        {
+          "to": "kanto",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "kanto",
+      "name": "関東",
+      "position": [
+        892.21,
+        109.89
+      ],
+      "terrain": "urban",
+      "population": 4300.0,
+      "capacity": {
+        "food": 3.0,
+        "energy": 4.0,
+        "steel": 3.5,
+        "machinery": 6.5,
+        "munitions": 3.0,
+        "infantry": 3.0,
+        "armour": 2.8,
+        "artillery": 1.475,
+        "naval": 1.1718,
+        "aircraft": 1.8355
+      },
+      "infrastructure": 1.0,
+      "port": 1.5,
+      "links": [
+        {
+          "to": "minami_tohoku",
+          "kind": "rail"
+        },
+        {
+          "to": "shinetsu_hokuriku",
+          "kind": "rail"
+        },
+        {
+          "to": "tokai",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "shinetsu_hokuriku",
+      "name": "信越・北陸",
+      "position": [
+        696.52,
+        177.56
+      ],
+      "terrain": "mountain",
+      "population": 480.0,
+      "capacity": {
+        "food": 6.0,
+        "energy": 3.0,
+        "steel": 1.0,
+        "machinery": 0.7,
+        "munitions": 0.3,
+        "infantry": 0.0,
+        "armour": 0.395,
+        "artillery": 0.31,
+        "naval": 0.3906,
+        "aircraft": 0.1977
+      },
+      "infrastructure": 0.55,
+      "port": 0.5,
+      "links": [
+        {
+          "to": "kanto",
+          "kind": "rail"
+        },
+        {
+          "to": "tokai",
+          "kind": "road"
+        },
+        {
+          "to": "kinki",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "tokai",
+      "name": "東海",
+      "position": [
+        650.17,
+        7.79
+      ],
+      "terrain": "plain",
+      "population": 1500.0,
+      "capacity": {
+        "food": 4.0,
+        "energy": 2.0,
+        "steel": 3.0,
+        "machinery": 7.0,
+        "munitions": 2.0,
+        "infantry": 2.0,
+        "armour": 2.9,
+        "artillery": 1.15,
+        "naval": 0.9374,
+        "aircraft": 1.9767
+      },
+      "infrastructure": 0.9,
+      "port": 1.2,
+      "links": [
+        {
+          "to": "kanto",
+          "kind": "rail"
+        },
+        {
+          "to": "shinetsu_hokuriku",
+          "kind": "road"
+        },
+        {
+          "to": "kinki",
+          "kind": "rail"
+        }
+      ]
+    },
+    {
+      "id": "kinki",
+      "name": "近畿",
+      "position": [
+        506.25,
+        -31.17
+      ],
+      "terrain": "urban",
+      "population": 2200.0,
+      "capacity": {
+        "food": 2.0,
+        "energy": 2.5,
+        "steel": 3.5,
+        "machinery": 4.5,
+        "munitions": 2.0,
+        "infantry": 1.5,
+        "armour": 2.1,
+        "artillery": 1.275,
+        "naval": 1.0155,
+        "aircraft": 1.2708
+      },
+      "infrastructure": 0.95,
+      "port": 1.3,
+      "links": [
+        {
+          "to": "shinetsu_hokuriku",
+          "kind": "rail"
+        },
+        {
+          "to": "tokai",
+          "kind": "rail"
+        },
+        {
+          "to": "chugoku",
+          "kind": "rail"
+        },
+        {
+          "to": "shikoku",
+          "kind": "strait",
+          "strait_zone": "taiheiyo_minami"
+        }
+      ]
+    },
+    {
+      "id": "chugoku",
+      "name": "中国",
+      "position": [
+        276.3,
+        -17.37
+      ],
+      "terrain": "hill",
+      "population": 740.0,
+      "capacity": {
+        "food": 3.5,
+        "energy": 2.0,
+        "steel": 2.5,
+        "machinery": 1.0,
+        "munitions": 0.5,
+        "infantry": 0.0,
+        "armour": 0.725,
+        "artillery": 0.725,
+        "naval": 0.7031,
+        "aircraft": 0.2824
+      },
+      "infrastructure": 0.7,
+      "port": 0.9,
+      "links": [
+        {
+          "to": "kinki",
+          "kind": "rail"
+        },
+        {
+          "to": "shikoku",
+          "kind": "strait",
+          "strait_zone": "seihou"
+        },
+        {
+          "to": "kyushu",
+          "kind": "tunnel"
+        }
+      ]
+    },
+    {
+      "id": "shikoku",
+      "name": "四国",
+      "position": [
+        339.68,
+        -116.61
+      ],
+      "terrain": "hill",
+      "population": 370.0,
+      "capacity": {
+        "food": 4.0,
+        "energy": 0.8,
+        "steel": 0.5,
+        "machinery": 0.4,
+        "munitions": 0.3,
+        "infantry": 0.0,
+        "armour": 0.215,
+        "artillery": 0.185,
+        "naval": 0.4687,
+        "aircraft": 0.113
+      },
+      "infrastructure": 0.6,
+      "port": 0.6,
+      "links": [
+        {
+          "to": "kinki",
+          "kind": "strait",
+          "strait_zone": "taiheiyo_minami"
+        },
+        {
+          "to": "chugoku",
+          "kind": "strait",
+          "strait_zone": "seihou"
+        }
+      ]
+    },
+    {
+      "id": "kyushu",
+      "name": "九州",
+      "position": [
+        29.64,
+        -343.42
+      ],
+      "terrain": "plain",
+      "population": 1300.0,
+      "capacity": {
+        "food": 7.0,
+        "energy": 2.5,
+        "steel": 2.0,
+        "machinery": 1.5,
+        "munitions": 1.5,
+        "infantry": 0.5,
+        "armour": 0.825,
+        "artillery": 0.8,
+        "naval": 1.0937,
+        "aircraft": 0.4236
+      },
+      "infrastructure": 0.75,
+      "port": 1.4,
+      "links": [
+        {
+          "to": "chugoku",
+          "kind": "tunnel"
+        }
+      ]
+    }
+  ],
+  "sea_zones": [
+    {
+      "id": "hoppou",
+      "name": "北方海域",
+      "coast": [
+        "hokkaido",
+        "kita_tohoku"
+      ],
+      "adjacent": [
+        "taiheiyo_kita",
+        "nihonkai"
+      ]
+    },
+    {
+      "id": "taiheiyo_kita",
+      "name": "太平洋北",
+      "coast": [
+        "kita_tohoku",
+        "minami_tohoku",
+        "kanto"
+      ],
+      "adjacent": [
+        "hoppou",
+        "taiheiyo_minami"
+      ]
+    },
+    {
+      "id": "taiheiyo_minami",
+      "name": "太平洋南",
+      "coast": [
+        "kanto",
+        "tokai",
+        "kinki",
+        "shikoku"
+      ],
+      "adjacent": [
+        "taiheiyo_kita",
+        "seihou"
+      ]
+    },
+    {
+      "id": "nihonkai",
+      "name": "日本海",
+      "coast": [
+        "hokkaido",
+        "kita_tohoku",
+        "minami_tohoku",
+        "shinetsu_hokuriku",
+        "chugoku"
+      ],
+      "adjacent": [
+        "hoppou",
+        "seihou"
+      ]
+    },
+    {
+      "id": "seihou",
+      "name": "西方海域",
+      "coast": [
+        "kinki",
+        "chugoku",
+        "shikoku",
+        "kyushu"
+      ],
+      "adjacent": [
+        "taiheiyo_minami",
+        "nihonkai"
+      ]
+    }
+  ],
+  "transport": {
+    "nodes": [
+      {
+        "id": "hokkaido_depot",
+        "name": "北海道 補給拠点",
+        "kind": "depot",
+        "region": "hokkaido"
+      },
+      {
+        "id": "hokkaido_port",
+        "name": "北海道 港",
+        "kind": "port",
+        "region": "hokkaido"
+      },
+      {
+        "id": "kita_tohoku_depot",
+        "name": "北東北 補給拠点",
+        "kind": "depot",
+        "region": "kita_tohoku"
+      },
+      {
+        "id": "kita_tohoku_port",
+        "name": "北東北 港",
+        "kind": "port",
+        "region": "kita_tohoku"
+      },
+      {
+        "id": "minami_tohoku_depot",
+        "name": "南東北 補給拠点",
+        "kind": "depot",
+        "region": "minami_tohoku"
+      },
+      {
+        "id": "minami_tohoku_port",
+        "name": "南東北 港",
+        "kind": "port",
+        "region": "minami_tohoku"
+      },
+      {
+        "id": "kanto_depot",
+        "name": "関東 補給拠点",
+        "kind": "depot",
+        "region": "kanto"
+      },
+      {
+        "id": "kanto_port",
+        "name": "関東 港",
+        "kind": "port",
+        "region": "kanto"
+      },
+      {
+        "id": "shinetsu_hokuriku_depot",
+        "name": "信越・北陸 補給拠点",
+        "kind": "depot",
+        "region": "shinetsu_hokuriku"
+      },
+      {
+        "id": "shinetsu_hokuriku_port",
+        "name": "信越・北陸 港",
+        "kind": "port",
+        "region": "shinetsu_hokuriku"
+      },
+      {
+        "id": "tokai_depot",
+        "name": "東海 補給拠点",
+        "kind": "depot",
+        "region": "tokai"
+      },
+      {
+        "id": "tokai_port",
+        "name": "東海 港",
+        "kind": "port",
+        "region": "tokai"
+      },
+      {
+        "id": "kinki_depot",
+        "name": "近畿 補給拠点",
+        "kind": "depot",
+        "region": "kinki"
+      },
+      {
+        "id": "kinki_port",
+        "name": "近畿 港",
+        "kind": "port",
+        "region": "kinki"
+      },
+      {
+        "id": "chugoku_depot",
+        "name": "中国 補給拠点",
+        "kind": "depot",
+        "region": "chugoku"
+      },
+      {
+        "id": "chugoku_port",
+        "name": "中国 港",
+        "kind": "port",
+        "region": "chugoku"
+      },
+      {
+        "id": "shikoku_depot",
+        "name": "四国 補給拠点",
+        "kind": "depot",
+        "region": "shikoku"
+      },
+      {
+        "id": "shikoku_port",
+        "name": "四国 港",
+        "kind": "port",
+        "region": "shikoku"
+      },
+      {
+        "id": "kyushu_depot",
+        "name": "九州 補給拠点",
+        "kind": "depot",
+        "region": "kyushu"
+      },
+      {
+        "id": "kyushu_port",
+        "name": "九州 港",
+        "kind": "port",
+        "region": "kyushu"
+      },
+      {
+        "id": "hokkaido_airfield",
+        "name": "北海道 飛行場",
+        "kind": "airfield",
+        "region": "hokkaido"
+      },
+      {
+        "id": "kita_tohoku_airfield",
+        "name": "北東北 飛行場",
+        "kind": "airfield",
+        "region": "kita_tohoku"
+      },
+      {
+        "id": "minami_tohoku_airfield",
+        "name": "南東北 飛行場",
+        "kind": "airfield",
+        "region": "minami_tohoku"
+      },
+      {
+        "id": "kanto_airfield",
+        "name": "関東 飛行場",
+        "kind": "airfield",
+        "region": "kanto"
+      },
+      {
+        "id": "shinetsu_hokuriku_airfield",
+        "name": "信越・北陸 飛行場",
+        "kind": "airfield",
+        "region": "shinetsu_hokuriku"
+      },
+      {
+        "id": "tokai_airfield",
+        "name": "東海 飛行場",
+        "kind": "airfield",
+        "region": "tokai"
+      },
+      {
+        "id": "kinki_airfield",
+        "name": "近畿 飛行場",
+        "kind": "airfield",
+        "region": "kinki"
+      },
+      {
+        "id": "chugoku_airfield",
+        "name": "中国 飛行場",
+        "kind": "airfield",
+        "region": "chugoku"
+      },
+      {
+        "id": "shikoku_airfield",
+        "name": "四国 飛行場",
+        "kind": "airfield",
+        "region": "shikoku"
+      },
+      {
+        "id": "kyushu_airfield",
+        "name": "九州 飛行場",
+        "kind": "airfield",
+        "region": "kyushu"
+      },
+      {
+        "id": "hokkaido_port_2",
+        "name": "北海道 第二港",
+        "kind": "port",
+        "region": "hokkaido"
+      },
+      {
+        "id": "hokkaido_airfield_2",
+        "name": "北海道 第二飛行場",
+        "kind": "airfield",
+        "region": "hokkaido"
+      }
+    ],
+    "lines": [
+      {
+        "from": "hokkaido_depot",
+        "to": "hokkaido_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kita_tohoku_depot",
+        "to": "kita_tohoku_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "minami_tohoku_depot",
+        "to": "minami_tohoku_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanto_depot",
+        "to": "kanto_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shinetsu_hokuriku_depot",
+        "to": "shinetsu_hokuriku_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokai_depot",
+        "to": "tokai_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kinki_depot",
+        "to": "kinki_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chugoku_depot",
+        "to": "chugoku_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shikoku_depot",
+        "to": "shikoku_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyushu_depot",
+        "to": "kyushu_port",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hokkaido_port",
+        "to": "kita_tohoku_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kita_tohoku_depot",
+        "to": "minami_tohoku_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "minami_tohoku_depot",
+        "to": "kanto_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanto_depot",
+        "to": "shinetsu_hokuriku_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanto_depot",
+        "to": "tokai_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shinetsu_hokuriku_depot",
+        "to": "tokai_depot",
+        "kind": "road",
+        "capacity": 12.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shinetsu_hokuriku_depot",
+        "to": "kinki_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokai_depot",
+        "to": "kinki_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kinki_depot",
+        "to": "chugoku_depot",
+        "kind": "rail",
+        "capacity": 25.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kinki_port",
+        "to": "shikoku_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chugoku_port",
+        "to": "shikoku_port",
+        "kind": "sea",
+        "capacity": 6.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chugoku_depot",
+        "to": "kyushu_depot",
+        "kind": "rail",
+        "capacity": 8.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hokkaido_depot",
+        "to": "hokkaido_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kita_tohoku_depot",
+        "to": "kita_tohoku_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "minami_tohoku_depot",
+        "to": "minami_tohoku_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kanto_depot",
+        "to": "kanto_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shinetsu_hokuriku_depot",
+        "to": "shinetsu_hokuriku_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "tokai_depot",
+        "to": "tokai_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kinki_depot",
+        "to": "kinki_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "chugoku_depot",
+        "to": "chugoku_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "shikoku_depot",
+        "to": "shikoku_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "kyushu_depot",
+        "to": "kyushu_airfield",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hokkaido_depot",
+        "to": "hokkaido_port_2",
+        "kind": "rail",
+        "capacity": 30.0,
+        "condition": 1.0
+      },
+      {
+        "from": "hokkaido_depot",
+        "to": "hokkaido_airfield_2",
+        "kind": "rail",
+        "capacity": 20.0,
+        "condition": 1.0
+      }
+    ],
+    "note": "Verification fixture only (soak-spec.md stage C) - NOT a gameplay map, never used for balance. mvp.json's exact 10-region/3-faction topology plus two extra transport nodes (hokkaido_port_2, hokkaido_airfield_2) so hokkaido declares two Port nodes and two Airfield nodes - the shape CLAUDE.md's 'lowest-id node among duplicates' defect (Phase 10, hit at 4 call sites) needs to be reachable at all. No shipped scenario declares this, so before this fixture the defect was, per its own account, architecturally unreachable end-to-end. See crates/sim/src/tests.rs's tests that load this file."
+  },
+  "factions": [
+    {
+      "id": "touhou_rengou",
+      "name": "東方連合",
+      "capital": "kanto",
+      "regions": [
+        "hokkaido",
+        "kita_tohoku",
+        "minami_tohoku",
+        "kanto"
+      ]
+    },
+    {
+      "id": "chuo_domei",
+      "name": "中央同盟",
+      "capital": "kinki",
+      "regions": [
+        "shinetsu_hokuriku",
+        "tokai",
+        "kinki"
+      ]
+    },
+    {
+      "id": "seihou_domei",
+      "name": "西方同盟",
+      "capital": "kyushu",
+      "regions": [
+        "chugoku",
+        "shikoku",
+        "kyushu"
+      ]
+    }
+  ],
+  "diplomacy": {
+    "blocs": []
+  },
+  "victory": [
+    {
+      "type": "conquest"
+    }
+  ]
+}
