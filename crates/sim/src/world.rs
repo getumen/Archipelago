@@ -658,7 +658,42 @@ impl<'a> IntoIterator for &'a VictoryDeclaration {
 pub struct Faction {
     pub id: FactionId,
     pub name: String,
+    /// The region whose loss `politics::tick_politics` treats as a national
+    /// political shock (docs/capital-spec.md), and whose `Region::owner`
+    /// staying equal to this faction is what "holding the capital" *means* -
+    /// no separate boolean tracks that; it's asked fresh every tick as
+    /// `world.region(capital).owner == id` (docs/conventions.md §1: derive
+    /// rather than duplicate a fact already representable from existing
+    /// state). Fixed at scenario load; `Action::RelocateCapital` is the only
+    /// way this ever changes afterward - deliberately *not* auto-updated by
+    /// reconquest (retaking the exact original region already satisfies the
+    /// "owner == id" check above without moving this field, so both recovery
+    /// paths - reconquer or relocate - clear the same live condition).
     pub capital: RegionId,
+    /// docs/capital-spec.md's Stage D defect fix: days left until this
+    /// faction's most recent `Action::RelocateCapital` finishes moving the
+    /// seat of government, decremented once a day by `politics::
+    /// tick_capital_relocation` - the same spent-down-budget shape
+    /// `focus_transition_days` below already has (a real budget, never a
+    /// ratio re-applied to a remainder). `0` means no relocation is in
+    /// progress.
+    ///
+    /// `capital` above still flips to the destination the instant the action
+    /// applies (unchanged from Stage B - see its own doc). What this field
+    /// gates is not the field but its *political* consequence:
+    /// `politics::tick_politics` treats a faction as lacking a secure
+    /// capital for every day this is nonzero, regardless of whether
+    /// `capital` already names a perfectly safe region. That is deliberate:
+    /// Stage B's instant relocation let every faction escape
+    /// `GROUP_CAPITAL_LOSS_*` in single digits of days (measured - see
+    /// `balance::CAPITAL_RELOCATION_DAYS`'s own doc), neutralising the very
+    /// penalty this field exists to give teeth to. Forcing the political
+    /// blackout to run the full transition regardless of source state is the
+    /// same shape `focus::active` already uses for `NationalFocus` -
+    /// "neither the old state nor the new one is in effect mid-transition" -
+    /// applied to whether a capital counts as held rather than to which
+    /// policy is active.
+    pub capital_transition_days: u32,
     pub manpower: f32,
     /// Stockpile per commodity, indexed by `Good::index()`. Units draw
     /// `Munitions` for upkeep and `Arms` for equipment (Phase 1's

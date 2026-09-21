@@ -3,13 +3,15 @@
 use crate::action::{self, Action, ActionError, Layer, ALL_LAYERS};
 use crate::air;
 use crate::balance::{
-    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CAPTURE_UNREST, CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
+    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CAPITAL_RELOCATION_DAYS, CAPTURE_UNREST,
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
     CIVILIAN_RATION_MIN, COMBAT_DAMAGE, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
     CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE,
     EQUIPMENT_LOSS_PER_DAMAGE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
     INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE, MANPOWER_LOSS_PER_DAMAGE, NL_PROPOSAL_COOLDOWN_DAYS,
-    NODE_OPERATIONAL_THRESHOLD, NODE_STRIKE_DAMAGE, OCCUPATION_RATE, ORG_DAMAGE_MULT, SEPARATISM_THRESHOLD,
-    STRIKE_DAYS, STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
+    NODE_OPERATIONAL_THRESHOLD, NODE_STRIKE_DAMAGE, OCCUPATION_RATE, ORG_DAMAGE_MULT,
+    RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST, RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST,
+    SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
     UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
 };
 use crate::construction::{self, Construction, Project};
@@ -7753,6 +7755,124 @@ fn allied_groups_combined_holdings_count_toward_domination() {
 // sample of every one of `Action`'s variants at a time.
 // ---------------------------------------------------------------------
 
+/// One tag per `Action` variant, in the same order `Action` itself declares
+/// them, plus a trailing `__Count` sentinel that is never constructed
+/// directly. This is the standard Rust idiom for counting an enum's
+/// variants without pulling in `strum::EnumCount` (`crates/sim` stays at
+/// zero external dependencies, docs/conventions.md §4): a fieldless enum's
+/// auto-assigned discriminants run `0, 1, 2, ...` in declaration order, so
+/// `ActionKind::__Count as usize` is *exactly* the number of real variants
+/// before it - a value the compiler computes, not a number anyone types in
+/// twice.
+///
+/// `variant_index` below is the only thing that ever has to change in
+/// lockstep with this - see its own doc for how the two chain together to
+/// make `layer_classification_is_exhaustive_over_all_samples` a structural
+/// check instead of a hand-maintained count.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ActionKind {
+    MoveUnit,
+    HoldUnit,
+    DisbandUnit,
+    ReinforceUnit,
+    RecruitUnit,
+    Build,
+    CancelBuild,
+    SetConscription,
+    SetIndustryPriority,
+    SetCivilianRation,
+    SetImportPlan,
+    SetLogisticsPriority,
+    SetResearchAllocation,
+    ProposeTreaty,
+    AcceptTreaty,
+    RejectTreaty,
+    DeclareWar,
+    BreakTreaty,
+    SetNationalFocus,
+    ProposeInNaturalLanguage,
+    RespondToNaturalLanguageProposal,
+    InterdictLine,
+    StrikeNode,
+    RelocateCapital,
+    /// Sentinel only - always keep this last. Never constructed; its sole
+    /// purpose is that its own discriminant equals the count of every real
+    /// variant above it (see `ActionKind`'s own doc).
+    __Count,
+}
+
+/// The true, compiler-computed number of `Action` variants - see
+/// `ActionKind`'s own doc for how this is derived rather than typed in.
+const ACTION_VARIANT_COUNT: usize = ActionKind::__Count as usize;
+
+/// Maps `a` to its `ActionKind` tag - a wildcard-free match against
+/// `Action` itself (not against `ActionKind`), so **adding a new `Action`
+/// variant fails to compile right here** until this match gains a
+/// corresponding arm (which, to type-check, also needs a new variant added
+/// to `ActionKind` above `__Count` - there is no way to satisfy the
+/// compiler by reusing an existing `ActionKind` tag for a second `Action`
+/// variant without both variants also legitimately sharing that tag).
+///
+/// This is what stands in for the compiler's own exhaustiveness check
+/// (which `Action::layer`'s wildcard-free `match` already enforces at the
+/// type level) at the level of *this test suite*'s coverage of
+/// `action_layer_samples`: `layer_classification_is_exhaustive_over_all_
+/// samples` calls this on every sample and checks the results span
+/// `0..ACTION_VARIANT_COUNT` with no gaps or duplicates. Forcing a
+/// `Action` variant through here doesn't by itself force a *sample* to be
+/// added below - a lazy arm can compile without one - but it does force
+/// `ACTION_VARIANT_COUNT` to grow the moment the new `ActionKind` variant
+/// is declared, and growing that count is exactly what turns an
+/// unmodified `action_layer_samples()` red (its length stops matching
+/// `ACTION_VARIANT_COUNT`), where the old hand-typed number never would
+/// have.
+///
+/// **This exact defect already recurred once.** Stage 12A found
+/// `action_layer_samples` missing `Action::StrikeNode` while the count
+/// this test checked against (a plain `assert_eq!(..., 21)`) matched the
+/// *incomplete* list rather than `Action`'s real 22 variants at the time -
+/// exactly the "test that can't fail because it was written to match the
+/// bug" shape CLAUDE.md's own "空のテストが2件あった" already found twice
+/// elsewhere in this codebase. The Stage 12A fix corrected the literal
+/// `21` to `23` and added the missing sample, but left the structure
+/// itself untouched: the count stayed a free-floating number with no
+/// compiler-checked connection to `Action`, so it went stale again the
+/// very next time a variant was added (`Action::RelocateCapital`,
+/// docs/capital-spec.md) - `codex review --uncommitted` caught the
+/// identical defect a second time, immediately. Fixing the number again
+/// without fixing the structure would only guarantee a third recurrence;
+/// `ActionKind`/`ACTION_VARIANT_COUNT` are what actually close it, by
+/// removing the hand-maintained number rather than correcting it.
+fn variant_index(a: &Action) -> usize {
+    let kind = match a {
+        Action::MoveUnit { .. } => ActionKind::MoveUnit,
+        Action::HoldUnit { .. } => ActionKind::HoldUnit,
+        Action::DisbandUnit { .. } => ActionKind::DisbandUnit,
+        Action::ReinforceUnit { .. } => ActionKind::ReinforceUnit,
+        Action::RecruitUnit { .. } => ActionKind::RecruitUnit,
+        Action::Build { .. } => ActionKind::Build,
+        Action::CancelBuild { .. } => ActionKind::CancelBuild,
+        Action::SetConscription(_) => ActionKind::SetConscription,
+        Action::SetIndustryPriority { .. } => ActionKind::SetIndustryPriority,
+        Action::SetCivilianRation(_) => ActionKind::SetCivilianRation,
+        Action::SetImportPlan { .. } => ActionKind::SetImportPlan,
+        Action::SetLogisticsPriority { .. } => ActionKind::SetLogisticsPriority,
+        Action::SetResearchAllocation { .. } => ActionKind::SetResearchAllocation,
+        Action::ProposeTreaty { .. } => ActionKind::ProposeTreaty,
+        Action::AcceptTreaty { .. } => ActionKind::AcceptTreaty,
+        Action::RejectTreaty { .. } => ActionKind::RejectTreaty,
+        Action::DeclareWar { .. } => ActionKind::DeclareWar,
+        Action::BreakTreaty { .. } => ActionKind::BreakTreaty,
+        Action::SetNationalFocus(_) => ActionKind::SetNationalFocus,
+        Action::ProposeInNaturalLanguage { .. } => ActionKind::ProposeInNaturalLanguage,
+        Action::RespondToNaturalLanguageProposal { .. } => ActionKind::RespondToNaturalLanguageProposal,
+        Action::InterdictLine { .. } => ActionKind::InterdictLine,
+        Action::StrikeNode { .. } => ActionKind::StrikeNode,
+        Action::RelocateCapital { .. } => ActionKind::RelocateCapital,
+    };
+    kind as usize
+}
+
 /// One concrete, arbitrary-but-valid sample of every `Action` variant,
 /// paired with the `Layer` it must classify into. Exhaustively listing
 /// every variant here (rather than looping over some smaller
@@ -7760,18 +7880,6 @@ fn allied_groups_combined_holdings_count_toward_domination() {
 /// actually cover the whole enum - a variant added to `Action` without a
 /// matching entry added here is caught by `layer_classification_is_exhaustive_over_all_samples`
 /// below, not silently skipped.
-///
-/// Stage 12A finding: this list was missing `Action::StrikeNode` entirely
-/// (its own `Layer::Military` classification went completely unexercised by
-/// `every_action_variant_has_the_expected_layer`) while
-/// `layer_classification_is_exhaustive_over_all_samples`'s hardcoded count
-/// (`21`) matched the *incomplete* list rather than `Action`'s real 22
-/// pre-Stage-12A variants - exactly the "test that can't fail because it
-/// was written to match the bug" shape CLAUDE.md's own "空のテストが2件
-/// あった" already found twice elsewhere in this codebase. Added here
-/// (docs/conventions.md §1's boy-scout rule: this list is being touched for
-/// `SetResearchAllocation` anyway) alongside the new variant, with the
-/// count corrected to match both additions.
 fn action_layer_samples() -> Vec<(Action, Layer)> {
     let unit = UnitId(0);
     let region = RegionId(0);
@@ -7804,6 +7912,7 @@ fn action_layer_samples() -> Vec<(Action, Layer)> {
         ),
         (Action::InterdictLine { line: crate::ids::TransportLineId(0) }, Layer::Military),
         (Action::StrikeNode { node: crate::ids::TransportNodeId(0) }, Layer::Military),
+        (Action::RelocateCapital { region: other_region }, Layer::Economy),
     ]
 }
 
@@ -7825,26 +7934,38 @@ fn every_action_variant_has_the_expected_layer() {
     }
 }
 
-/// `action_layer_samples` must itself list exactly one sample per `Action`
-/// variant - 23 entries, matching `Action`'s real variant count and
-/// `crates/api/src/action_codec.rs`'s decoder. This is what stands in for
-/// the compiler's own exhaustiveness check (which `Action::layer`'s
-/// wildcard-free `match` already enforces at the type level) at the level
-/// of *this test suite*: if a future variant is added to `Action` without a
-/// corresponding sample added above, this count assertion catches the gap
-/// even though the crate itself still compiles fine (the new variant would
-/// simply never be exercised by `every_action_variant_has_the_expected_layer`
-/// otherwise).
+/// `action_layer_samples` must list exactly one sample per `Action`
+/// variant - checked structurally via `variant_index`/`ACTION_VARIANT_COUNT`
+/// (see both docs), not a hand-typed number. If a future variant is added
+/// to `Action` without a corresponding sample added above, this fails even
+/// though the crate itself still compiles fine (the new variant's own arm
+/// in `variant_index` is compiler-forced, but nothing forces a sample to
+/// exist alongside it - this assertion is what catches *that* half of the
+/// gap).
 ///
-/// Confirmed this can actually fail (Stage 12A): this assertion's count was
-/// briefly restored to the old, incorrect `21` (matching the list before
-/// `StrikeNode`/`SetResearchAllocation` were added back above) and re-ran -
-/// it failed, reporting `23` vs the expected `21`. Reverted before
-/// committing. See `action_layer_samples`'s own doc for the pre-existing
-/// gap this also closes.
+/// Confirmed this can actually fail, in the exact shape `codex review
+/// --uncommitted` found (a variant added with no accompanying sample):
+/// temporarily added a 25th `Action::__TestDummy` variant with a matching
+/// `ActionKind::__TestDummy` arm in `variant_index`, but no sample in
+/// `action_layer_samples` - `ACTION_VARIANT_COUNT` became `25` while
+/// `action_layer_samples().len()` stayed `24`, and this test failed on the
+/// length mismatch. Confirmed the *build* itself fails even earlier, at
+/// `variant_index`'s match, if the new variant is added with no arm at
+/// all - exactly the "adding a variant must fail to compile until handled"
+/// property `variant_index`'s own doc claims. Removed the dummy variant
+/// before committing.
 #[test]
 fn layer_classification_is_exhaustive_over_all_samples() {
-    assert_eq!(action_layer_samples().len(), 23, "one sample per Action variant - update this alongside any new variant");
+    let samples = action_layer_samples();
+    let mut indices: Vec<usize> = samples.iter().map(|(action, _)| variant_index(action)).collect();
+    indices.sort_unstable();
+    let expected: Vec<usize> = (0..ACTION_VARIANT_COUNT).collect();
+    assert_eq!(
+        indices, expected,
+        "action_layer_samples must contain exactly one sample per Action variant (variant_index values \
+         0..{ACTION_VARIANT_COUNT}, no gaps or duplicates) - got {} samples",
+        samples.len()
+    );
 }
 
 /// `ALL_LAYERS` must list every `Layer` variant exactly once, in the fixed
@@ -12511,4 +12632,565 @@ fn stale_air_destination_captured_mid_flight_is_not_landed_on() {
     );
     assert!(world.unit(unit_id).movement.is_none(), "the cancelled flight must not leave the unit stuck mid-transit");
     assert!(world.unit(unit_id).alive, "cancelling a stale arrival must not destroy the unit");
+}
+
+// ---------------------------------------------------------------------
+// docs/capital-spec.md: capital loss as a political shock, and relocation
+// as the recovery path out of it.
+// ---------------------------------------------------------------------
+
+/// docs/capital-spec.md Stage A's own acceptance criterion: losing the
+/// capital must actually depress all three of Military/Business/
+/// Bureaucracy support - the three groups CLAUDE.md's record of the §12
+/// investigation names as unreachable through `SetConscription`/
+/// `SetCivilianRation` alone (45% of `stability`'s influence weight
+/// combined) - and a faction that never lost its own capital must see
+/// byte-identical politics either way.
+///
+/// Compares two independently-built worlds (one with faction 0's capital
+/// region handed to faction 1, one untouched) rather than asserting against
+/// the fixed `GROUP_SUPPORT_BASELINE`, so this doesn't assume every *other*
+/// target contribution is inactive on day 0 - only that the capital
+/// condition is the one thing that differs between the two runs for the
+/// faction under test.
+///
+/// The "unaffected" check below reads faction 2 specifically, not faction 1
+/// - faction 1 is the *captor* here, and gaining a region legitimately
+/// shifts its own `avg_unrest`/`avg_devastation` region-count averages
+/// regardless of the capital mechanism (a confound this test found and
+/// worked around by picking a genuine third party instead of asserting
+/// over every non-loser faction).
+#[test]
+fn losing_the_capital_depresses_military_business_and_bureaucracy_support() {
+    let run = |capture: bool| {
+        let mut world = scenario::build_world();
+        assert!(world.factions.len() >= 3, "test assumes mvp's three factions (loser, captor, bystander)");
+        let loser = FactionId(0);
+        let captor = FactionId(1);
+        let capital = world.faction(loser).capital;
+        if capture {
+            world.region_mut(capital).owner = captor;
+        }
+        let n = world.factions.len();
+        let mut events = Vec::new();
+        politics::tick_politics(&mut world, &vec![0.0; n], &vec![0i32; n], &mut events);
+        world.factions.iter().map(|f| f.group_support).collect::<Vec<_>>()
+    };
+
+    let captured = run(true);
+    let intact = run(false);
+
+    let loser = FactionId(0).index();
+    for g in [Group::Military, Group::Business, Group::Bureaucracy] {
+        assert!(
+            captured[loser][g.index()] < intact[loser][g.index()],
+            "{g:?} support should be lower after losing the capital than if it had never been lost: \
+             captured={}, intact={}",
+            captured[loser][g.index()],
+            intact[loser][g.index()]
+        );
+    }
+
+    // faction 2 neither lost nor gained anything and must be unaffected -
+    // docs/capital-spec.md Stage A: "失っていない勢力の政治は変わらない".
+    let bystander = FactionId(2).index();
+    assert_eq!(captured[bystander], intact[bystander], "a faction uninvolved in the capture must see unchanged politics");
+}
+
+/// A faction that still holds its capital pays none of the political shock
+/// even when it *doesn't* - `Faction::capital` staying fixed while
+/// `Region::owner` moves elsewhere is the only thing the condition reads,
+/// so a faction whose capital was never touched must never see it fire
+/// regardless of how much *other* territory changes hands. Isolates the
+/// same property the previous test's "faction 1" arm checks, but directly
+/// against `capital_secure`'s own condition rather than by comparison.
+#[test]
+fn a_faction_that_still_holds_its_capital_pays_no_capital_loss_penalty() {
+    // Same territory loss (every *other* owned region handed away) in both
+    // runs - the only thing that differs is whether the capital itself
+    // goes too. An earlier draft of this test bounded Military against a
+    // fixed "territory + capital penalty" threshold and passed even with
+    // the capital condition inverted to fire unconditionally (caught by
+    // this task's own break-and-confirm-red discipline) because
+    // `region_delta` is `0` in every one of these direct `tick_politics`
+    // calls, so the assumed territory term never actually fired and the
+    // bound was vacuous. Comparing two runs that share every other
+    // condition isolates the capital term for real.
+    let run = |also_lose_capital: bool| {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        let capital = world.faction(faction).capital;
+        assert_eq!(world.region(capital).owner, faction, "sanity: mvp's factions start owning their own capital");
+        let captor = world.regions.iter().map(|r| r.owner).find(|&o| o != faction).unwrap();
+        for region in world.regions_of(faction) {
+            if region != capital {
+                world.region_mut(region).owner = captor;
+            }
+        }
+        if also_lose_capital {
+            world.region_mut(capital).owner = captor;
+        }
+        let n = world.factions.len();
+        let mut events = Vec::new();
+        politics::tick_politics(&mut world, &vec![0.0; n], &vec![0i32; n], &mut events);
+        world.faction(faction).group_support
+    };
+
+    let keeps_capital = run(false);
+    let loses_everything = run(true);
+
+    for g in [Group::Military, Group::Business, Group::Bureaucracy] {
+        assert!(
+            keeps_capital[g.index()] > loses_everything[g.index()],
+            "{g:?} support should be higher when the capital itself is retained, even after losing every \
+             other region: keeps_capital={}, loses_everything={}",
+            keeps_capital[g.index()],
+            loses_everything[g.index()]
+        );
+    }
+}
+
+/// docs/capital-spec.md Stage B: `Action::RelocateCapital` actually moves
+/// `Faction::capital`, actually costs `group_support[Government]`/
+/// `[LocalGovernment]` (`balance::RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`/
+/// `_LOCALGOV_SUPPORT_COST`), and actually ends the ongoing political shock
+/// (docs/conventions.md §6's recovery-path requirement) - compared against
+/// an identical world that stays capital-less, so this demonstrates the
+/// shock genuinely stops rather than merely asserting a number moved for
+/// unrelated reasons.
+///
+/// Stage D defect fix: the shock does *not* end the instant the action
+/// applies any more - `capital_transition_days` must actually run out first
+/// (`relocate_capital_political_penalty_continues_during_transition` below
+/// covers the "not yet" half; this test covers the "eventually" half, by
+/// advancing `politics::tick_capital_relocation` a full
+/// `balance::CAPITAL_RELOCATION_DAYS` before checking recovery).
+#[test]
+fn relocating_the_capital_costs_government_and_localgov_support_and_ends_the_ongoing_political_shock() {
+    let build_captured = || {
+        let mut world = scenario::build_world();
+        let loser = FactionId(0);
+        let capital = world.faction(loser).capital;
+        let captor =
+            world.regions.iter().map(|r| r.owner).find(|&o| o != loser).expect("mvp declares more than one faction");
+        world.region_mut(capital).owner = captor;
+        world
+    };
+
+    let loser = FactionId(0);
+    let mut relocated = build_captured();
+    let new_capital = relocated
+        .regions_of(loser)
+        .into_iter()
+        .find(|&r| r != relocated.faction(loser).capital)
+        .expect("mvp's faction 0 owns more than just its lost capital");
+    let government_before = relocated.faction(loser).group_support[Group::Government.index()];
+    let localgov_before = relocated.faction(loser).group_support[Group::LocalGovernment.index()];
+    let machinery_before = relocated.faction(loser).stock[Good::Machinery.index()];
+
+    action::apply_action(&mut relocated, loser, Action::RelocateCapital { region: new_capital })
+        .expect("relocating to an owned, uncontested, different region must succeed");
+
+    assert_eq!(relocated.faction(loser).capital, new_capital, "the named region must become the new capital");
+    assert_eq!(
+        relocated.faction(loser).capital_transition_days, CAPITAL_RELOCATION_DAYS,
+        "declaring a relocation must start a full CAPITAL_RELOCATION_DAYS transition"
+    );
+    assert_eq!(
+        relocated.faction(loser).group_support[Group::Government.index()],
+        government_before - RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST,
+        "relocation must actually spend balance::RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST off Government support"
+    );
+    assert_eq!(
+        relocated.faction(loser).group_support[Group::LocalGovernment.index()],
+        localgov_before - RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST,
+        "relocation must actually spend balance::RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST off LocalGovernment support"
+    );
+    assert_eq!(
+        relocated.faction(loser).stock[Good::Machinery.index()],
+        machinery_before,
+        "relocation must no longer touch Good::Machinery at all - the cost is political now"
+    );
+
+    // Let the transition fully elapse before checking that the shock has
+    // ended - this is now the recovery path's actual shape, not an instant
+    // flip.
+    for _ in 0..CAPITAL_RELOCATION_DAYS {
+        politics::tick_capital_relocation(&mut relocated);
+    }
+    assert_eq!(
+        relocated.faction(loser).capital_transition_days, 0,
+        "the transition must have fully elapsed after CAPITAL_RELOCATION_DAYS ticks"
+    );
+
+    let mut still_capital_less = build_captured();
+
+    let n = relocated.factions.len();
+    let mut events = Vec::new();
+    politics::tick_politics(&mut relocated, &vec![0.0; n], &vec![0i32; n], &mut events);
+    politics::tick_politics(&mut still_capital_less, &vec![0.0; n], &vec![0i32; n], &mut events);
+
+    for g in [Group::Military, Group::Business, Group::Bureaucracy] {
+        assert!(
+            relocated.faction(loser).group_support[g.index()] > still_capital_less.faction(loser).group_support[g.index()],
+            "{g:?} support should recover once relocated and the transition has elapsed, compared to a \
+             faction that stayed capital-less: relocated={}, still_capital_less={}",
+            relocated.faction(loser).group_support[g.index()],
+            still_capital_less.faction(loser).group_support[g.index()]
+        );
+    }
+}
+
+/// docs/capital-spec.md's Stage D measured defect and its fix: before this,
+/// `Action::RelocateCapital` moved `Faction::capital` instantly, so the
+/// `GROUP_CAPITAL_LOSS_*` penalty stopped the same tick the action applied -
+/// every faction escaped it within single digits of days. This asserts the
+/// penalty is still fully in effect the instant after declaring a
+/// relocation, before any of `balance::CAPITAL_RELOCATION_DAYS` has elapsed:
+/// a faction that has just relocated and an otherwise-identical faction that
+/// stays capital-less must compute *exactly* the same Military/Business/
+/// Bureaucracy support after one `politics::tick_politics` call, because
+/// both are still mid-"no secure capital" as far as `capital_secure` is
+/// concerned - `apply_relocate_capital` only ever touches `group_support`
+/// for `Government`/`LocalGovernment`, so any difference in these three
+/// groups here could only come from the capital-loss gate having already
+/// (wrongly) cleared.
+#[test]
+fn relocate_capital_political_penalty_continues_during_transition() {
+    let build_captured = || {
+        let mut world = scenario::build_world();
+        let loser = FactionId(0);
+        let capital = world.faction(loser).capital;
+        let captor =
+            world.regions.iter().map(|r| r.owner).find(|&o| o != loser).expect("mvp declares more than one faction");
+        world.region_mut(capital).owner = captor;
+        world
+    };
+
+    let loser = FactionId(0);
+    let mut relocated = build_captured();
+    let new_capital = relocated
+        .regions_of(loser)
+        .into_iter()
+        .find(|&r| r != relocated.faction(loser).capital)
+        .expect("mvp's faction 0 owns more than just its lost capital");
+    action::apply_action(&mut relocated, loser, Action::RelocateCapital { region: new_capital })
+        .expect("relocating to an owned, uncontested, different region must succeed");
+    assert!(
+        relocated.faction(loser).capital_transition_days > 0,
+        "sanity: the relocation just declared must still be mid-transition"
+    );
+
+    let mut still_capital_less = build_captured();
+
+    let n = relocated.factions.len();
+    let mut events = Vec::new();
+    politics::tick_politics(&mut relocated, &vec![0.0; n], &vec![0i32; n], &mut events);
+    politics::tick_politics(&mut still_capital_less, &vec![0.0; n], &vec![0i32; n], &mut events);
+
+    for g in [Group::Military, Group::Business, Group::Bureaucracy] {
+        assert_eq!(
+            relocated.faction(loser).group_support[g.index()],
+            still_capital_less.faction(loser).group_support[g.index()],
+            "{g:?} support must be identical mid-transition to a faction that never relocated at all - \
+             the capital-loss penalty must not have let up yet"
+        );
+    }
+}
+
+/// Reconquering the *exact* original capital region is the other recovery
+/// path `Faction::capital`'s own doc promises - `Action::RelocateCapital`
+/// is not the only way out, since the live condition never depended on a
+/// separate flag in the first place.
+#[test]
+fn reconquering_the_original_capital_also_ends_the_political_shock() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let capital = world.faction(loser).capital;
+    let captor = world.regions.iter().map(|r| r.owner).find(|&o| o != loser).unwrap();
+    world.region_mut(capital).owner = captor;
+
+    // Retake it - the same effect `military::tick_occupation` has when a
+    // region flips back, without depending on combat resolution here.
+    world.region_mut(capital).owner = loser;
+
+    let n = world.factions.len();
+    let mut events = Vec::new();
+    politics::tick_politics(&mut world, &vec![0.0; n], &vec![0i32; n], &mut events);
+
+    let military = world.faction(loser).group_support[Group::Military.index()];
+    let full_penalty_if_still_lost = GROUP_SUPPORT_BASELINE
+        - crate::balance::GROUP_CAPITAL_LOSS_MILITARY_PENALTY * crate::balance::GROUP_ADAPT_RATE;
+    assert!(
+        military > full_penalty_if_still_lost,
+        "Military support should not carry the capital-loss penalty once the original capital is retaken: {military}"
+    );
+}
+
+/// docs/capital-spec.md §3: preconditions validate the actor, not just the
+/// target (CLAUDE.md's recorded shape - `StrikeNode` once checked only the
+/// target, never whether the striker itself had aircraft).
+#[test]
+fn relocate_capital_rejects_a_region_this_faction_does_not_own() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let foreign = world.regions.iter().find(|r| r.owner != faction).unwrap().id;
+
+    let result = action::apply_action(&mut world, faction, Action::RelocateCapital { region: foreign });
+    assert_eq!(result, Err(ActionError::RegionNotOwned));
+    assert_ne!(world.faction(faction).capital, foreign);
+}
+
+#[test]
+fn relocate_capital_rejects_a_contested_destination() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let destination =
+        world.regions_of(faction).into_iter().find(|&r| r != world.faction(faction).capital).unwrap();
+
+    let intruder = world.units.iter().position(|u| u.owner == FactionId(1)).unwrap();
+    world.units[intruder].station = Station::Region(destination);
+    world.units[intruder].movement = None;
+
+    let result = action::apply_action(&mut world, faction, Action::RelocateCapital { region: destination });
+    assert_eq!(result, Err(ActionError::RegionContested));
+    assert_ne!(world.faction(faction).capital, destination);
+}
+
+#[test]
+fn relocate_capital_rejects_the_current_capital_as_a_no_op() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let capital = world.faction(faction).capital;
+
+    let result = action::apply_action(&mut world, faction, Action::RelocateCapital { region: capital });
+    assert_eq!(result, Err(ActionError::InvalidValue));
+}
+
+/// docs/capital-spec.md's own point of this change: the cost is political
+/// (`group_support`), not `Good::Machinery`, so a faction with zero
+/// Machinery can still relocate - there is nothing left to be unable to
+/// afford. This replaces a prior version of this test that asserted the
+/// opposite (`ActionError::InsufficientMachinery` on zero Machinery), which
+/// was exactly the unpayable-cost defect this change fixes.
+#[test]
+fn relocate_capital_succeeds_with_zero_machinery() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let destination =
+        world.regions_of(faction).into_iter().find(|&r| r != world.faction(faction).capital).unwrap();
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 0.0;
+
+    let result = action::apply_action(&mut world, faction, Action::RelocateCapital { region: destination });
+    assert!(result.is_ok(), "relocation must not require any Good::Machinery: {result:?}");
+    assert_eq!(world.faction(faction).capital, destination);
+    assert_eq!(
+        world.faction(faction).stock[Good::Machinery.index()],
+        0.0,
+        "relocation must not touch Good::Machinery at all"
+    );
+}
+
+/// docs/capital-spec.md §3's own explicit design choice: relocation must
+/// stay usable even while the capital-loss penalty is actively depressing
+/// this faction's support - gating the recovery path on the exact state it
+/// recovers from would recreate the "入ったら出られない" trap
+/// docs/conventions.md §6 forbids, one level up.
+#[test]
+fn relocate_capital_remains_usable_while_the_capital_loss_penalty_is_active() {
+    let mut world = scenario::build_world();
+    let mut control = scenario::build_world(); // never loses its capital
+    let loser = FactionId(0);
+    let capital = world.faction(loser).capital;
+    let captor = world.regions.iter().map(|r| r.owner).find(|&o| o != loser).unwrap();
+    world.region_mut(capital).owner = captor;
+
+    // Run several ticks in both worlds so the capital-loss target has
+    // actually pulled `world`'s support measurably below `control`'s (the
+    // same comparative sanity check `losing_the_capital_depresses_
+    // military_business_and_bureaucracy_support` uses, run longer here to
+    // reach a real depressed equilibrium rather than one day's nudge), then
+    // confirm relocation still succeeds from there - other default target
+    // contributions (arms stock, conscription, ...) are active in both runs
+    // identically, so comparing against `GROUP_SUPPORT_BASELINE` directly
+    // would be confounded by them the way an earlier draft of this test
+    // was.
+    let n = world.factions.len();
+    for _ in 0..30 {
+        let mut events = Vec::new();
+        politics::tick_politics(&mut world, &vec![0.0; n], &vec![0i32; n], &mut events);
+        politics::tick_politics(&mut control, &vec![0.0; n], &vec![0i32; n], &mut events);
+    }
+    assert!(
+        world.faction(loser).group_support[Group::Military.index()]
+            < control.faction(loser).group_support[Group::Military.index()],
+        "sanity: 30 days without a capital should leave Military support measurably lower than an identical \
+         faction that kept its capital"
+    );
+
+    let new_capital = world
+        .regions_of(loser)
+        .into_iter()
+        .find(|&r| r != capital)
+        .expect("mvp's faction 0 owns more than just its lost capital");
+    let result = action::apply_action(&mut world, loser, Action::RelocateCapital { region: new_capital });
+    assert!(result.is_ok(), "relocation must remain reachable even at depressed support: {result:?}");
+}
+
+/// A faction driven out of its capital again must pay
+/// `RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`/`_LOCALGOV_SUPPORT_COST`
+/// again - the cost is charged unconditionally each time the action
+/// applies, not sampled once and remembered (docs/conventions.md's
+/// 「発令時点の値を焼き込まない」 cuts the other way here: repeating the
+/// same act must repeat the same price, not become free the second time).
+/// mvp's faction 0 owns four regions (`scenarios/mvp.json`), enough to
+/// relocate twice into two different, never-before-used regions.
+///
+/// Stage D defect fix: a second relocation is only reachable once the first
+/// one's `balance::CAPITAL_RELOCATION_DAYS` transition has actually run out
+/// (`relocate_capital_rejects_a_different_destination_mid_transition` below
+/// covers the "not yet" half) - so this test now advances
+/// `politics::tick_capital_relocation` a full transition between the two
+/// relocations, rather than firing them back to back on the same day.
+#[test]
+fn relocating_twice_costs_support_twice() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let original_capital = world.faction(loser).capital;
+    let captor = world.regions.iter().map(|r| r.owner).find(|&o| o != loser).unwrap();
+    let owned = world.regions_of(loser);
+    assert!(owned.len() >= 3, "sanity: this test needs a faction with at least 3 regions, got {}", owned.len());
+    let first_destination = owned.iter().copied().find(|&r| r != original_capital).unwrap();
+    let second_destination =
+        owned.iter().copied().find(|&r| r != original_capital && r != first_destination).unwrap();
+
+    // First loss and relocation.
+    world.region_mut(original_capital).owner = captor;
+    let government_after_zero = world.faction(loser).group_support[Group::Government.index()];
+    let localgov_after_zero = world.faction(loser).group_support[Group::LocalGovernment.index()];
+    action::apply_action(&mut world, loser, Action::RelocateCapital { region: first_destination })
+        .expect("first relocation must succeed");
+    let government_after_one = world.faction(loser).group_support[Group::Government.index()];
+    let localgov_after_one = world.faction(loser).group_support[Group::LocalGovernment.index()];
+    assert_eq!(government_after_one, government_after_zero - RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST);
+    assert_eq!(localgov_after_one, localgov_after_zero - RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST);
+
+    // Let the first relocation's transition fully elapse before the second
+    // loss - a second `RelocateCapital` is rejected while one is still
+    // under way.
+    for _ in 0..CAPITAL_RELOCATION_DAYS {
+        politics::tick_capital_relocation(&mut world);
+    }
+
+    // Second loss (of the just-established capital) and second relocation.
+    world.region_mut(first_destination).owner = captor;
+    action::apply_action(&mut world, loser, Action::RelocateCapital { region: second_destination })
+        .expect("second relocation must succeed - the cost must not have become unpayable or been waived");
+    let government_after_two = world.faction(loser).group_support[Group::Government.index()];
+    let localgov_after_two = world.faction(loser).group_support[Group::LocalGovernment.index()];
+    assert_eq!(
+        government_after_two,
+        government_after_one - RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST,
+        "the second relocation must spend the same Government cost again, not a discounted or zero one"
+    );
+    assert_eq!(
+        localgov_after_two,
+        localgov_after_one - RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST,
+        "the second relocation must spend the same LocalGovernment cost again, not a discounted or zero one"
+    );
+    assert_eq!(world.faction(loser).capital, second_destination);
+}
+
+/// docs/capital-spec.md's Stage D fix, mirroring `apply_set_national_focus`'s
+/// "requesting something different while a switch is already under way is
+/// rejected outright" rule (`focus.rs`'s module doc): retargeting a
+/// relocation to a genuinely different, otherwise-perfectly-valid region
+/// must fail while the current one is still mid-transition, so an agent
+/// cannot keep redirecting a relocation and never actually settle on
+/// anywhere, or reuse time already spent toward one destination for a
+/// different one for free.
+#[test]
+fn relocate_capital_rejects_a_different_destination_mid_transition() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let original_capital = world.faction(loser).capital;
+    let owned = world.regions_of(loser);
+    assert!(owned.len() >= 3, "sanity: this test needs a faction with at least 3 regions, got {}", owned.len());
+    let first_destination = owned.iter().copied().find(|&r| r != original_capital).unwrap();
+    let second_destination =
+        owned.iter().copied().find(|&r| r != original_capital && r != first_destination).unwrap();
+
+    action::apply_action(&mut world, loser, Action::RelocateCapital { region: first_destination })
+        .expect("first relocation must succeed");
+    assert!(world.faction(loser).capital_transition_days > 0, "sanity: still mid-transition");
+    let government_after_first = world.faction(loser).group_support[Group::Government.index()];
+
+    let result =
+        action::apply_action(&mut world, loser, Action::RelocateCapital { region: second_destination });
+    assert_eq!(
+        result,
+        Err(ActionError::InvalidValue),
+        "a different destination must be rejected while a relocation is already under way"
+    );
+    assert_eq!(
+        world.faction(loser).capital, first_destination,
+        "the rejected retarget must not have moved the capital"
+    );
+    assert_eq!(
+        world.faction(loser).group_support[Group::Government.index()],
+        government_after_first,
+        "the rejected retarget must not have charged a second Government cost"
+    );
+}
+
+/// docs/conventions.md §6 ("入ったら出られない状態を作らない"), applied to
+/// the transition itself (docs/capital-spec.md's own explicit requirement):
+/// a faction whose relocation destination is captured by the enemy mid-
+/// transition must not be stuck waiting on a doomed relocation forever.
+/// `politics::tick_capital_relocation` is an unconditional countdown, so the
+/// transition still completes on schedule regardless, and the faction is
+/// immediately free to declare a fresh relocation elsewhere the moment it
+/// does.
+#[test]
+fn relocate_capital_destination_captured_mid_transition_is_not_stuck() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let original_capital = world.faction(loser).capital;
+    let captor = world.regions.iter().map(|r| r.owner).find(|&o| o != loser).unwrap();
+    let owned = world.regions_of(loser);
+    assert!(owned.len() >= 3, "sanity: this test needs a faction with at least 3 regions, got {}", owned.len());
+    let destination = owned.iter().copied().find(|&r| r != original_capital).unwrap();
+    let refuge = owned.iter().copied().find(|&r| r != original_capital && r != destination).unwrap();
+
+    action::apply_action(&mut world, loser, Action::RelocateCapital { region: destination })
+        .expect("first relocation must succeed");
+
+    // The enemy takes the destination while the relocation is still
+    // mid-transition.
+    world.region_mut(destination).owner = captor;
+    assert!(world.faction(loser).capital_transition_days > 0, "sanity: still mid-transition");
+
+    // A retarget attempt is still rejected - the transition has not
+    // finished, capture or no capture.
+    let blocked = action::apply_action(&mut world, loser, Action::RelocateCapital { region: refuge });
+    assert_eq!(blocked, Err(ActionError::InvalidValue));
+
+    // But the countdown is unconditional: it still reaches zero on
+    // schedule, and never underflows past it even if ticked further.
+    for _ in 0..(CAPITAL_RELOCATION_DAYS + 5) {
+        politics::tick_capital_relocation(&mut world);
+    }
+    assert_eq!(
+        world.faction(loser).capital_transition_days, 0,
+        "the transition must fully elapse and never underflow, even ticked past its own length"
+    );
+
+    // Now free to relocate again, away from the captured region.
+    let result = action::apply_action(&mut world, loser, Action::RelocateCapital { region: refuge });
+    assert!(
+        result.is_ok(),
+        "once the transition has elapsed, a faction whose destination was captured must be free to \
+         relocate again: {result:?}"
+    );
+    assert_eq!(world.faction(loser).capital, refuge);
 }

@@ -99,12 +99,23 @@ pub(super) fn compute_region_radii(world: &SimWorld, positions: &[[f32; 2]]) -> 
 
 /// Regions whose name label stays visible on a dense map even before the
 /// player zooms in (`visuals::sync_region_label_visibility`,
-/// `RegionLabelMarker::always_visible`) - every faction's own capital, plus
-/// the population top decile (`population_significance_threshold`).
-/// Irrelevant on a sparse map, where every label is always visible
-/// regardless of this set (see `setup`'s own region-spawning loop).
+/// `RegionLabelMarker::always_visible`) - the population top decile
+/// (`population_significance_threshold`). Irrelevant on a sparse map, where
+/// every label is always visible regardless of this set (see `setup`'s own
+/// region-spawning loop).
+///
+/// **Does not include capitals.** It used to seed the set with every
+/// faction's `Faction::capital` at startup, but that value can change after
+/// startup (`Action::RelocateCapital`, docs/capital-spec.md §3) and this
+/// function only ever runs once (`setup`'s own doc). Baking it in here left
+/// a relocated faction's *old* capital highlighted forever and its new one
+/// unmarked unless it happened to also clear the population threshold -
+/// `codex review --uncommitted` (P2). Capital visibility is instead derived
+/// fresh every frame in `visuals::sync_region_label_visibility`, the same
+/// way that system already re-checks `occupier` fresh every frame rather
+/// than baking contested status in here too.
 fn significant_regions(world: &SimWorld) -> std::collections::HashSet<RegionId> {
-    let mut significant: std::collections::HashSet<RegionId> = world.factions.iter().map(|f| f.capital).collect();
+    let mut significant = std::collections::HashSet::new();
     let threshold = population_significance_threshold(world);
     for region in &world.regions {
         if region.population >= threshold {

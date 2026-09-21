@@ -134,6 +134,12 @@ impl Simulation {
         // "maintenance runs before anything reads today's state" slot
         // `tick_diplomacy`'s own countdowns occupy.
         focus::tick_national_focus(&mut self.world);
+
+        // docs/capital-spec.md's Stage D defect fix: counts down every
+        // faction's in-progress `Action::RelocateCapital` transition, the
+        // same maintenance slot as `focus::tick_national_focus` just above -
+        // see `politics::tick_capital_relocation`'s own doc.
+        politics::tick_capital_relocation(&mut self.world);
         timings.politics += t0.elapsed();
 
         // Stage 2D: sea control is recomputed first, from fleet positions

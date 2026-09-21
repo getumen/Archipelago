@@ -262,6 +262,12 @@ class ActionTable:
         for node in range(self.transport_node_count):
             yield f"strike_node(node={node})", {"type": "strike_node", "node": node}
 
+        # docs/capital-spec.md §3: `Action::RelocateCapital`'s flattened
+        # form - one entry per region, the same shape `recruit_unit`/`build`
+        # already use for a region-targeted action.
+        for region in range(self.region_count):
+            yield f"relocate_capital(region={region})", {"type": "relocate_capital", "region": region}
+
     def __len__(self) -> int:
         return len(self.entries)
 

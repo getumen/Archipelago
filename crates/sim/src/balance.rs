@@ -688,6 +688,158 @@ pub const GROUP_ARMS_STOCK_MILITARY_BONUS: f32 = 6.0;
 /// input-starved.
 pub const GROUP_MACHINERY_GOOD_BUSINESS_BONUS: f32 = 6.0;
 
+/// docs/capital-spec.md: whether the faction currently holds the region
+/// named by its own `Faction::capital` (`world.region(capital).owner == id`,
+/// asked fresh every tick — see that field's own doc). Not a `0..1`
+/// magnitude like the territory-delta terms above (there is no "how much
+/// capital" to scale by); a live, binary condition, the same shape
+/// `politics.rs` already gives Protest/Mutiny/CapitalFlight — re-evaluated
+/// every tick rather than sampled once at the moment of capture, so the
+/// penalty runs for as long as the faction actually lacks a capital and
+/// clears the instant it doesn't (reconquest of the original region, or
+/// `Action::RelocateCapital` naming a new one), with no separate flag or
+/// accumulator to keep in sync. This is what CLAUDE.md's record of the §12
+/// investigation calls the missing "第三の要因" (a third factor beyond the
+/// two policy knobs, casualties and territory, capable of moving these
+/// specific three groups): 軍部 (Military, 20%)・財界 (Business, 15%)・
+/// 官僚 (Bureaucracy, 10%) together hold 45% of `stability`'s influence
+/// weight and, before this, had no path down through anything
+/// `SetConscription`/`SetCivilianRation` could touch (Military's *only*
+/// other lever, `GROUP_CONSCRIPTION_MILITARY_BONUS`, moves it *up*).
+///
+/// Each coefficient is sized by what losing the capital specifically means
+/// to that group, not by how any scenario happens to play out
+/// (CLAUDE.md's own record of three separate reverse-fitting failures is
+/// the reason to be explicit about this):
+///
+/// - **Military** — the armed forces have failed at the one job that
+///   matters most: keeping the enemy out of the seat of government. Set
+///   equal to `GROUP_CASUALTY_MILITARY_PENALTY`: losing the capital reads,
+///   to this group, as seriously as a day of heavy combat losses, not a
+///   single ordinary lost region (`GROUP_TERRITORY_LOSS_MILITARY_PENALTY`,
+///   already at its own cap the same day from the territory term alone).
+/// - **Business** — a capital concentrates a nation's densest commercial
+///   and administrative infrastructure; its loss is not "one region among
+///   many" (which the territory-delta terms above already price in, and
+///   which never reaches Business at all) but the loss of the literal
+///   economic centre. Set equal to `GROUP_DEVASTATION_BUSINESS_PENALTY`:
+///   losing the capital is, to this group, comparable to the *entire
+///   nation's* territory sitting fully devastated, not one ordinary region
+///   changing hands.
+/// - **Bureaucracy** — the administrative apparatus's physical seat -
+///   ministries, records, the chain of command - is gone. Before this
+///   constant, `FOCUS_TECHNOCRACY_BUREAUCRACY_SUPPORT_BONUS` was the
+///   *only* contribution to this group's target anywhere in this module,
+///   and it only ever moves support up. Set to the same order of
+///   magnitude as that bonus (rounded to match Military's severity above,
+///   since administrative continuity failing is as much a functional
+///   collapse as command failing): this is Bureaucracy's first-ever
+///   negative term, and the second contribution of any kind.
+pub const GROUP_CAPITAL_LOSS_MILITARY_PENALTY: f32 = 10.0;
+pub const GROUP_CAPITAL_LOSS_BUSINESS_PENALTY: f32 = 12.0;
+pub const GROUP_CAPITAL_LOSS_BUREAUCRACY_PENALTY: f32 = 10.0;
+
+/// docs/capital-spec.md's Stage D measured defect: `Action::RelocateCapital`
+/// used to move `Faction::capital` the instant the action applied, so
+/// `GROUP_CAPITAL_LOSS_*` above never ran long enough to matter - every
+/// living faction escaped it within single digits of days across all three
+/// `scenarios/japan_hex.json` seeds, collapsing the living-faction
+/// `stability` spread and the Bureaucracy group-support spread it exists to
+/// restore right back toward the "everyone reads the same" flatness that
+/// motivated this feature in the first place (docs/capital-spec.md §1).
+///
+/// A national capital does not move overnight. This is the length of that
+/// move — the days `Faction::capital_transition_days` counts down
+/// (`politics::tick_capital_relocation`) before the relocation's political
+/// blackout on `capital_secure` (see that computation in
+/// `politics::tick_politics`) actually lifts.
+///
+/// Mirrors `focus::tick_national_focus`'s `FOCUS_SWITCH_DAYS` transition
+/// (`Faction::focus_transition_days`) rather than inventing a new duration:
+/// relocating the literal seat of government is the same class of event a
+/// national focus switch already models — the whole state apparatus
+/// reorganizing itself around something new — just aimed at where the
+/// government physically sits instead of which policy it pursues. No other
+/// existing `_DAYS` constant in this module models that: `STRIKE_DAYS` (15)
+/// is one industry's labor action, `REGIME_CHANGE_DAYS` (30) is a post-coup
+/// output disruption plus cooldown, and the diplomacy `_DAYS` constants below
+/// are notice periods and cooldowns, not a transformation of the state
+/// itself. Reusing `FOCUS_SWITCH_DAYS` directly follows the same pattern
+/// `GROUP_CAPITAL_LOSS_*` above already set: size a new magnitude by
+/// equating it to an existing constant that means the same order of thing,
+/// rather than picking a fresh number to fit how any one scenario plays out
+/// (CLAUDE.md records three separate failures of the latter).
+pub const CAPITAL_RELOCATION_DAYS: u32 = FOCUS_SWITCH_DAYS;
+
+/// `Action::RelocateCapital`'s cost (docs/capital-spec.md §2 "遷都には代償
+/// を置く") — **not** `Good::Machinery`. An earlier version priced this at
+/// `AIR_UNIT_MACHINERY_COST` (20.0, one squadron's worth), reasoning that a
+/// one-off relocation is the same kind of infrastructure spend
+/// `construction::Project` already draws Machinery for. Measured on
+/// `scenarios/japan_hex.json` seeds 1-3 at day 720: every faction still
+/// alive held under 20.0 Machinery (highest observed 15.1; most sat at or
+/// near 0.0 for most of the game) — CLAUDE.md's own "`supply_ratio` 0.4
+/// 前後は仕様である" entry documents Machinery as chronically scarce by
+/// design in this simulation, not by accident of one run. A cost nobody can
+/// ever pay is not a cost; it is exactly the "入ったら出られない状態"
+/// docs/conventions.md §6 forbids, wearing a recovery path's shape without
+/// being one — confirmed separately: an AI that calls `Action::
+/// RelocateCapital` and one with that call deleted produced byte-identical
+/// `--json` output on all three seeds.
+///
+/// Charged instead as an immediate, one-time reduction to
+/// `Faction::group_support` — riding the exact state `GROUP_CAPITAL_LOSS_*`
+/// above already reads, not a new field — for the two groups that penalty
+/// deliberately does *not* touch: `Group::Government`（中央政府）and
+/// `Group::LocalGovernment`（地方政府）. Keeping the two disjoint means
+/// relocating is not a bigger dose of the penalty it exists to escape; it
+/// is a distinct price paid by a distinct constituency, exactly what
+/// "遷都には代償を置く" separately from "首都不在は政治を揺らす" implies.
+///
+/// - **中央政府 (Government)** — 遷都は中央政府自身が下す決断であり、公然
+///   と「もとの首都を守れなかった」と認める行為である。1 地域を通常に失う
+///   ことに対する中央政府への一撃（`GROUP_TERRITORY_LOSS_GOVERNMENT_
+///   PENALTY` = 14.0、この定数群で中央政府に対する最大の target 寄与）と
+///   同じ重さの認容だとみなし、同じ値を置く。ただし target への寄与では
+///   なく、決断のその瞬間に `group_support` へ直接かかる一括の代償である
+///   点が異なる。
+/// - **地方政府 (LocalGovernment)** — 遷都は全国の地方政府にとって、行政
+///   の中心が予告なく組み替えられる出来事である。既存の定数群のうち地方
+///   政府への最大の一撃は `GROUP_UNREST_LOCALGOV_PENALTY` = 22.0（配給逼迫
+///   による民心動揺）で、遷都はそれに匹敵する規模の行政的動揺だとみなし、
+///   同じ値を置く。
+///
+/// Both land on `group_support[g]` directly (clamped `0..100` the same way
+/// `tick_politics` already clamps it), **not** on `tick_politics`'s own
+/// `target[g]` — a one-shot shock at the instant of the decision, distinct
+/// in kind from `GROUP_CAPITAL_LOSS_*`'s live, continuously-reevaluated
+/// condition. Because it never touches `target[g]`, the very next tick's
+/// ordinary `GROUP_ADAPT_RATE` pull-to-target is the entire recovery path
+/// (docs/conventions.md §6) — support drifts back toward whatever
+/// `target[g]` computes to that day, unaffected by this one-time
+/// subtraction, exactly the way every other one-time political shock in
+/// this module already heals. And because neither group's current level is
+/// ever checked before the deduction, the cost is unconditionally payable —
+/// it floors at 0.0 rather than blocking the action — so a faction driven
+/// out of a just-relocated capital again pays the same cost again, once its
+/// current relocation (see `CAPITAL_RELOCATION_DAYS` above) has run its
+/// course and it is free to declare a new one.
+///
+/// Charged at *declaration*, not at the transition's completion
+/// (`CAPITAL_RELOCATION_DAYS` days later) — `apply_relocate_capital` docks
+/// this the same tick the action applies, before `capital_transition_days`
+/// even starts counting down. The 中央政府/地方政府 doc above already frames
+/// this as the cost of the *decision itself* ("中央政府自身が下す決断", "予告
+/// なく組み替えられる出来事"), not of the move finishing — the disruption of
+/// announcing a relocation starts immediately, whether or not the move is
+/// later interrupted (`docs/capital-spec.md`'s "destination captured
+/// mid-transition" case: the transition still completes on schedule per
+/// `politics::tick_capital_relocation`, so there is no scenario where this
+/// cost was charged for a relocation that never happens, and no way to dodge
+/// it by having the destination fall before the timer runs out).
+pub const RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST: f32 = GROUP_TERRITORY_LOSS_GOVERNMENT_PENALTY;
+pub const RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST: f32 = GROUP_UNREST_LOCALGOV_PENALTY;
+
 /// Stage 3A political events (docs/phase3-spec.md "政治イベント"): support
 /// thresholds below which each event triggers, and the effect sizes/
 /// durations each one applies. Every one of these is designed to be

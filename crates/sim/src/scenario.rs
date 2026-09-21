@@ -1067,6 +1067,7 @@ impl Scenario {
                 id: FactionId(i as u32),
                 name: def.name.clone(),
                 capital: RegionId(index_of[def.capital.as_str()]),
+                capital_transition_days: 0,
                 manpower: FACTION_MANPOWER,
                 stock: FACTION_STOCK,
                 conscription: FACTION_CONSCRIPTION,

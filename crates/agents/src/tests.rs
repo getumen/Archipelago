@@ -1898,3 +1898,142 @@ fn axis_selecting_ai_reaches_a_higher_equipment_coefficient_than_the_even_split_
          (progress={selecting_progress:.2}), gain={percent_gain:.2}%"
     );
 }
+
+// ---------------------------------------------------------------------
+// docs/capital-spec.md Stage C (AI half): `HeuristicAgent` must actually
+// use `Action::RelocateCapital` once it has lost its own capital and can
+// afford to, rather than sitting under `balance::GROUP_CAPITAL_LOSS_*`'s
+// political shock forever - the default experience is AI-vs-AI, so this
+// was, until now, a recovery path that nothing ever exercised.
+// ---------------------------------------------------------------------
+
+/// `relocate_capital_ai` must actually queue `Action::RelocateCapital` once
+/// this faction's own capital is owned by someone else, targeting one of
+/// its *own* remaining, uncontested regions - never the lost capital
+/// itself, never a region it doesn't hold.
+///
+/// mvp's faction 0 (touhou_rengou) owns hokkaido/kita_tohoku/
+/// minami_tohoku/kanto, with kanto as capital - handing kanto to faction 1
+/// (the same fixture `crates/sim`'s own `losing_the_capital_depresses_
+/// military_business_and_bureaucracy_support` uses) leaves three regions
+/// behind to relocate into, none of them touched here, so this is purely
+/// about whether the AI reacts at all - `heuristic_agent_relocates_to_a_
+/// sensible_destination` below checks *which* of the three it picks.
+///
+/// Confirmed this can fail: temporarily removed the `relocate_capital_ai`
+/// call from `decide_for_llm` (this feature's actual pre-fix state - see
+/// `docs/capital-spec.md` Stage C) and re-ran - `actions` contained no
+/// `RelocateCapital` at all despite the lost capital. Restored before
+/// committing.
+#[test]
+fn heuristic_agent_relocates_capital_once_it_has_lost_it() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let captor = FactionId(1);
+    let capital = world.faction(loser).capital;
+    world.region_mut(capital).owner = captor;
+
+    let mut agent = HeuristicAgent::new(loser, 1.15);
+    let obs = Observation { faction: loser, world: &world };
+    let actions = agent.decide(&obs);
+
+    let relocated = actions.iter().find_map(|a| match a {
+        Action::RelocateCapital { region } => Some(*region),
+        _ => None,
+    });
+    let region = relocated.unwrap_or_else(|| {
+        panic!("expected Action::RelocateCapital from a faction that just lost its capital and can afford one: {actions:?}")
+    });
+    assert_ne!(region, capital, "must not \"relocate\" to the region it just lost - that isn't its own any more");
+    assert_eq!(world.region(region).owner, loser, "the new capital must be a region this faction actually owns");
+    assert!(!world.has_enemy_units(region, loser), "the new capital must not be contested");
+}
+
+/// A faction that still holds its own capital must never emit
+/// `Action::RelocateCapital` - `apply_relocate_capital` would reject a
+/// same-region relocation as a no-op costing real `group_support` for
+/// nothing, and `relocate_capital_ai`'s whole gate is "has this been lost",
+/// not "would somewhere else be nicer".
+#[test]
+fn heuristic_agent_does_not_relocate_a_capital_it_still_holds() {
+    let world = scenario::build_world();
+    let faction = FactionId(0);
+    let mut agent = HeuristicAgent::new(faction, 1.15);
+    let obs = Observation { faction, world: &world };
+    let actions = agent.decide(&obs);
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::RelocateCapital { .. })),
+        "a faction that still holds its capital must not relocate it: {actions:?}"
+    );
+}
+
+/// docs/capital-spec.md's own point of this change: `relocate_capital_ai`
+/// must still queue `Action::RelocateCapital` even when the faction holds
+/// zero `Good::Machinery` - the cost moved to `group_support`
+/// (`balance::RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`/
+/// `_LOCALGOV_SUPPORT_COST`), which is never checked against a stock, so
+/// there is nothing left for a Machinery shortfall to gate. This replaces
+/// a prior version of this test (`heuristic_agent_does_not_attempt_
+/// relocation_it_cannot_afford`) that asserted the opposite - the exact
+/// defect this change fixes was measured on `scenarios/japan_hex.json`
+/// seeds 1-3: every capital-less faction sat under the old 20.0 Machinery
+/// cost the entire game, so the AI never relocated at all in practice.
+#[test]
+fn heuristic_agent_relocates_even_with_zero_machinery() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let captor = FactionId(1);
+    let capital = world.faction(loser).capital;
+    world.region_mut(capital).owner = captor;
+    world.faction_mut(loser).stock[Good::Machinery.index()] = 0.0;
+
+    let mut agent = HeuristicAgent::new(loser, 1.15);
+    let obs = Observation { faction: loser, world: &world };
+    let actions = agent.decide(&obs);
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::RelocateCapital { .. })),
+        "a faction with zero Machinery must still relocate - the cost is political now, not material: {actions:?}"
+    );
+}
+
+/// `best_capital_relocation_target`'s scoring: among a faction's remaining
+/// regions, the AI must pick the highest-`Region::value` one, not merely
+/// the first or an arbitrary one - the whole point of scoring by `value`
+/// (industry/population/port, `relocate_capital_ai`'s own doc) rather than
+/// region id order.
+///
+/// Sets every one of faction 0's non-capital mvp regions to the same
+/// baseline population/industry, then gives exactly one of them
+/// (`kita_tohoku`, region 1) a large population bump - it must be the one
+/// picked, regardless of its region id relative to the others.
+///
+/// Confirmed this can fail: temporarily changed `best_capital_relocation_
+/// target` to return the *lowest*-id candidate instead of the highest-value
+/// one and re-ran - it picked `hokkaido` (region 0) instead of the boosted
+/// `kita_tohoku`. Reverted before committing.
+#[test]
+fn heuristic_agent_relocates_to_the_highest_value_remaining_region() {
+    let mut world = scenario::build_world();
+    let loser = FactionId(0);
+    let captor = FactionId(1);
+    let capital = world.faction(loser).capital;
+    world.region_mut(capital).owner = captor;
+
+    let boosted = RegionId(1);
+    assert_eq!(world.region(boosted).owner, loser, "region 1 (kita_tohoku) must still belong to the loser");
+    assert_ne!(boosted, capital, "the boosted region must not be the one just lost");
+    world.region_mut(boosted).population *= 50.0;
+
+    let mut agent = HeuristicAgent::new(loser, 1.15);
+    let obs = Observation { faction: loser, world: &world };
+    let actions = agent.decide(&obs);
+
+    let relocated = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::RelocateCapital { region } => Some(*region),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a RelocateCapital order: {actions:?}"));
+    assert_eq!(relocated, boosted, "the AI must relocate to the region it just made by far the most valuable");
+}

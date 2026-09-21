@@ -1418,6 +1418,20 @@ fn sample_action_value(src: &FuzzSource, kind: &str, world: &World, faction: Fac
             let candidates = own_region_with_construction_ids(world, faction);
             Value::obj(vec![("type", Value::str("cancel_build")), ("region", Value::num(candidate_or_any(rng, &candidates, n_regions, chaos)))])
         }
+        // docs/capital-spec.md §3: `RelocateCapital`'s actual preconditions
+        // are `apply_build`'s own (owned, uncontested - `own_uncontested_
+        // region_ids`) plus "not already the capital" (`ActionError::
+        // InvalidValue` otherwise, the same no-op guard `MoveUnit`'s
+        // airfield-to-itself case already gets).
+        "relocate_capital" => {
+            let capital = world.faction(faction).capital.0;
+            let candidates: Vec<u32> =
+                own_uncontested_region_ids(world, faction).into_iter().filter(|&r| r != capital).collect();
+            Value::obj(vec![
+                ("type", Value::str("relocate_capital")),
+                ("region", Value::num(candidate_or_any(rng, &candidates, n_regions, chaos))),
+            ])
+        }
         "set_import_plan" => {
             // `apply_set_import_plan`'s actual precondition: only Food/
             // Energy are importable at all (`ActionError::InvalidValue`
@@ -1555,6 +1569,7 @@ fn action_tag(action: &Action) -> &'static str {
         Action::RespondToNaturalLanguageProposal { .. } => "RespondToNaturalLanguageProposal",
         Action::InterdictLine { .. } => "InterdictLine",
         Action::StrikeNode { .. } => "StrikeNode",
+        Action::RelocateCapital { .. } => "RelocateCapital",
     }
 }
 
@@ -1582,6 +1597,7 @@ const ALL_ACTION_TAGS: &[&str] = &[
     "RespondToNaturalLanguageProposal",
     "InterdictLine",
     "StrikeNode",
+    "RelocateCapital",
 ];
 
 /// Every `Event` variant, by name - same exhaustive-match-no-wildcard shape

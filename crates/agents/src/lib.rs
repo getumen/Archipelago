@@ -1222,6 +1222,20 @@ impl HeuristicAgent {
             seek_doctrine_treaties(self.faction, obs, doc, &mut actions);
         }
 
+        // `relocate_capital_ai` is queued ahead of every recruit/build call
+        // below. It no longer needs to be - `RelocateCapital`'s cost moved
+        // from `Good::Machinery` (contended with `recruit`/`naval_recruit`/
+        // `air_recruit`/`build` for the same stock) to `group_support`
+        // (`balance::RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`/
+        // `_LOCALGOV_SUPPORT_COST`), which nothing else this tick spends
+        // from, so ordering can no longer starve it. Kept first anyway:
+        // this is still the AI's judgment call that ending an indefinite
+        // political penalty (`balance::GROUP_CAPITAL_LOSS_*`, accruing every
+        // day without a capital) outweighs one more squadron or building
+        // this same tick, and there is no longer a resource-contention
+        // reason to place it anywhere else.
+        relocate_capital_ai(self.faction, obs, &mut actions);
+
         reinforce(self.faction, obs, &mut actions);
         self.chronic_insolvency_ticks = if obs.world.faction(self.faction).stock[Good::Munitions.index()]
             <= CHRONIC_LOW_MUNITIONS_FLOOR
@@ -2822,6 +2836,105 @@ fn zone_path_next(world: &World, from: SeaZoneId, to: SeaZoneId) -> Option<SeaZo
 /// or continue directing new resources into construction (an already
 /// in-progress project run by `construction::tick_construction` still
 /// slows down instead of stalling - this gate only stops *new* orders).
+/// docs/capital-spec.md §4 ("AI"): the heuristic half of Stage C. Without
+/// this, an AI faction that loses its capital sits under
+/// `balance::GROUP_CAPITAL_LOSS_*`'s political shock forever unless it
+/// happens to reconquer that *exact* region - `Action::RelocateCapital`
+/// gives the simulation a way out (docs/conventions.md/CLAUDE.md's
+/// 「状態には必ず回復経路を持たせる。入ったら出られない状態を作らない」),
+/// but nothing used it, and the default experience is AI-vs-AI, so in
+/// practice the recovery path was dead code.
+///
+/// No-op unless the faction's own capital region is currently owned by
+/// someone else - the *only* gate this function applies now. `balance::
+/// RELOCATE_CAPITAL_MACHINERY_COST` (and the affordability check that read
+/// it) is gone: the action's cost moved to `group_support`
+/// (`balance::RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`/
+/// `_LOCALGOV_SUPPORT_COST`), which floors at 0.0 rather than blocking the
+/// action, so there is nothing left to be unable to "afford" - see those
+/// constants' own doc. `apply_relocate_capital` deliberately doesn't
+/// require having lost the capital first (a faction may pre-empt under
+/// threat), but this AI still doesn't attempt that judgement call:
+/// relocating away from a capital that is merely threatened, not yet lost,
+/// would spend real political support against a front line that might not
+/// move, and a false positive here is a real cost with no way to reclaim it
+/// besides moving again. Reacting only to an actual, already-realized loss
+/// keeps this simple and keeps the AI from flinching at every advance.
+///
+/// Destination: the best-scoring safe interior region, using exactly the
+/// same "avoid the front, avoid contested ground, take the best-scoring
+/// candidate, fall back to any safe region if the interior is empty" search
+/// `safest_high_infra_region` already runs for `build` - scored here by
+/// `Region::value` (`industry_total() * 1.5 + population * 0.05 + port *
+/// 3.0`) instead of `infrastructure`, because `value` is the figure
+/// `offensive`/`zone_value` already use to weigh how much a region is worth
+/// fighting over, and "where would a government want to move its seat"
+/// is the same question in reverse: somewhere populous and industrially
+/// weighty (the actual substance of a capital), not on the edge of the war.
+/// Reusing `value` rather than inventing a third notion of "how good is
+/// this region" is `docs/conventions.md` §1's
+/// 「エクストリームプログラミング禁止」in practice - the scoring
+/// abstraction (filter front/contested, fold to the best score, fall back)
+/// already exists; only the scoring function needed to change.
+///
+/// Silently does nothing if the faction holds no safe region at all (an
+/// encircled faction with nothing left) - `apply_relocate_capital` would
+/// reject that case anyway, and this function's only job is deciding
+/// *whether and where*, not re-validating what the action itself already
+/// validates.
+///
+/// **Measured (docs/capital-spec.md Stage D):** with the old `Good::
+/// Machinery` price, this never fired at all across a full 720-day run on
+/// `scenarios/japan_hex.json` seeds 1-3 with the default `HeuristicAgent`
+/// on both sides - every capital-less faction's Machinery stock stayed
+/// under the old `20.0` cost the entire time it lacked a capital (highest
+/// observed `~15.06`), and a before/after run (this call present vs.
+/// removed) was byte-identical. With the political cost, both AI-vs-AI
+/// runs now differ, and the reported relocation counts/capital-less-day
+/// counts below are no longer both zero (see this change's own report for
+/// the exact figures).
+fn relocate_capital_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
+    let world = obs.world;
+    let capital = world.faction(faction).capital;
+    if world.region(capital).owner == faction {
+        return;
+    }
+    if let Some(destination) = best_capital_relocation_target(faction, obs) {
+        actions.push(Action::RelocateCapital { region: destination });
+    }
+}
+
+/// The best destination for `relocate_capital_ai`: the highest-`value`
+/// interior (non-front), uncontested own region, or - if the faction holds
+/// no interior territory at all - the lowest-id uncontested own region of
+/// any kind. Mirrors `safest_high_infra_region`'s two-tier search exactly,
+/// scored by `Region::value` instead of `infrastructure` (see
+/// `relocate_capital_ai`'s doc for why).
+fn best_capital_relocation_target(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    let front: BTreeSet<RegionId> = obs.front_regions().into_iter().collect();
+    let world = obs.world;
+    let mut own = obs.own_regions();
+    own.sort_by_key(|r| r.0);
+
+    let interior_best = own
+        .iter()
+        .copied()
+        .filter(|r| !front.contains(r) && !world.has_enemy_units(*r, faction))
+        .fold(None, |best: Option<(RegionId, f32)>, r| {
+            let value = world.region(r).value();
+            match best {
+                Some((_, best_value)) if value <= best_value => best,
+                _ => Some((r, value)),
+            }
+        })
+        .map(|(r, _)| r);
+    if interior_best.is_some() {
+        return interior_best;
+    }
+
+    own.into_iter().find(|&r| !world.has_enemy_units(r, faction))
+}
+
 fn build(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let machinery_days = f.stock[Good::Machinery.index()] / INFANTRY_INPUT_MACHINERY;

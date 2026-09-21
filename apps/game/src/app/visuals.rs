@@ -380,16 +380,25 @@ const LABEL_ZOOM_THRESHOLD: f32 = 1.5;
 /// has the full rationale) - a no-op in effect on a sparse map, where every
 /// label's `always_visible` is unconditionally `true` (`setup::setup`), so
 /// the `||` chain below always resolves to `Visibility::Visible` there
-/// without ever consulting zoom, selection, or occupation. On a dense map,
-/// a label is visible while it's a capital/top-decile-population region
-/// (`always_visible`), the region is under active occupation (`occupier`
-/// - a fight over it is exactly the moment its name matters most, and
-/// unlike population/capital status this can start or end at any time, so
-/// it's checked fresh every frame rather than baked in at spawn), the
-/// camera has zoomed in past `LABEL_ZOOM_THRESHOLD`, or the player has
-/// selected that exact region - matching the task's own combined policy:
-/// "at sufficient zoom" plus "selected" plus "significant (population,
+/// without ever consulting zoom, selection, occupation, or capital status.
+/// On a dense map, a label is visible while it's a top-decile-population
+/// region (`always_visible`), the region is under active occupation
+/// (`occupier`), it is *any* faction's current capital (`Faction::capital`
+/// - re-read from `world` fresh every call, same as `occupier`), the camera
+/// has zoomed in past `LABEL_ZOOM_THRESHOLD`, or the player has selected
+/// that exact region - matching the task's own combined policy: "at
+/// sufficient zoom" plus "selected" plus "significant (population,
 /// capitals, contested)".
+///
+/// Capital status is checked here rather than baked into
+/// `RegionLabelMarker::always_visible` at spawn time (`codex review
+/// --uncommitted` P2, `docs/capital-spec.md` Stage C): `Faction::capital`
+/// can change after startup via `Action::RelocateCapital`, but `setup::
+/// setup` runs exactly once, so a marker field set from it at startup would
+/// keep highlighting a relocated faction's *old* capital forever and never
+/// pick up the new one - the same "occupier can start or end at any time"
+/// reasoning that already keeps contested status out of `always_visible`
+/// applies identically here.
 pub(super) fn sync_region_label_visibility(
     sim: Res<SimRes>,
     selected: Res<SelectedRegion>,
@@ -401,9 +410,13 @@ pub(super) fn sync_region_label_visibility(
         camera.single(),
         Ok(Projection::Orthographic(ortho)) if ortho.scale <= LABEL_ZOOM_THRESHOLD
     );
+    let capitals: std::collections::HashSet<archipelago_sim::ids::RegionId> =
+        world.factions.iter().map(|f| f.capital).collect();
     for (marker, mut visibility) in &mut labels {
         let contested = world.regions.get(marker.region.index()).is_some_and(|r| r.occupier.is_some());
-        let show = marker.always_visible || contested || zoomed_in_enough || selected.0 == Some(marker.region);
+        let is_capital = capitals.contains(&marker.region);
+        let show =
+            marker.always_visible || contested || is_capital || zoomed_in_enough || selected.0 == Some(marker.region);
         *visibility = if show { Visibility::Visible } else { Visibility::Hidden };
     }
 }
@@ -577,5 +590,65 @@ mod tests {
                 14.0 * zoom
             );
         }
+    }
+
+    /// `codex review --uncommitted` (P2), docs/capital-spec.md Stage C:
+    /// `RegionLabelMarker::always_visible` used to bake `Faction::capital`
+    /// in once, at `setup::setup` time, so a relocation
+    /// (`Action::RelocateCapital`) left the *old* capital's label
+    /// highlighted forever and never revealed the new one. Fixed by
+    /// re-reading `Faction::capital` fresh every call in
+    /// `sync_region_label_visibility`, the same way `occupier` already is -
+    /// this pins that down directly: two labels, neither `always_visible`,
+    /// zoomed out, nothing selected - the one region that is a faction's
+    /// *current* capital must show, and the one that no longer is (despite
+    /// being the value baked in at hypothetical startup) must not.
+    ///
+    /// Confirmed this can fail: dropped `is_capital` from `show`'s `||`
+    /// chain (the exact pre-fix behaviour) and re-ran - the live capital's
+    /// label stayed `Hidden` instead of `Visible`. Restored before
+    /// committing.
+    #[test]
+    fn region_label_visibility_follows_the_current_capital_not_a_startup_snapshot() {
+        let mut world = World::new();
+
+        let mut sim_world = scenario::build_world();
+        let faction = sim_world.factions[0].id;
+        let old_capital = sim_world.factions[0].capital;
+        let new_capital = sim_world
+            .regions
+            .iter()
+            .find(|r| r.owner == faction && r.id != old_capital)
+            .map(|r| r.id)
+            .expect("mvp.json gives every faction more than one region");
+        // Simulate having already relocated: `Action::RelocateCapital`'s
+        // only real effect is exactly this field write (see its own doc in
+        // `action.rs`) - the visuals layer must never need the action
+        // itself to have run, only the resulting world state.
+        sim_world.factions[0].capital = new_capital;
+
+        world.insert_resource(SimRes(SimDriver::new(sim_world, 1)));
+        world.insert_resource(SelectedRegion(None));
+        // Zoomed out well past `LABEL_ZOOM_THRESHOLD` so that term of the
+        // `||` chain stays false and doesn't mask what this test checks.
+        world.spawn((MainCamera, Projection::Orthographic(OrthographicProjection { scale: 4.0, ..OrthographicProjection::default_2d() })));
+
+        let old_label =
+            world.spawn((RegionLabelMarker { region: old_capital, always_visible: false }, Visibility::Hidden)).id();
+        let new_label =
+            world.spawn((RegionLabelMarker { region: new_capital, always_visible: false }, Visibility::Hidden)).id();
+
+        run(&mut world, sync_region_label_visibility);
+
+        assert_eq!(
+            *world.entity(new_label).get::<Visibility>().unwrap(),
+            Visibility::Visible,
+            "the faction's current capital must be visible even though it was never the startup capital"
+        );
+        assert_eq!(
+            *world.entity(old_label).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "a region that is no longer any faction's capital must not stay force-shown"
+        );
     }
 }

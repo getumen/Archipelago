@@ -17,6 +17,8 @@ use crate::balance::{
     FOCUS_MILITARY_SUPPORT_BONUS, FOCUS_TECHNOCRACY_BUREAUCRACY_SUPPORT_BONUS, GROUP_ADAPT_RATE,
     GROUP_ARMS_LEAN_BUSINESS_BONUS, GROUP_ARMS_LEAN_CITIZENS_PENALTY,
     GROUP_ARMS_LEAN_MILITARY_BONUS, GROUP_ARMS_STOCK_MARGIN, GROUP_ARMS_STOCK_MILITARY_BONUS,
+    GROUP_CAPITAL_LOSS_BUREAUCRACY_PENALTY, GROUP_CAPITAL_LOSS_BUSINESS_PENALTY,
+    GROUP_CAPITAL_LOSS_MILITARY_PENALTY,
     GROUP_CASUALTY_CITIZENS_PENALTY, GROUP_CASUALTY_GOVERNMENT_PENALTY,
     GROUP_CASUALTY_MILITARY_PENALTY, GROUP_CASUALTY_NORM, GROUP_CONSCRIPTION_CITIZENS_PENALTY,
     GROUP_CONSCRIPTION_LABOR_PENALTY, GROUP_CONSCRIPTION_MILITARY_BONUS,
@@ -43,6 +45,33 @@ use crate::scenario::{
     FACTION_CONSCRIPTION, FACTION_IMPORT_PLAN, FACTION_INDUSTRY_PRIORITY, FACTION_LOGISTICS_PRIORITY,
 };
 use crate::world::{OccupationKind, Region, World};
+
+/// docs/capital-spec.md's Stage D defect fix: counts down every living
+/// faction's in-progress `Action::RelocateCapital` transition
+/// (`Faction::capital_transition_days`) - the same "maintenance runs before
+/// anything reads today's state" slot `focus::tick_national_focus` occupies,
+/// and called right alongside it (`Simulation::step_timed`). A real
+/// spent-down budget, decremented once per day, never a ratio re-applied to
+/// a remainder (`focus.rs`'s module doc explains why that distinction is
+/// what keeps rapid re-triggering from ever shortening or stacking
+/// anything - the same reasoning applies here unchanged).
+///
+/// Unconditional: this never checks whether the faction's `capital` region
+/// is still owned by it, still contested, or anything else about what
+/// happened during the transition - it just counts down and stops at `0`.
+/// That is deliberate (docs/conventions.md §6, "入ったら出られない状態を作ら
+/// ない"): a faction whose relocation destination falls to the enemy
+/// mid-transition still reaches `capital_transition_days == 0` on schedule
+/// and is immediately free to call `Action::RelocateCapital` again -
+/// nothing here can leave a faction stuck waiting on a doomed relocation
+/// past its own fixed duration.
+pub fn tick_capital_relocation(world: &mut World) {
+    for faction in world.factions.iter_mut() {
+        if faction.capital_transition_days > 0 {
+            faction.capital_transition_days -= 1;
+        }
+    }
+}
 
 /// `day_casualties`/`region_delta` are indexed like `World::factions`:
 /// manpower lost this tick, and the net change in owned region count this
@@ -119,6 +148,26 @@ pub fn tick_politics(
         })
         .collect();
     let machinery_ratio: Vec<f32> = world.factions.iter().map(|f| f.machinery_output_ratio).collect();
+    // docs/capital-spec.md: whether each faction currently holds a *secure*
+    // capital - straight off `Region::owner` (see `Faction::capital`'s own
+    // doc for why no separate flag tracks holding it), **and** not
+    // mid-relocation (`Faction::capital_transition_days > 0`,
+    // `capital_transition_days`'s own doc in world.rs). Stage D defect fix:
+    // this second condition is what makes the capital-loss penalty below
+    // keep running for the length of `balance::CAPITAL_RELOCATION_DAYS`
+    // even though `capital` itself already points at the (perfectly safe)
+    // destination the instant `Action::RelocateCapital` applies - without
+    // it, every faction escaped the penalty the same tick it relocated,
+    // which measured out to escaping within single digits of days across
+    // `scenarios/japan_hex.json`. Precomputed once per tick, the same shape
+    // `shortage`/`supply_ratio`/`arms_stock` above already use, purely so
+    // the per-faction loop below doesn't reborrow `world.regions` while
+    // `world.factions` is mutably borrowed through it.
+    let capital_secure: Vec<bool> = world
+        .factions
+        .iter()
+        .map(|f| f.capital_transition_days == 0 && world.regions[f.capital.index()].owner == f.id)
+        .collect();
 
     for f_idx in 0..n {
         if !world.factions[f_idx].alive {
@@ -149,6 +198,13 @@ pub fn tick_politics(
         let arms_stock_f =
             (arms_stock[f_idx] / (UNIT_EQUIPMENT * GROUP_ARMS_STOCK_MARGIN)).clamp(0.0, 1.0);
         let machinery_f = machinery_ratio[f_idx].clamp(0.0, 1.0);
+        // docs/capital-spec.md: `1.0` for every tick the faction does not
+        // hold a secure capital - either it doesn't hold its own capital
+        // region, or it does but a relocation is still mid-transition
+        // (`capital_secure` above) - `0.0` otherwise. A binary condition,
+        // not a `0..1` magnitude (there is no "how much capital lost" to
+        // scale by), matching `GROUP_CAPITAL_LOSS_*`'s own doc.
+        let capital_lost_f = if capital_secure[f_idx] { 0.0 } else { 1.0 };
 
         let mut target = [GROUP_SUPPORT_BASELINE; GROUP_COUNT];
         target[Group::Military.index()] += GROUP_CONSCRIPTION_MILITARY_BONUS * conscription;
@@ -184,6 +240,20 @@ pub fn tick_politics(
 
         target[Group::Military.index()] += GROUP_ARMS_STOCK_MILITARY_BONUS * arms_stock_f;
         target[Group::Business.index()] += GROUP_MACHINERY_GOOD_BUSINESS_BONUS * machinery_f;
+
+        // docs/capital-spec.md: the political shock of not holding the
+        // capital - see `GROUP_CAPITAL_LOSS_*`'s own doc in balance.rs for
+        // why exactly these three groups and no others, and why each
+        // coefficient is sized the way it is. A live condition, not a
+        // one-tick pulse sampled at the moment of capture: it contributes
+        // every day `capital_lost_f` reads `1.0` and stops the instant the
+        // faction holds a capital again (reconquest of the original region,
+        // or `Action::RelocateCapital`), so `group_support`'s own
+        // target-approach machinery is the entire recovery path - no
+        // separate accumulator or timer to unwind.
+        target[Group::Military.index()] -= GROUP_CAPITAL_LOSS_MILITARY_PENALTY * capital_lost_f;
+        target[Group::Business.index()] -= GROUP_CAPITAL_LOSS_BUSINESS_PENALTY * capital_lost_f;
+        target[Group::Bureaucracy.index()] -= GROUP_CAPITAL_LOSS_BUREAUCRACY_PENALTY * capital_lost_f;
 
         // ---- Stage 3C national focus (docs/phase3-spec.md "Stage 3C —
         // 国家方針"'s modifier table): only the three foci with a

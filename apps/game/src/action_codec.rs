@@ -257,6 +257,9 @@ pub fn action_to_value(action: &Action) -> Value {
         Action::StrikeNode { node } => {
             Value::obj(vec![("type", Value::str("strike_node")), ("node", Value::num(node.0 as f64))])
         }
+        Action::RelocateCapital { region } => {
+            Value::obj(vec![("type", Value::str("relocate_capital")), ("region", Value::num(region.0 as f64))])
+        }
     }
 }
 
@@ -362,6 +365,7 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
         }
         "interdict_line" => Ok(Action::InterdictLine { line: TransportLineId(u32_field("line")?) }),
         "strike_node" => Ok(Action::StrikeNode { node: TransportNodeId(u32_field("node")?) }),
+        "relocate_capital" => Ok(Action::RelocateCapital { region: RegionId(u32_field("region")?) }),
         other => Err(format!("unknown action type `{other}`")),
     }
 }
@@ -570,6 +574,7 @@ mod tests {
             },
             Action::InterdictLine { line: archipelago_sim::ids::TransportLineId(4) },
             Action::Build { region: RegionId(2), project: Project::TransportLine(archipelago_sim::ids::TransportLineId(4)) },
+            Action::RelocateCapital { region: RegionId(3) },
         ];
         for action in samples {
             let value = action_to_value(&action);

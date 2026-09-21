@@ -3,16 +3,18 @@
 
 use crate::air;
 use crate::balance::{
-    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CIVILIAN_RATION_MAX, CIVILIAN_RATION_MIN,
-    FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS, IMPORT_PLAN_RATE_MAX, LINE_INTERDICTION_DAMAGE,
-    NL_PROPOSAL_TEXT_MAX_CHARS, NODE_STRIKE_DAMAGE, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
-    UNIT_START_ORG_RATIO,
+    AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CAPITAL_RELOCATION_DAYS, CIVILIAN_RATION_MAX,
+    CIVILIAN_RATION_MIN, FOCUS_MARITIME_FLEET_COST_MULT, FOCUS_SWITCH_DAYS, IMPORT_PLAN_RATE_MAX,
+    LINE_INTERDICTION_DAMAGE, NL_PROPOSAL_TEXT_MAX_CHARS, NODE_STRIKE_DAMAGE,
+    RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST, RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST, UNIT_EQUIPMENT,
+    UNIT_MANPOWER, UNIT_ORG, UNIT_START_ORG_RATIO,
 };
 use crate::construction::{required_points, Construction, Project};
 use crate::diplomacy::{self, Stance, Treaty, TreatyTerm};
 use crate::event::Event;
 use crate::focus::{self, NationalFocus};
 use crate::good::Good;
+use crate::group::Group;
 use crate::ids::{FactionId, RegionId, TransportLineId, TransportNodeId, UnitId};
 use crate::logistics;
 use crate::military::{air_move_required, fleet_move_required, move_required, Branch, Movement, Unit};
@@ -192,6 +194,25 @@ pub enum Action {
     /// landed at full `NODE_STRIKE_DAMAGE` with no risk and no air force to
     /// pay for it.
     StrikeNode { node: TransportNodeId },
+    /// docs/capital-spec.md §3: moves this faction's `Faction::capital` to
+    /// `region` - the only way that field ever changes after scenario load
+    /// (see its own doc). This is the recovery path out of the political
+    /// shock `politics::tick_politics` applies for every tick a faction
+    /// doesn't hold its capital (`balance::GROUP_CAPITAL_LOSS_*`):
+    /// docs/conventions.md §6 forbids a state with no way out, and
+    /// reconquering the *exact* original region is not always realistic, so
+    /// this gives a faction that has lost its capital a deliberate second
+    /// path back to having one at all - see `apply_relocate_capital`'s own
+    /// doc for the preconditions and cost.
+    ///
+    /// Stage D defect fix: `capital` flips the instant this applies, but the
+    /// relocation isn't *politically* complete until
+    /// `balance::CAPITAL_RELOCATION_DAYS` later
+    /// (`Faction::capital_transition_days`, `politics::tick_capital_
+    /// relocation`) - see that field's own doc for why the escape has to
+    /// cost real time now instead of being free the instant this action
+    /// lands.
+    RelocateCapital { region: RegionId },
 }
 
 /// One of the four decision domains every `Action` belongs to (design.md
@@ -226,7 +247,18 @@ pub enum Action {
 ///   Machinery/Steel stock `SetIndustryPriority` allocates between goods —
 ///   a separate "infrastructure" layer would isolate two variants that
 ///   share every input and every constraint with the rest of economic
-///   planning, for no distinct policy surface of their own.
+///   planning, for no distinct policy surface of their own. `RelocateCapital`
+///   (docs/capital-spec.md §3) sits beside them for the same reason: a
+///   one-shot, region-targeted national-administration decision (priced in
+///   `group_support`, `balance::RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`/
+///   `RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST` — no longer a Machinery
+///   spend, see those constants' own doc), not a force-structure order
+///   (`Military`) and not a treaty (`Diplomacy`). It is *not*
+///   `GrandStrategy` even though "where the capital is" sounds strategic:
+///   unlike `SetNationalFocus` it reshapes no multiplier anywhere else in
+///   the simulation — it changes one field (`Faction::capital`) the same
+///   way `Build` changes one region's `Construction`, which is exactly
+///   `GrandStrategy`'s own doc's boundary for staying out of that layer.
 /// - **`GrandStrategy`** — `SetNationalFocus` alone, deliberately not folded
 ///   into `Economy` or `Military` even though a given focus's effects land
 ///   on one of them (or on diplomacy): a `NationalFocus` is the one
@@ -320,7 +352,8 @@ impl Action {
             | Action::SetImportPlan { .. }
             | Action::SetResearchAllocation { .. }
             | Action::Build { .. }
-            | Action::CancelBuild { .. } => Layer::Economy,
+            | Action::CancelBuild { .. }
+            | Action::RelocateCapital { .. } => Layer::Economy,
 
             Action::SetNationalFocus(_) => Layer::GrandStrategy,
 
@@ -374,7 +407,8 @@ impl Action {
             | Action::ProposeInNaturalLanguage { .. }
             | Action::RespondToNaturalLanguageProposal { .. }
             | Action::InterdictLine { .. }
-            | Action::StrikeNode { .. } => None,
+            | Action::StrikeNode { .. }
+            | Action::RelocateCapital { .. } => None,
         }
     }
 }
@@ -512,6 +546,7 @@ pub fn apply_action(
         }
         Action::InterdictLine { line } => apply_interdict_line(world, faction, line),
         Action::StrikeNode { node } => apply_strike_node(world, faction, node),
+        Action::RelocateCapital { region } => apply_relocate_capital(world, faction, region),
     }
 }
 
@@ -1790,6 +1825,111 @@ fn apply_strike_node(
     // judged against the picture from before both - CLAUDE.md's
     // 「発令時点の値を焼き込まない」, one batch deep.
     air::refresh_air_superiority_near(world, &refresh_origins);
+    Ok(())
+}
+
+/// docs/capital-spec.md §3: moves this faction's `Faction::capital` to
+/// `region` - the deliberate recovery path out of the political shock
+/// `politics::tick_politics` applies for every tick a faction doesn't hold
+/// its capital (`balance::GROUP_CAPITAL_LOSS_*`) - see `Action::
+/// RelocateCapital`'s own doc for why this exists at all.
+///
+/// Validates the destination the same way `apply_build`/`apply_recruit`
+/// already validate a region a faction wants to invest in - **and** the
+/// acting faction's own means to pay for it (CLAUDE.md's 「行動の前提条件
+/// は、対象だけでなく実行側も検証する」, recorded there because
+/// `StrikeNode` once checked only the target, never whether the striker
+/// itself had aircraft):
+///
+/// - `region` must exist and be owned by `faction` (`ActionError::
+///   RegionNotOwned`) - a faction cannot declare someone else's (or
+///   nobody's) territory its new capital.
+/// - `region` must not be contested (`ActionError::RegionContested`, the
+///   same `has_enemy_units` check `apply_build`/`apply_recruit` already
+///   use) - moving the seat of government into a region under active enemy
+///   attack is not a safe relocation.
+/// - `region` must actually differ from the current capital
+///   (`ActionError::InvalidValue`) - relocating "to where it already is"
+///   would spend the cost below for no state change at all, the same kind
+///   of no-op an airfield-to-itself `MoveUnit` is already refused for. Since
+///   `capital` flips to the destination the instant a relocation applies
+///   (below), this also catches re-affirming a target that is already
+///   mid-transition - the same "same-target repeat is a pure no-op, no
+///   double charge" shape `apply_set_national_focus` gives
+///   `SetNationalFocus`.
+/// - a relocation must not already be under way
+///   (`Faction::capital_transition_days > 0`, `ActionError::InvalidValue`) -
+///   mirrors `apply_set_national_focus`'s "requesting something different
+///   while a switch is already under way is rejected outright, the agent
+///   must let the current transition finish" rule: without this, a
+///   faction could retarget a relocation it's already mid-way through for
+///   free, or attempt to reuse time already spent toward one destination
+///   for a different one.
+///
+/// No affordability check remains: the cost below is political
+/// (`group_support`, floored at 0.0), not a stock that can run out, so
+/// there is nothing left to reject a faction for lacking (see `balance::
+/// RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`'s own doc for why an earlier
+/// `Good::Machinery` price was replaced - it measured as a cost nobody in
+/// `scenarios/japan_hex.json` ever actually paid).
+///
+/// Deliberately does **not** require the faction to currently lack a
+/// capital: a faction under threat may relocate pre-emptively, and gating
+/// this action on the exact condition it exists to resolve would risk
+/// making the recovery path itself unreachable at the moment it matters
+/// most (docs/conventions.md §6's "入ったら出られない状態を作らない" cuts
+/// both ways - the way out must not itself be conditioned on already being
+/// out).
+///
+/// Stage D defect fix: `capital` still flips immediately (matching
+/// `apply_set_national_focus` flipping `national_focus` immediately), but
+/// this also starts a `balance::CAPITAL_RELOCATION_DAYS` transition
+/// (`Faction::capital_transition_days`) during which
+/// `politics::tick_politics` keeps treating this faction as lacking a
+/// secure capital - see that field's own doc for why. The transition always
+/// finishes on schedule (`politics::tick_capital_relocation` is an
+/// unconditional countdown, never re-validated against what happened to the
+/// destination meanwhile) - docs/conventions.md §6's "入ったら出られない状態
+/// を作らない" applies to *this* wait too: even a faction whose destination
+/// falls to the enemy mid-transition is never stuck past
+/// `CAPITAL_RELOCATION_DAYS`, since the countdown reaching zero unblocks a
+/// fresh `RelocateCapital` call regardless of whether the one that just
+/// finished left the faction with a secure capital or not.
+fn apply_relocate_capital(
+    world: &mut World,
+    faction: FactionId,
+    region_id: RegionId,
+) -> Result<(), ActionError> {
+    let region = world.regions.get(region_id.index()).ok_or(ActionError::RegionNotOwned)?;
+    if region.owner != faction {
+        return Err(ActionError::RegionNotOwned);
+    }
+    if world.has_enemy_units(region_id, faction) {
+        return Err(ActionError::RegionContested);
+    }
+    if region_id == world.faction(faction).capital {
+        return Err(ActionError::InvalidValue);
+    }
+    if world.faction(faction).capital_transition_days > 0 {
+        return Err(ActionError::InvalidValue);
+    }
+
+    // docs/capital-spec.md §2 "遷都には代償を置く" - a political cost, paid
+    // unconditionally (never gated on the level either group is currently
+    // at) so the action stays reachable from the exact state it exists to
+    // recover from (docs/conventions.md §6). See `balance::
+    // RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST`'s own doc for why these two
+    // groups and why these two magnitudes, and why this is charged now, at
+    // declaration, rather than when the transition below completes.
+    let f = world.faction_mut(faction);
+    f.group_support[Group::Government.index()] =
+        (f.group_support[Group::Government.index()] - RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST)
+            .clamp(0.0, 100.0);
+    f.group_support[Group::LocalGovernment.index()] =
+        (f.group_support[Group::LocalGovernment.index()] - RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST)
+            .clamp(0.0, 100.0);
+    f.capital = region_id;
+    f.capital_transition_days = CAPITAL_RELOCATION_DAYS;
     Ok(())
 }
 

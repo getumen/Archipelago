@@ -263,6 +263,11 @@ pub fn action_from_value(v: &Value) -> Result<Action, String> {
             let node = v.get("node").and_then(Value::as_u32).ok_or("expected integer `node`")?;
             Ok(Action::StrikeNode { node: TransportNodeId(node) })
         }
+        // docs/capital-spec.md §3: `Action::RelocateCapital`'s wire form.
+        "relocate_capital" => {
+            let region = v.get("region").and_then(Value::as_u32).ok_or("expected integer `region`")?;
+            Ok(Action::RelocateCapital { region: RegionId(region) })
+        }
         other => Err(format!("unknown action type `{other}`")),
     }
 }
@@ -422,6 +427,7 @@ fn actions_schema() -> Value {
         ),
         action_entry("interdict_line", Layer::Military, vec![field("line", "integer", true)]),
         action_entry("strike_node", Layer::Military, vec![field("node", "integer", true)]),
+        action_entry("relocate_capital", Layer::Economy, vec![field("region", "integer", true)]),
     ])
 }
 

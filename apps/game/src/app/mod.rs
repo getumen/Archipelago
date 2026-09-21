@@ -410,7 +410,16 @@ pub(crate) struct Rejection {
 pub(crate) fn rejection_target_of(action: &Action) -> RejectionTarget {
     match action {
         Action::MoveUnit { .. } | Action::HoldUnit { .. } | Action::ReinforceUnit { .. } | Action::DisbandUnit { .. } => RejectionTarget::Unit,
-        Action::RecruitUnit { region, .. } | Action::Build { region, .. } | Action::CancelBuild { region } => RejectionTarget::Region(*region),
+        Action::RecruitUnit { region, .. }
+        | Action::Build { region, .. }
+        | Action::CancelBuild { region }
+        // docs/capital-spec.md §3: region-targeted and Economy-layer the
+        // same way `Build`/`CancelBuild`/`RecruitUnit` already are (see
+        // `Action::layer`'s own doc for why) - no dedicated panel exists yet
+        // for it any more than one does for `SetResearchAllocation`, so a
+        // rejection surfaces at the region it named, the same place a
+        // rejected `Build` on that region already does.
+        | Action::RelocateCapital { region } => RejectionTarget::Region(*region),
         Action::SetConscription(_)
         | Action::SetIndustryPriority { .. }
         | Action::SetCivilianRation(_)
@@ -521,10 +530,14 @@ pub(crate) struct SeaZoneMarker(pub SeaZoneId);
 /// "every label always on" behavior, exactly unchanged - the per-frame
 /// system's zoom/selection checks then never matter, since the `||` they
 /// sit behind already short-circuits true. On a dense map (`japan_hex`) it's
-/// `true` only for a faction capital or a population-top-decile region
-/// (`setup::significant_regions`) - every other label starts hidden and is
-/// revealed only once the player zooms in past `visuals::
-/// LABEL_ZOOM_THRESHOLD` or selects that exact region.
+/// `true` only for a population-top-decile region (`setup::
+/// significant_regions`) - every other label starts hidden and is revealed
+/// only once the player zooms in past `visuals::LABEL_ZOOM_THRESHOLD`,
+/// selects that exact region, or (like `occupier`) it is a faction's
+/// *current* capital, re-checked fresh every frame in `visuals::
+/// sync_region_label_visibility` rather than baked in here - a capital can
+/// change after startup (`Action::RelocateCapital`) and this field cannot
+/// (`setup::setup` spawns it once and never revisits it).
 #[derive(Component)]
 pub(crate) struct RegionLabelMarker {
     pub region: RegionId,

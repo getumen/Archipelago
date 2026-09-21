@@ -182,6 +182,10 @@ NEWLY_ADDED_ACTION_TYPES = {
     "respond_to_natural_language_proposal",
     "interdict_line",
     "strike_node",
+    # docs/capital-spec.md §3: Action::RelocateCapital, added the same way
+    # (and checked the same way, per that doc's own instruction not to
+    # repeat the schema/table-drift defect a third time).
+    "relocate_capital",
 }
 
 
