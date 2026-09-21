@@ -75,7 +75,7 @@ use super::input::MENU_ITEMS;
 use super::map_mode::MapModeRes;
 use super::setup::{text_font, RIGHT_COLUMN_WIDTH};
 use super::{
-    ActiveBranch, ActiveGood, ActiveResearchAxis, DiplomacyPanel, LastRejection, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion,
+    ActiveBranch, ActiveGood, ActiveResearchAxis, DiplomacyPanel, LastRejection, LeftColumnRoot, NlCompose, PlayerFaction, PolicyPanel, RejectionTarget, RightColumnRoot, SelectedRegion,
     SelectedUnits, SimRes, SpeedRes,
 };
 use crate::action_codec::action_error_ja;
@@ -95,8 +95,9 @@ pub(super) fn mark_pointer_over_ui(mut pointer: ResMut<PointerOverUi>, interacti
 }
 
 // ---------------------------------------------------------------------
-// Right column: keyboard scroll (`setup::spawn_right_column`'s own doc has
-// the overflow policy this implements)
+// Left/right column keyboard scroll (`setup::spawn_right_column`'s own doc
+// has the overflow policy this implements; `setup::spawn_left_column`'s own
+// doc has this task's identical fix applied to the other side).
 // ---------------------------------------------------------------------
 
 /// `ScrollPosition` units-per-second while `PageUp`/`PageDown` is held -
@@ -108,24 +109,33 @@ pub(super) fn mark_pointer_over_ui(mut pointer: ResMut<PointerOverUi>, interacti
 /// that system, not this one - reusing the wheel here would either fight
 /// that binding or need it re-plumbed to gate on hover, neither of which
 /// this fix's own scope calls for.
-const RIGHT_COLUMN_SCROLL_SPEED: f32 = 600.0;
+const COLUMN_SCROLL_SPEED: f32 = 600.0;
 
-/// The right column's own overflow policy (`setup::spawn_right_column`'s own
-/// doc, "Overflow policy"): content taller than the column's fixed,
+/// Both side columns' own overflow policy (`setup::spawn_right_column`'s own
+/// doc, "Overflow policy"; `setup::spawn_left_column`'s own doc for this
+/// task's identical fix on the left): content taller than a column's fixed,
 /// window-relative height clips (`Overflow::scroll_y()`) rather than
 /// spilling past the window's bottom edge - this is what makes that content
 /// reachable again rather than silently lost. `ScrollPosition` is clamped to
 /// the valid scrollable range by `bevy_ui`'s own layout system every frame
 /// (`ScrollPosition`'s own doc), so holding either key past the actual
 /// content's end is a no-op, not a bug needing its own clamp here.
-pub(super) fn handle_right_column_scroll(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Query<&mut ScrollPosition, With<RightColumnRoot>>) {
-    let Ok(mut scroll) = query.single_mut() else { return };
-    let delta = RIGHT_COLUMN_SCROLL_SPEED * time.delta_secs();
-    if keys.pressed(KeyCode::PageDown) {
-        scroll.0.y += delta;
-    }
-    if keys.pressed(KeyCode::PageUp) {
-        scroll.0.y = (scroll.0.y - delta).max(0.0);
+///
+/// One `PageUp`/`PageDown` binding drives both columns at once (`for mut
+/// scroll in &mut query`, not `query.single_mut()`) rather than needing a
+/// second key pair for the left column `codex review`'s own fix introduced -
+/// a spectator or player never has to guess which column a given keypress
+/// affects, and scrolling a column with nothing to scroll is a no-op (the
+/// same clamp-to-valid-range guarantee above).
+pub(super) fn handle_column_scroll(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Query<&mut ScrollPosition, Or<(With<RightColumnRoot>, With<LeftColumnRoot>)>>) {
+    let delta = COLUMN_SCROLL_SPEED * time.delta_secs();
+    for mut scroll in &mut query {
+        if keys.pressed(KeyCode::PageDown) {
+            scroll.0.y += delta;
+        }
+        if keys.pressed(KeyCode::PageUp) {
+            scroll.0.y = (scroll.0.y - delta).max(0.0);
+        }
     }
 }
 

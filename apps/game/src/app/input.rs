@@ -756,8 +756,8 @@ pub(super) fn keyboard_pan(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut
 /// labeled `[-/=]` in `panels::PolicyField::label`), `BracketLeft`/`Right`
 /// step the ration, `Semicolon`/`Quote` step industry priority, `Comma`/
 /// `Period` step logistics priority - and `PageUp`/`PageDown`, another
-/// plausible "step" pair, already scrolls the right column
-/// (`panels::handle_right_column_scroll`). So this reuses `Minus`/`Equal`
+/// plausible "step" pair, already scrolls both side columns
+/// (`panels::handle_column_scroll`). So this reuses `Minus`/`Equal`
 /// themselves rather than inventing a fresh, unclaimed pair: `KeyCode` is a
 /// physical/positional code, not a layout glyph - on a US layout `Equal` is
 /// unshifted `=` and shifted `+`, and this binding, like the conscription

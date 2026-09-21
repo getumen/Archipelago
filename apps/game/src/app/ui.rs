@@ -22,7 +22,8 @@ use super::map_mode::terrain_label;
 use super::panels::stance_label_ja;
 use super::{
     EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperPanelText, NewspaperState, PlayerFaction,
-    PlayerPanelText, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, TopBarPlayerStatsText, TopBarText,
+    PlayerPanelText, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes, StandingsHistory, StandingsPanelText,
+    TopBarPlayerStatsText, TopBarText,
 };
 
 /// Usability fix (play-test finding #2 - "nothing tells the player when a
@@ -226,6 +227,126 @@ pub(super) fn update_top_bar_player_stats(
         faction.war_support,
         faction.shortage,
     );
+}
+
+/// The all-factions-at-once standings panel: answers "who is winning"
+/// without cycling `Tab` through every faction one at a time (task ask - a
+/// screenshot at day 300 of an unattended AI-vs-AI run found nothing on
+/// screen answering that question at all, only `update_faction_panel`'s
+/// single-faction detail below). Four numbers per faction, chosen instead
+/// of dumping every field `Faction` carries:
+///
+/// - **領土 (`World::region_count`).** The most direct read of "who is
+///   winning" a territorial war - `update_faction_panel`'s own first line
+///   already treats it the same way.
+/// - **部隊数 (living unit count).** Territory alone hides a faction
+///   massing an army before a push, or bleeding units it can't replace
+///   while still holding ground - the military-strength half territory
+///   alone doesn't show.
+/// - **人的資源 (`manpower`).** 今日の優位を明日も続けられるかを示す。
+///   部隊は人で補充する。ここが尽きた勢力は、領土を保っていても損耗を
+///   埋められない。`HeuristicAgent::recruit` の徴募ゲートが実際に
+///   manpower で 6〜15% 発火することを測ってある。
+///
+///   **ここには当初 `stability` を置いていた。** 「勝ち続けている勢力が
+///   政治的に倒れるか」を示す数字として選んだが、**画面を見て、次いで
+///   測って、外した。** japan_hex の 3 seed・day 600 の生存勢力で:
+///
+/// ```text
+/// 安定度    51.19..52.59   勢力間の開き 1.0 倍
+/// 補給率    0.00..1.00                10〜13 倍
+/// 人的資源  0.19..31.55               20〜150 倍
+/// 戦死      0.55..24.51               17〜44 倍
+/// ```
+///
+///   **安定度は誰も区別していない。** 100 点満点で 1.4 点の幅しかなく、
+///   CLAUDE.md が「政治事件が 0〜5 件しか起きない」「§12 の倒閣は成立して
+///   いない」と記録している実測とそのまま整合する。順位表の 1 列を占める
+///   価値がない。**理屈の上で正しい数字が、実際には何も語らないことがある。**
+/// - **補給率 (`supply_ratio`).** design.md §2's "港湾封鎖された勢力は輸入が
+///   止まり... 飢える" causal claim: a faction can look intact by unit count
+///   and territory while its army is quietly starving - this is the number
+///   that shows it.
+///
+/// Deliberately **not** shown: `war_support` (it drifts toward a fixed
+/// baseline and mostly tracks `stability`'s own direction rather than
+/// adding an independent signal - CLAUDE.md's own measurement of this
+/// simulation's political dynamics; showing both would be exactly the
+/// "shows everything, so shows nothing" failure mode this panel exists to
+/// avoid) and `research_progress` (a longer-horizon figure than "who is
+/// winning right now", and one Phase 12 shipped no other reader of at all -
+/// see that field's own doc in `crates/sim/src/world.rs`).
+///
+/// **Trend, not just a snapshot** (task ask: "show change, not just
+/// state"): 領土/部隊数 each carry a `(+N)`/`(-N)` delta against
+/// `StandingsHistory::baseline`, up to `NEWSPAPER_INTERVAL_DAYS` (30) days
+/// old - that resource's own doc has the full reasoning for the window.
+/// 補給率/人的資源 show no delta: CLAUDE.md's own measurement is that both
+/// hover in a narrow equilibrium band by design ("supply_ratio 0.4 前後は
+/// 仕様である"), so a 30-day delta on either is usually noise; 領土/部隊数
+/// are exactly the two figures that move in discrete steps when a battle
+/// actually resolves, which is the "gaining/losing ground" a spectator
+/// watching this panel actually wants to see.
+///
+/// **Ordered by territory, descending** (task ask: "order it meaningfully
+/// and say what you ordered by") - tie-broken by unit count, then by
+/// `FactionId` for a stable, deterministic order across frames. An
+/// eliminated faction (`Faction::alive == false`) always has zero territory
+/// and zero units by the time it's marked eliminated (`Simulation::tick`'s
+/// own elimination check in `crates/sim/src/sim.rs` sets `alive = false`
+/// exactly when `region_count` hits zero, killing every remaining unit in
+/// the same step), so it sorts to the bottom with no special-cased branch;
+/// it is still labeled `(脱落)`, the same wording `update_faction_panel`
+/// already uses, so CLAUDE.md's "脱落した勢力をそう表示する" property holds
+/// here too.
+pub(super) fn update_standings_panel(sim: Res<SimRes>, player: Res<PlayerFaction>, standings: Res<StandingsHistory>, mut query: Query<&mut Text, With<StandingsPanelText>>) {
+    let Ok(mut text) = query.single_mut() else { return };
+    let world = sim.0.world();
+
+    let unit_count = |faction: archipelago_sim::ids::FactionId| world.units.iter().filter(|u| u.alive && u.owner == faction).count();
+
+    let mut order: Vec<usize> = (0..world.factions.len()).collect();
+    order.sort_by(|&a, &b| {
+        let fa = &world.factions[a];
+        let fb = &world.factions[b];
+        world
+            .region_count(fb.id)
+            .cmp(&world.region_count(fa.id))
+            .then_with(|| unit_count(fb.id).cmp(&unit_count(fa.id)))
+            .then_with(|| fa.id.0.cmp(&fb.id.0))
+    });
+
+    let lines: Vec<String> = order
+        .into_iter()
+        .enumerate()
+        .map(|(rank, idx)| {
+            let faction = &world.factions[idx];
+            let regions = world.region_count(faction.id) as i64;
+            let units = unit_count(faction.id) as i64;
+            let baseline = standings.baseline.get(idx).copied().unwrap_or_default();
+            let region_delta = regions - baseline.regions as i64;
+            let unit_delta = units - baseline.units as i64;
+
+            let you_marker = if player.0 == Some(faction.id) { "【あなたの国】" } else { "" };
+
+            // 脱落した勢力の比率は表示しない。需要が 0 なので `supply_ratio`
+            // は 1.00 に、`stability` は初期値付近に張り付き、**滅んだ勢力が
+            // 「完全に補給され安定している」ように並ぶ。** 生きている勢力と
+            // 並べて見せる表では、これは誤読させるだけである。
+            if !faction.alive {
+                return format!("{}. (脱落) {}", rank + 1, faction.name);
+            }
+            format!(
+                "{}. {you_marker}{}  領土{regions}({region_delta:+})  部隊{units}({unit_delta:+})  補給{:.2}  人的{:.1}",
+                rank + 1,
+                faction.name,
+                faction.supply_ratio,
+                faction.manpower,
+            )
+        })
+        .collect();
+
+    text.0 = lines.join("\n");
 }
 
 /// Usability fix (play-test finding #1 - "the faction detail panel does not
@@ -531,6 +652,8 @@ mod tests {
     use archipelago_sim::scenario;
 
     use crate::sim_driver::SimDriver;
+
+    use crate::app::StandingsSnapshot;
 
     /// A `SimRes` with `player` as the live human faction, on the unmodified
     /// MVP scenario - same shape as `panels::tests::player_sim`, duplicated
@@ -848,6 +971,88 @@ mod tests {
             node.display,
             Display::None,
             "a hidden panel must also stop reserving flex layout space (Node::display = Display::None) - Visibility::Hidden alone still reserves its width/padding/border/gap"
+        );
+    }
+
+    fn spawn_standings_panel_text(world: &mut World) {
+        world.spawn((Text::new(String::new()), StandingsPanelText));
+    }
+
+    fn standings_panel_text(world: &mut World) -> String {
+        run(world, update_standings_panel);
+        let mut q = world.query_filtered::<&Text, With<StandingsPanelText>>();
+        q.iter(world).next().expect("call spawn_standings_panel_text(world) once before this").0.clone()
+    }
+
+    /// Task ask #1's ordering requirement ("order it meaningfully and say
+    /// what you ordered by" - `update_standings_panel`'s own doc: territory
+    /// descending) and CLAUDE.md's existing "脱落した勢力をそう表示する"
+    /// property, both in one fixture: mvp's own three factions, with every
+    /// region reassigned to faction 0 so factions 1/2 are left with none -
+    /// the exact condition `Simulation::tick`'s own elimination check uses
+    /// (`region_count == 0`), so `alive` is set to match by hand here rather
+    /// than actually driving a `tick()` to reach it.
+    ///
+    /// Confirmed this can fail: temporarily sorted by `FactionId` order
+    /// instead of territory - the first assertion below (faction 0 must
+    /// rank `1.`) failed, since mvp's own faction order is not
+    /// coincidentally already territory-sorted after this mutation only
+    /// changes ownership, not `Faction` array order. Reverted before
+    /// committing.
+    #[test]
+    fn standings_panel_orders_by_territory_and_marks_eliminated_factions() {
+        let mut world = World::new();
+        let mut sim = player_sim(FactionId(0));
+        let name0 = sim.0.world().faction(FactionId(0)).name.clone();
+        {
+            let region_count = sim.0.sim.world.regions.len();
+            for i in 0..region_count {
+                sim.0.sim.world.regions[i].owner = FactionId(0);
+            }
+            sim.0.sim.world.faction_mut(FactionId(1)).alive = false;
+            sim.0.sim.world.faction_mut(FactionId(2)).alive = false;
+        }
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(None));
+        world.insert_resource(StandingsHistory::default());
+        spawn_standings_panel_text(&mut world);
+
+        let text = standings_panel_text(&mut world);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "one line per faction, got: {text}");
+        assert!(
+            lines[0].starts_with("1. ") && lines[0].contains(&name0),
+            "the faction holding every region must rank first, got: {text}"
+        );
+        assert!(
+            lines[1].contains("(脱落)") && lines[2].contains("(脱落)"),
+            "both territory-less factions must be marked (脱落), got: {text}"
+        );
+        assert!(!lines[0].contains("(脱落)"), "the surviving faction must not be marked (脱落), got: {text}");
+    }
+
+    /// Task ask #1's trend requirement ("show change, not just state" -
+    /// `update_standings_panel`'s own doc: territory/unit deltas against
+    /// `StandingsHistory::baseline`). Confirmed this can fail: temporarily
+    /// hardcoded the delta to always `0` in `update_standings_panel` - the
+    /// assertion below failed (`(+2)` never appeared). Reverted before
+    /// committing.
+    #[test]
+    fn standings_panel_shows_a_positive_territory_delta_since_the_baseline() {
+        let mut world = World::new();
+        let sim = player_sim(FactionId(0));
+        let now = sim.0.world().region_count(FactionId(0)) as u32;
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(None));
+        let mut baseline = vec![StandingsSnapshot::default(); 3];
+        baseline[0] = StandingsSnapshot { regions: now.saturating_sub(2), units: 0 };
+        world.insert_resource(StandingsHistory { baseline_day: 0, baseline, ..Default::default() });
+        spawn_standings_panel_text(&mut world);
+
+        let text = standings_panel_text(&mut world);
+        assert!(
+            text.contains("(+2)"),
+            "gaining 2 regions since the baseline must show a (+2) delta, got: {text}"
         );
     }
 }

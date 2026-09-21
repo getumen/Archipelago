@@ -9,15 +9,16 @@ use bevy::sprite::{Anchor, Text2dShadow};
 use archipelago_sim::ids::RegionId;
 use archipelago_sim::world::{LinkKind, Station, World as SimWorld};
 
+use super::camera_fit;
 use super::chrome;
 use super::fonts::AppFont;
 use super::map_mode::{ModeLegendHeader, ModeLegendRow, MODE_LEGEND_ROWS};
 use super::overlay;
 use super::palette::faction_color;
 use super::{
-    AirfieldMarker, EventLogText, FactionPanelText, InspectText, MainCamera, OwnerBorderMarker,
+    AirfieldMarker, EventLogText, FactionPanelText, InspectText, LeftColumnRoot, MainCamera, OwnerBorderMarker,
     PlayerPanelText, PortMarker, RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii,
-    RightColumnRoot, SeaZoneCenters, SeaZoneMarker, SimRes, TopBarText, UnitMarker,
+    RightColumnRoot, SeaZoneCenters, SeaZoneMarker, SimRes, StandingsPanelText, TopBarText, UnitMarker,
 };
 
 /// Region circle radius, `population.sqrt()` scaled into roughly
@@ -549,28 +550,73 @@ pub(super) fn setup(
     spawn_right_column(&mut commands, &font.0, world, player.0);
 }
 
-/// The left column: `FactionPanelText`'s own panel, then `panels::
-/// UnitPanelRoot` below it - one `FlexDirection::Column` container instead
-/// of two independently `PositionType::Absolute` boxes (the same fix
-/// `spawn_right_column`'s own doc already applies on the other side, for
-/// exactly the same reason - see `panels::spawn_unit_panel`'s own doc for
-/// the reproduced collision this replaces). No `Overflow::scroll_y()` here
-/// unlike the right column: the faction panel's own worst case (every other
-/// living faction listed once, `update_faction_panel`'s own diplomacy loop)
-/// is bounded by the scenario's own faction count, not by anything a player
-/// or the simulation can grow without limit, so it comfortably fits every
-/// shipped scenario's window without needing a scroll escape hatch.
+/// The left column: the standings panel (`ui::update_standings_panel`),
+/// then `FactionPanelText`'s own panel, then `panels::UnitPanelRoot` - one
+/// `FlexDirection::Column` container instead of independently
+/// `PositionType::Absolute` boxes (the same fix `spawn_right_column`'s own
+/// doc already applies on the other side, for exactly the same reason - see
+/// `panels::spawn_unit_panel`'s own doc for the reproduced collision this
+/// replaces).
+///
+/// **Bounded height, with `Overflow::scroll_y()` - `codex review` (P2)**:
+/// this task's own standings panel doc argued the whole column stays small
+/// enough to never need this (the standings panel is one line per faction,
+/// bounded by the scenario's own faction count), but that argument only
+/// covered the standings panel in isolation - it did not account for the
+/// faction panel's own every-other-living-faction diplomacy loop and
+/// `panels::UnitPanelRoot`'s own up-to-6-row pool *also* being visible at
+/// once (a `--play`ed `japan_hex` faction with a long diplomacy list and
+/// several units selected), which the standings panel's added height now
+/// pushes closer to spilling past the window's bottom edge with no way
+/// back - exactly the "content must never be silently lost" failure
+/// `spawn_right_column`'s own doc already fixed on the other side. Fixed
+/// the identical way: `top`/`bottom` both set, `height: Val::Auto` (so
+/// `bevy_ui` fills it in from the *current* window size, not a startup
+/// sample - `spawn_right_column`'s own doc, "The box's own height tracks
+/// the window"), `Overflow::scroll_y()`, and `LeftColumnRoot` so `panels::
+/// handle_column_scroll`'s existing `PageUp`/`PageDown` binding reaches
+/// this column too (one binding for both columns, not a second key pair -
+/// see that system's own doc).
+///
+/// `BOTTOM_MARGIN` reuses `camera_fit::SAFE_BOTTOM` rather than an
+/// independently hand-picked number: that constant already is this crate's
+/// one documented answer to "how tall can the bottom-anchored UI (the event
+/// log) reasonably get", so deriving from it keeps this column's own bottom
+/// edge from the same source that already keeps the *camera's* fitted view
+/// clear of the event log, instead of a second, independently-guessed
+/// margin that could silently drift out of sync with it.
 fn spawn_left_column(commands: &mut Commands, font: &Handle<Font>) {
+    const BOTTOM_MARGIN: f32 = camera_fit::SAFE_BOTTOM;
+
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(FACTION_PANEL_TOP),
-            left: Val::Px(10.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(PANEL_GAP),
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(FACTION_PANEL_TOP),
+                bottom: Val::Px(BOTTOM_MARGIN),
+                left: Val::Px(10.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(PANEL_GAP),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            LeftColumnRoot,
+        ))
         .with_children(|col| {
+            // The standings panel (`ui::update_standings_panel`'s own doc
+            // has the metric choices and their rationale) - spawned first,
+            // above the single-faction detail panel below, so a spectator
+            // sees every faction's standing before ever needing to `Tab` to
+            // one for detail. Same 300px width as its two siblings in this
+            // column.
+            col.spawn(chrome::framed(Node { width: Val::Px(300.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(3.0), ..default() }))
+                .insert((chrome::panel_background(), chrome::panel_border()))
+                .with_children(|panel| {
+                    panel.spawn(chrome::panel_title("-- 各勢力の情勢 --", font));
+                    panel.spawn((Node::default(), Text::new(String::new()), text_font(12.0, font), chrome::panel_body_color(), StandingsPanelText));
+                });
+
             col.spawn(chrome::framed(Node { width: Val::Px(300.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(3.0), ..default() }))
                 .insert((chrome::panel_background(), chrome::panel_border()))
                 .with_children(|panel| {
@@ -1114,7 +1160,7 @@ fn spawn_ui(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
         super::NewspaperPanelText,
     ));
 
-    spawn_legend(commands, font);
+    spawn_legend(commands, font, has_player);
 }
 
 /// A small, always-present key to every mark Stage 7C's overlays and
@@ -1177,7 +1223,43 @@ const EVENT_LOG_PANEL_WIDTH: f32 = LEGEND_PANEL_LEFT - EVENT_LOG_PANEL_LEFT - PA
 const NEWSPAPER_PANEL_LEFT: f32 = 340.0;
 const NEWSPAPER_PANEL_WIDTH: f32 = RIGHT_COLUMN_LEFT_EDGE - NEWSPAPER_PANEL_LEFT - PANEL_GAP;
 
-fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
+/// Audit against the actual bindings in `input.rs` (task ask - `N` turned
+/// out to be missing entirely, which raised the question of whether others
+/// were too). Findings, both directions:
+///
+/// - **Bound but unlisted, fixed here:** `N` (newspaper toggle - the task's
+///   own headline finding), `Tab` (`SelectedFaction` cycling - works with no
+///   `--play`ed faction at all, exactly the observer-mode case this task is
+///   about), `Space`/`1`/`2`/`3` (speed - already labeled on the speed
+///   buttons themselves, but never in this always-visible text list),
+///   `Esc` (deselect), and `K`/`U` (disband/delegate - `input::
+///   keyboard_input`'s own bindings, folded into the pre-existing "部隊待機/
+///   補充: ボタン/H/J" row rather than two more rows).
+/// - **Bound but unlisted, left alone:** the newspaper's own `ArrowLeft`/
+///   `ArrowRight` pager (only meaningful once `N` has already been pressed -
+///   the new `新聞: N` row below names it inline instead of a separate,
+///   almost-always-irrelevant row); the research-allocation step keys
+///   `` ` ``/`\` (already reachable via the policy panel's own +/- buttons,
+///   `panels::spawn_policy_panel` - a keyboard-only shortcut for something
+///   already fully clickable, the same tier as `PolicyField`'s bracket/
+///   comma/semicolon step keys, none of which get their own top-level
+///   legend row either).
+/// - **Listed but effectively player-only, moved below `has_player`:**
+///   `地域メニュー`/`徴募兵科`/`研究対象軸切替`/`政策パネル`/`外交パネル`/
+///   `部隊待機・補充` all either return immediately with no `--play`ed
+///   faction (`input::map_right_click_menu`'s own `let Some(player_faction)
+///   = player.0 else { return }`, and every binding in `input::
+///   keyboard_input` from its own identical gate onward) or open a panel
+///   this crate never spawns without one (`panels::spawn_region_action_panel`/
+///   `spawn_policy_panel`/`spawn_diplomacy_panel`, all only children of
+///   `setup::spawn_right_column` `if let Some(player_faction) = ...`) - see
+///   task ask #3, "the legend advertises commands a spectator cannot use".
+///   `対象品目`/`地図モード`/`パネル` stay unconditional: `G`/`M`/
+///   `PageUp`/`PageDown` all work with no player at all (`MapMode::
+///   Industry`'s own commodity picker, `map_mode.0.next()`, and `panels::
+///   handle_column_scroll` are each read/written before any player check,
+///   or never behind one at all).
+fn spawn_legend(commands: &mut Commands, font: &Handle<Font>, has_player: bool) {
     let label_color = Color::srgba(0.85, 0.87, 0.90, 0.95);
     let header_color = Color::srgba(0.6, 0.63, 0.67, 0.9);
 
@@ -1200,10 +1282,12 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             };
 
             // Camera/order controls (`input::mouse_pan_zoom`/`keyboard_pan`/
-            // `map_click_select`/`map_right_click_menu`) - see those systems'
-            // own docs for exactly what each binding does and why. Kept to
-            // one line per binding, matched to the same `<=31`-char width
-            // the longest existing legend row below already proves fits.
+            // `map_click_select`) - see those systems' own docs for exactly
+            // what each binding does and why. Kept to one line per binding,
+            // matched to the same `<=31`-char width the longest existing
+            // legend row below already proves fits. Every row in this first
+            // block works with no `--play`ed faction at all - this is the
+            // spectator's own control set (task ask #3).
             row("操作:", header_color);
             row("移動: スクロール/中ドラッグ", label_color);
             row("移動: 矢印キー（常時）", label_color);
@@ -1218,34 +1302,61 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>) {
             // this binding apart from that one (`input::keyboard_zoom`'s own
             // doc has the full collision-avoidance reasoning).
             row("ズーム: ctrl+ -/=（常時）", label_color);
-            row("選択/命令: 左クリック", label_color);
-            row("地域メニュー: 右クリック", label_color);
+            row("選択: 左クリック", label_color);
+            // Newspaper discoverability fix (task's own headline finding):
+            // `N` toggles it (`input::keyboard_input`'s own binding, works
+            // with no `--play`ed faction) and had no legend row at all -
+            // "何が起きたか" had no discoverable answer on screen. Pager
+            // named inline rather than as its own row (this fn's own doc,
+            // "left alone").
+            row("新聞: N（矢印で送り）", label_color);
+            // `Tab` cycles `SelectedFaction` (`input::keyboard_input`) -
+            // works with no `--play`ed faction, and is the very mechanism
+            // task ask #1's standings panel exists to make less necessary
+            // for an at-a-glance comparison, but it is still how a spectator
+            // reaches any one faction's own detail (`FactionPanelText`), so
+            // it stays a real, discoverable control in its own right.
+            row("勢力切替: Tab", label_color);
+            // `Space`/`1`/`2`/`3` are already labeled on the speed buttons
+            // themselves (`panels::speed_label`) - added here too since
+            // pause/speed is exactly the kind of control a spectator reaches
+            // for constantly and this is the one place every other always-on
+            // control is listed together.
+            row("一時停止/速度: Space/1/2/3", label_color);
+            row("選択解除: Esc", label_color);
             row("地図モード: M ボタン/キー", label_color);
             row("対象品目: 行クリック/G", label_color);
-            // Stage 11C (`codex review` P2): `ActiveBranch`'s own `C` binding
-            // (`input::keyboard_input`'s doc) had no visible-controls
-            // counterpart at all - the region panel's "陸軍を徴募 [歩兵]"
-            // label shows the *current* branch, but nothing on screen told a
-            // player which key changes it, exactly the discoverability gap
-            // `ActiveGood`'s own "対象品目: 行クリック/G" row one line above
-            // already closes for `G`.
-            row("徴募兵科: C ボタン/キー", label_color);
-            // Stage 12C follow-up: `ActiveResearchAxis`'s own `R` binding
-            // (`input::keyboard_input`'s doc) - the same discoverability gap
-            // `ActiveGood`/`ActiveBranch`'s own rows above already close for
-            // `G`/`C`. No "ボタン" here (unlike the two rows above): this
-            // selector has no clickable tab row of its own, only the `R`
-            // key - the policy panel's own "対象軸 [R で切替]:" label names
-            // the same key, not a button.
-            row("研究対象軸切替: R", label_color);
-            row("政策パネル: P ボタン/キー", label_color);
-            row("外交パネル: D ボタン/キー", label_color);
-            row("部隊待機/補充: ボタン/H/J", label_color);
-            // `panels::handle_right_column_scroll` - the right column's own
-            // overflow policy (`setup::spawn_right_column`'s own doc,
-            // "Overflow policy") needs a discoverable way to actually reach
-            // clipped content, not just a mechanism nobody knows exists.
-            row("右パネル: PageUp/PageDown", label_color);
+            // `panels::handle_column_scroll` now drives both side columns
+            // from one binding (`codex review` P2 fix on the left column's
+            // own new overflow risk - `spawn_left_column`'s own doc) - "パ
+            // ネル", not "右パネル", now that it is no longer right-only.
+            row("パネル: PageUp/PageDown", label_color);
+
+            if has_player {
+                row("-- 自国プレイ時のみ --", header_color);
+                row("地域メニュー: 右クリック", label_color);
+                // Stage 11C (`codex review` P2): `ActiveBranch`'s own `C`
+                // binding (`input::keyboard_input`'s doc) had no
+                // visible-controls counterpart at all - the region panel's
+                // "陸軍を徴募 [歩兵]" label shows the *current* branch, but
+                // nothing on screen told a player which key changes it.
+                // Technically reachable with no player too (`C` itself sits
+                // before `input::keyboard_input`'s own player gate), but its
+                // only visible effect - the region panel's own branch tabs -
+                // never spawns without one, so it is listed here, not above.
+                row("徴募兵科: C ボタン/キー", label_color);
+                // Stage 12C follow-up: `ActiveResearchAxis`'s own `R`
+                // binding - player-only (`input::keyboard_input`'s own gate
+                // sits before this one, unlike `G`/`C` above).
+                row("研究対象軸切替: R", label_color);
+                row("政策パネル: P ボタン/キー", label_color);
+                row("外交パネル: D ボタン/キー", label_color);
+                // `K`/`U` folded into the pre-existing H/J row (disband/
+                // delegate - `input::keyboard_input`'s own bindings, each
+                // previously discoverable only via `panels::UnitPanelRoot`'s
+                // per-unit "解散 [K]"/"AI委任 [U]" buttons, never here).
+                row("部隊操作: ボタン/H/J/K/U", label_color);
+            }
 
             row("凡例", label_color);
             row("■ 港湾封鎖中", overlay::BLOCKADE_MARKER_COLOR);
@@ -1423,6 +1534,81 @@ mod right_column_tests {
             node.bottom,
             Val::Auto,
             "bottom must be a concrete inset (not left at the default Val::Auto) - otherwise height has no second edge to be computed between and stays generically auto-sized to content instead of tracking the window"
+        );
+    }
+}
+
+#[cfg(test)]
+mod legend_tests {
+    use bevy::ecs::world::CommandQueue;
+
+    use super::*;
+
+    /// Every `Text` node `spawn_legend` produces for a given `has_player` -
+    /// same `Commands`+`CommandQueue` pattern `right_column_tests` above
+    /// already established for spawning into a bare `World`.
+    fn legend_texts(has_player: bool) -> Vec<String> {
+        let mut world = World::new();
+        let font = Handle::<Font>::default();
+        let mut queue = CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_legend(&mut commands, &font, has_player);
+        }
+        queue.apply(&mut world);
+
+        let mut q = world.query::<&Text>();
+        q.iter(&world).map(|t| t.0.clone()).collect()
+    }
+
+    /// Task's own headline finding: `N` (newspaper) was entirely absent from
+    /// the legend, undiscoverable by design ("何が起きたか" had no
+    /// discoverable answer on screen). Confirmed this can fail: temporarily
+    /// removed this row from `spawn_legend` - the assertion below failed.
+    /// Reverted before committing.
+    #[test]
+    fn newspaper_key_is_in_the_legend() {
+        let texts = legend_texts(false);
+        assert!(
+            texts.iter().any(|t| t.contains('新') && t.contains('聞') && t.contains('N')),
+            "the legend must mention the N newspaper key, got: {texts:?}"
+        );
+    }
+
+    /// Task ask #3 ("the legend advertises commands a spectator cannot
+    /// use"): with no `--play`ed faction, the legend must not list commands
+    /// that either do nothing (`input::keyboard_input`'s own player gate) or
+    /// open a panel this crate never spawns without one
+    /// (`setup::spawn_right_column`'s own `if let Some(player_faction) =
+    /// ...`). Confirmed this can fail: temporarily spawned the player-only
+    /// rows unconditionally (dropped the `if has_player` guard) - both
+    /// assertions below then failed. Reverted before committing.
+    #[test]
+    fn player_only_rows_are_hidden_in_observer_mode() {
+        let texts = legend_texts(false);
+        assert!(
+            !texts.iter().any(|t| t.contains("政策パネル")),
+            "an observer-mode legend must not advertise the (player-only) policy panel, got: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("地域メニュー")),
+            "an observer-mode legend must not advertise the (player-only) region menu, got: {texts:?}"
+        );
+    }
+
+    /// The other side of the same fix: a `--play`ed faction must still see
+    /// every one of its own controls - this task's spectator-mode cleanup
+    /// must not have quietly deleted them for a real player too.
+    #[test]
+    fn player_only_rows_are_shown_once_a_faction_is_played() {
+        let texts = legend_texts(true);
+        assert!(
+            texts.iter().any(|t| t.contains("政策パネル")),
+            "a played faction's legend must still advertise the policy panel, got: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("地域メニュー")),
+            "a played faction's legend must still advertise the region menu, got: {texts:?}"
         );
     }
 }

@@ -457,9 +457,9 @@ mod tests {
 
         use crate::app::panels::sync_policy_panel;
         use crate::app::{
-            ActiveGood, ActiveResearchAxis, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection, MenuRegion, NewspaperState,
-            PlayerFaction, PlayerPanelText, PolicyPanel, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes, SpeedRes,
-            TopBarPlayerStatsText, TopBarText,
+            standings_snapshot, ActiveGood, ActiveResearchAxis, DiplomacyPanel, EventLog, EventLogText, FactionPanelText, InspectText, LastRejection,
+            MenuRegion, NewspaperState, PlayerFaction, PlayerPanelText, PolicyPanel, ScenarioMeta, SelectedFaction, SelectedRegion, SelectedUnits, SimRes,
+            SpeedRes, StandingsHistory, StandingsPanelText, TopBarPlayerStatsText, TopBarText,
         };
         use crate::sim_driver::{SimDriver, Speed};
 
@@ -478,8 +478,15 @@ mod tests {
         let faction_names: Vec<String> = world_data.factions.iter().map(|f| f.name.clone()).collect();
         let some_region = world_data.regions.first().map(|r| r.id).expect("japan_hex must have at least one region");
 
+        // Task's own standings-panel addition: the initial baseline snapshot
+        // must be taken before `world_data` moves into `SimDriver::
+        // new_with_player` below - `app::run`'s own doc has the identical
+        // ordering constraint and reasoning.
+        let standings_start_snapshot = standings_snapshot(&world_data);
+
         let mut world = World::new();
         world.insert_resource(SimRes(SimDriver::new_with_player(world_data, 2, Some(player_faction), None)));
+        world.insert_resource(StandingsHistory { baseline_day: 0, baseline: standings_start_snapshot, ..Default::default() });
         world.insert_resource(SpeedRes { last_active: Speed::X1, paused: false });
         world.insert_resource(ScenarioMeta { name: "日本ヘクスマップ（テスト用）".to_string(), max_days: 720 });
         world.insert_resource(EventLog::default());
@@ -501,6 +508,7 @@ mod tests {
 
         world.spawn((Text::new(String::new()), TopBarText));
         world.spawn((Text::new(String::new()), TopBarPlayerStatsText));
+        world.spawn((Text::new(String::new()), StandingsPanelText));
         world.spawn((Text::new(String::new()), FactionPanelText));
         world.spawn((Text::new(String::new()), PlayerPanelText));
         world.spawn((Text::new(String::new()), InspectText));
@@ -538,6 +546,7 @@ mod tests {
 
         run(&mut world, super::super::ui::update_top_bar);
         run(&mut world, super::super::ui::update_top_bar_player_stats);
+        run(&mut world, super::super::ui::update_standings_panel);
         run(&mut world, super::super::ui::update_faction_panel);
         run(&mut world, super::super::ui::update_player_panel);
         run(&mut world, super::super::ui::update_inspect_panel);
@@ -551,6 +560,29 @@ mod tests {
         }
         for name in region_names.iter().chain(faction_names.iter()) {
             rendered_text.push_str(name);
+        }
+
+        // This fixture hand-builds a minimal set of entities rather than
+        // calling `setup::setup` (this test predates the standings panel/
+        // legend audit this task adds), so the standings panel's own chrome
+        // title and the legend's static rows (`setup::spawn_legend`/
+        // `spawn_left_column`) are never actually spawned above. Both only
+        // ever emit fixed, compile-time-known strings (unlike an event-log
+        // line or a stock summary, which is why the fixture drives real
+        // systems for those instead) - listing the ones this task's own
+        // edits introduced verbatim here closes the coverage gap for them
+        // without spawning a full UI just to read static text back.
+        for literal in [
+            "各勢力の情勢",
+            "新聞: N（矢印で送り）",
+            "勢力切替: Tab",
+            "一時停止/速度: Space/1/2/3",
+            "選択解除: Esc",
+            "選択: 左クリック",
+            "-- 自国プレイ時のみ --",
+            "部隊操作: ボタン/H/J/K/U",
+        ] {
+            rendered_text.push_str(literal);
         }
 
         let subtable = find_cmap_format12_subtable(BUNDLED_FONT_BYTES).expect("the bundled font must have a (3,10) format-12 cmap subtable");

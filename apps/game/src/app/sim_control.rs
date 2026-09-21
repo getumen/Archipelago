@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use archipelago_agents::newspaper::NEWSPAPER_INTERVAL_DAYS;
 use archipelago_sim::sim::Outcome;
 
-use super::{event_text, rejection_target_ja, rejection_target_of, EventLog, LastRejection, NewspaperState, RecordConfig, Rejection, ScenarioMeta, SimRes, SpeedRes, EVENT_LOG_CAPACITY};
+use super::{event_text, rejection_target_ja, rejection_target_of, EventLog, LastRejection, NewspaperState, RecordConfig, Rejection, ScenarioMeta, SimRes, SpeedRes, StandingsHistory, EVENT_LOG_CAPACITY};
 
 /// Also where Stage 7B's `--record`/rejection-surfacing hooks in
 /// (docs/phase7-spec.md "決定論" / "命令の可否を隠さない"): after every
@@ -24,6 +24,7 @@ use super::{event_text, rejection_target_ja, rejection_target_of, EventLog, Last
 /// panel that issued it, via `rejection_target_of`) - `SimDriver::
 /// last_human_actions`/`last_human_action_errors` never leave `SimRes` any
 /// other way.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn advance_simulation(
     mut sim: ResMut<SimRes>,
     mut speed: ResMut<SpeedRes>,
@@ -32,6 +33,7 @@ pub(super) fn advance_simulation(
     mut record: Option<ResMut<RecordConfig>>,
     mut rejection: ResMut<LastRejection>,
     mut news: ResMut<NewspaperState>,
+    mut standings: ResMut<StandingsHistory>,
     screenshot: Option<Res<super::screenshot::ScreenshotConfig>>,
 ) {
     if speed.paused {
@@ -129,6 +131,12 @@ pub(super) fn advance_simulation(
             super::newspaper::publish_issue(&mut news, sim.0.world());
         }
 
+        // `StandingsHistory::roll`'s own doc: rolled forward on the same
+        // cadence as the newspaper's own reporting period, right alongside
+        // it, but one tick behind the boundary itself so the boundary day
+        // still shows the just-completed period's full delta.
+        standings.roll(sim.0.world());
+
         if sim.0.human_faction().is_some() {
             let errors = sim.0.last_human_action_errors();
             rejection.0 = errors
@@ -208,6 +216,7 @@ mod tests {
         world.insert_resource(EventLog::default());
         world.insert_resource(LastRejection::default());
         world.insert_resource(NewspaperState::default());
+        world.insert_resource(StandingsHistory::default());
         run(world, advance_simulation);
     }
 
@@ -304,6 +313,7 @@ mod tests {
         world.insert_resource(EventLog::default());
         world.insert_resource(LastRejection::default());
         world.insert_resource(NewspaperState::default());
+        world.insert_resource(StandingsHistory::default());
         world.insert_resource(super::super::screenshot::ScreenshotConfig {
             path: "/dev/null".to_string(),
             trigger: super::super::screenshot::ScreenshotTrigger::AtDay(0),
@@ -372,6 +382,62 @@ mod tests {
             log.0.iter().any(|line| line.contains(action_error_ja(ActionError::RegionNotOwned))),
             "the rejection from tick 1 must still be visible in the durable event log on tick 2, got {:?}",
             log.0
+        );
+    }
+
+    /// `StandingsHistory`'s own doc: the standings panel's trend baseline
+    /// must roll forward on exactly the same cadence as the newspaper's own
+    /// reporting period (`NEWSPAPER_INTERVAL_DAYS`), not before and not
+    /// later - one shared "a period just ended" moment for both, per that
+    /// resource's own doc.
+    ///
+    /// Unlike `advance_one_tick` above, this does not re-insert
+    /// `NewspaperState`/`StandingsHistory` on every tick (it ticks the same
+    /// `World` `NEWSPAPER_INTERVAL_DAYS` times in a row) - re-inserting a
+    /// fresh `NewspaperState::default()` every tick would reset
+    /// `period_start_world` back to `None` right before the interval-day
+    /// tick tries to `publish_issue` with it, which panics; a real client
+    /// run only ever sets it once, at startup (`app::run`'s own doc).
+    ///
+    /// **Confirmed this can fail.** Temporarily made `StandingsHistory::roll`
+    /// promote `pending` immediately (on the boundary day itself, the
+    /// pre-`codex review`-fix behavior) instead of one tick later - the
+    /// second assertion below then failed (`baseline_day` was already
+    /// `NEWSPAPER_INTERVAL_DAYS` a tick early). Reverted before committing.
+    #[test]
+    fn standings_baseline_rolls_forward_one_tick_after_the_newspaper_boundary() {
+        let mut world = World::new();
+        let sim = SimRes(SimDriver::new(scenario::build_world(), 1));
+        let start_world = sim.0.world().clone();
+        let initial_snapshot = super::super::standings_snapshot(sim.0.world());
+        world.insert_resource(sim);
+        world.insert_resource(SpeedRes { last_active: Speed::X1, paused: false });
+        world.insert_resource(ScenarioMeta { name: "mvp".to_string(), max_days: 720 });
+        world.insert_resource(EventLog::default());
+        world.insert_resource(LastRejection::default());
+        world.insert_resource(NewspaperState { period_start_world: Some(start_world), ..Default::default() });
+        world.insert_resource(StandingsHistory { baseline_day: 0, baseline: initial_snapshot, ..Default::default() });
+
+        for _ in 0..NEWSPAPER_INTERVAL_DAYS {
+            run(&mut world, advance_simulation);
+        }
+        // `codex review` (P2): the boundary day itself (day `NEWSPAPER_
+        // INTERVAL_DAYS` exactly) must still compare against the *previous*
+        // baseline (day 0), so it shows the just-completed period's full
+        // delta - not `(+0)` from comparing the world against a
+        // just-captured snapshot of itself.
+        assert_eq!(
+            world.resource::<StandingsHistory>().baseline_day,
+            0,
+            "the boundary day itself must not yet have rolled - it still needs to compare against the previous baseline"
+        );
+
+        run(&mut world, advance_simulation); // day NEWSPAPER_INTERVAL_DAYS + 1
+
+        assert_eq!(
+            world.resource::<StandingsHistory>().baseline_day,
+            NEWSPAPER_INTERVAL_DAYS,
+            "the tick right after the boundary must promote that boundary's own snapshot into the baseline"
         );
     }
 }

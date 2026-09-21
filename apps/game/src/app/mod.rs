@@ -204,6 +204,104 @@ pub(crate) struct NewspaperState {
     pub viewing: Option<usize>,
 }
 
+/// The two figures the standings panel (`ui::update_standings_panel`) tracks
+/// a trend for per faction - `World::region_count`/the living-unit count,
+/// exactly what `ui::update_faction_panel` already reads for the single
+/// selected faction, just kept for every faction at once. No new simulation
+/// state (task's own hard constraint): both are cheap read-only derivations
+/// from `SimWorld` the client could already compute on demand - this struct
+/// only exists so `StandingsHistory` has something small to hold onto
+/// *across* frames, which a fresh per-frame computation can't do.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StandingsSnapshot {
+    pub regions: u32,
+    pub units: u32,
+}
+
+/// Builds one `StandingsSnapshot` per faction, indexed exactly like
+/// `World::factions`/`FactionId::index()` - the one place both `run` (the
+/// initial baseline) and `sim_control::advance_simulation` (every later
+/// roll-forward) build this shape from a `SimWorld`, so the two can never
+/// drift into computing "territory"/"units" two different ways.
+pub(crate) fn standings_snapshot(world: &SimWorld) -> Vec<StandingsSnapshot> {
+    world
+        .factions
+        .iter()
+        .map(|f| StandingsSnapshot {
+            regions: world.region_count(f.id) as u32,
+            units: world.units.iter().filter(|u| u.alive && u.owner == f.id).count() as u32,
+        })
+        .collect()
+}
+
+/// Backs the standings panel's trend arrows (`ui::update_standings_panel`,
+/// task ask: "show change, not just state"). Deliberately reuses
+/// `archipelago_agents::newspaper::NEWSPAPER_INTERVAL_DAYS` as the trend
+/// window rather than inventing an independent constant: the newspaper
+/// already reports "what happened" over that same period
+/// (`newspaper::publish_issue`'s own diff), so the standings panel's "who
+/// gained/lost ground" arrows read as the *net effect* of the period the
+/// newspaper just covered - one shared notion of "a reporting period" for
+/// the whole client, not two clocks that happen to agree today.
+///
+/// Rolled forward on the same cadence `NewspaperState::period_start_world`
+/// is (`newspaper::publish_issue`'s own doc), via `roll` below, called once
+/// per simulated day from `sim_control::advance_simulation` right alongside
+/// the newspaper's own per-tick period bookkeeping - `baseline` is always
+/// somewhere between 0 and `NEWSPAPER_INTERVAL_DAYS` days stale, never a
+/// single value sampled once at startup and never refreshed (docs/
+/// conventions.md §6 "発令時点の値を焼き込まない").
+///
+/// **One tick behind the newspaper's own reporting-period boundary, on
+/// purpose** (`codex review` P2, task's own "confirmed by screenshot" ask -
+/// this was checked at days 100/300/600 and days 300/600, exact multiples
+/// of `NEWSPAPER_INTERVAL_DAYS`, is exactly where the naive version broke):
+/// a version that overwrote `baseline` with *this same tick's* snapshot the
+/// instant `world.day % NEWSPAPER_INTERVAL_DAYS == 0` compared the world
+/// against itself, so the one day every period where a full-period summary
+/// is most useful (the boundary day itself, same day the newspaper
+/// publishes that period's issue) instead showed `(+0)` for every faction
+/// and threw the just-completed period's change away entirely. `roll`
+/// instead holds a boundary day's snapshot in `pending` for one extra tick -
+/// `baseline` keeps pointing at the *previous* boundary through the
+/// boundary day itself (so that day's delta is the full just-completed
+/// period, matching what the newspaper just reported for it), and only
+/// swaps in the new snapshot the day after, so days `boundary+1 ..=
+/// next_boundary-1` then show `1..NEWSPAPER_INTERVAL_DAYS-1` days of
+/// incremental change against *that* boundary - never a comparison against
+/// itself.
+///
+/// Holds `Vec<StandingsSnapshot>`, not a full `World` clone the way
+/// `NewspaperState::period_start_world` does - the standings panel only
+/// ever needs two numbers per faction, so cloning the entire board every 30
+/// days (regions, units, transport network, ...) to throw almost all of it
+/// away would be needless weight `NewspaperState` accepts only because the
+/// newspaper's own diff genuinely needs the whole board.
+#[derive(Resource, Default)]
+pub(crate) struct StandingsHistory {
+    pub baseline_day: u32,
+    pub baseline: Vec<StandingsSnapshot>,
+    /// A boundary day's snapshot, held for exactly one extra tick before
+    /// `roll` promotes it into `baseline`/`baseline_day` - see this
+    /// resource's own doc, "One tick behind...".
+    pending: Option<(u32, Vec<StandingsSnapshot>)>,
+}
+
+impl StandingsHistory {
+    /// Called once per simulated day, unconditionally, from
+    /// `sim_control::advance_simulation` - see this resource's own doc for
+    /// why the swap into `baseline` lags a captured boundary snapshot by
+    /// exactly one tick.
+    pub(crate) fn roll(&mut self, world: &SimWorld) {
+        if world.day % archipelago_agents::newspaper::NEWSPAPER_INTERVAL_DAYS == 0 {
+            self.pending = Some((world.day, standings_snapshot(world)));
+        } else if let Some((day, snapshot)) = self.pending.take() {
+            self.baseline_day = day;
+            self.baseline = snapshot;
+        }
+    }
+}
+
 /// Which commodity the industry-priority/logistics-priority/import-plan
 /// policy keys (`input::keyboard_input`) currently act on - cycled with
 /// `G`. A single shared pointer rather than one keybinding per `Good`
@@ -518,6 +616,14 @@ pub(crate) struct TopBarPlayerStatsText;
 #[derive(Component)]
 pub(crate) struct FactionPanelText;
 
+/// The all-factions-at-once standings panel (`ui::update_standings_panel`'s
+/// own doc has the metric choices and their rationale) - spawned above
+/// `FactionPanelText` in the same left-column flex container
+/// (`setup::spawn_left_column`), so a spectator sees every faction's
+/// standing before ever needing to `Tab` to a single one for detail.
+#[derive(Component)]
+pub(crate) struct StandingsPanelText;
+
 #[derive(Component)]
 pub(crate) struct EventLogText;
 
@@ -538,11 +644,22 @@ pub(crate) struct PlayerPanelText;
 /// an edge - see `spawn_right_column`'s own doc for why (it replaces a real,
 /// reproducible collision between independently-`PositionType::Absolute`
 /// panels that shared this edge and knew nothing about each other).
-/// `panels::handle_right_column_scroll` is the only system that reads this
-/// marker directly (to find the `ScrollPosition` to adjust); every panel's
-/// own visibility/content is still owned by its usual sync system.
+/// `panels::handle_column_scroll` is the only system that reads this marker
+/// directly (to find the `ScrollPosition` to adjust); every panel's own
+/// visibility/content is still owned by its usual sync system.
 #[derive(Component)]
 pub(crate) struct RightColumnRoot;
+
+/// The left column's own equivalent of `RightColumnRoot` - `setup::
+/// spawn_left_column`'s own doc has the overflow policy this exists for
+/// (`codex review` P2: the standings panel this task adds can, with a rich
+/// diplomacy list and several selected units also visible, push the column
+/// past the window's bottom edge on an 8-faction scenario). `panels::
+/// handle_column_scroll` scrolls both this and `RightColumnRoot` from the
+/// same `PageUp`/`PageDown` keys - a spectator or player never has to guess
+/// which column a given keypress affects.
+#[derive(Component)]
+pub(crate) struct LeftColumnRoot;
 
 /// Stage 7C's newspaper panel (`N` to toggle) - see `ui::update_newspaper_panel`.
 #[derive(Component)]
@@ -627,6 +744,12 @@ pub fn run(
     // `world` moves into `SimDriver::new_with_player` below - the same
     // reason `region_radii` just below is computed against `&world` first.
     let newspaper_start_world = world.clone();
+    // `StandingsHistory`'s own initial baseline - computed against `&world`
+    // before it moves into `SimDriver::new_with_player_and_ai` below, the
+    // same reason `newspaper_start_world` just above is taken here rather
+    // than later.
+    let standings_start_snapshot = standings_snapshot(&world);
+    let standings_start_day = world.day;
     // Computed against `&world` before it moves into `SimDriver::new_with_player`
     // below - see `RegionRadii`'s own doc for why every rendering system
     // shares this one Vec instead of each recomputing its own.
@@ -749,6 +872,7 @@ pub fn run(
         .insert_resource(panels::UnitPanelSlots::default())
         .insert_resource(panels::InterdictPanelSlots::default())
         .insert_resource(NewspaperState { period_start_world: Some(newspaper_start_world), open: debug_open_newspaper, ..Default::default() })
+        .insert_resource(StandingsHistory { baseline_day: standings_start_day, baseline: standings_start_snapshot, ..Default::default() })
         // Cross-attempt state for `screenshot::maybe_capture_screenshot`/
         // `handle_screenshot_captured` (that resource's own doc) - always
         // present, like every other resource in this list, and inert
@@ -808,6 +932,7 @@ pub fn run(
                 overlay::sync_blockade_visuals,
                 ui::update_top_bar,
                 ui::update_top_bar_player_stats,
+                ui::update_standings_panel,
                 ui::update_faction_panel,
                 ui::update_event_log,
                 ui::update_inspect_panel,
@@ -871,7 +996,7 @@ pub fn run(
         // Independent of every chain above (reads only keyboard/time, writes
         // only the right column's own `ScrollPosition`) - `panels::
         // spawn_right_column`'s own doc has the overflow policy this serves.
-        .add_systems(Update, panels::handle_right_column_scroll)
+        .add_systems(Update, panels::handle_column_scroll)
         // A standalone call rather than folded into the first 21-system
         // `.chain()` above (already at, and best not pushed past, this
         // crate's own empirically-found tuple-arity ceiling - see the
