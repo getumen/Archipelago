@@ -424,15 +424,78 @@ prefecture_manufacturing.py`）は、地形・鉄道・港湾・飛行場と同�
 ## テスト
 
 ```sh
-cargo test --workspace                    # 404 件、約 15 秒
+cargo test --workspace                    # 483 件、約 15 秒
 cargo test -p archipelago-headless --test scenario_acceptance -- --ignored
 cargo test -p archipelago-game --test scenario_acceptance -- --ignored
 ```
 
+### 自動プレイ（soak）— `apps/headless/tests/soak.rs`
+
+仕様は `docs/soak-spec.md`。**無人で遊ばせて、成立してはいけないことが
+起きていないかを毎 tick 見る。** 受け入れテストが「終了時の性質」を見るのに
+対し、こちらは**途中**を見る。
+
+```sh
+cargo test --release -p archipelago-headless --test soak \
+  heuristic_soak_report -- --ignored --nocapture      # 報告を読む
+cargo test --release -p archipelago-headless --test soak -- --ignored
+```
+
+3 モードある。`heuristic`（既存の AI 同士）・`valid-fuzz`（**合法な行動を
+無作為に出す**）・`chaos-fuzz`（非合法を含む）。
+
+**valid-fuzz が本命である。** ヒューリスティック AI が出さない行動は、何 seed
+遊んでも露出しない（`Action` 23 種のうち 6 種を AI は一度も出さない。
+soak の異常検出が挙げる）。実際、**HTTP API から到達するパニックを 1 件
+見つけたのはこの経路である**——`apply_break_treaty` に境界検査が無く、
+存在しない勢力 id で落ちていた。AI は `BreakTreaty` を出さない。
+
+### 何を捕まえ、何を捕まえないか（実測。過去の欠陥 5 件を再導入して確認）
+
+    双方向で容量が 2 倍（Phase 9）        全モードで捕捉
+    同時到着が N 倍（Phase 9）            保存則のみ（後述）
+    StrikeNode が実行側を見ない（P10）    fuzz のみ。heuristic では通る
+    同種ノードの最小 id（Phase 10）       fixture が要る（後述）
+    追いつきが門を素通り（Phase 12B）     **捕まえない。対象外**
+
+**範囲検査は「物理的にありえない状態」しか捕まえない。** 「各フィールドは
+合法な範囲に収まったまま、判断や会計が静かに誤っている」欠陥には届かない。
+Phase 9 の二重計上は最終的に在庫で頭打ちになるので、どのフィールドも
+範囲を出ない。**合わないのは帳簿だけである。**
+
+Phase 12B の件を対象外にしたのは、`research_progress` が設計上ここだけ
+上限を持たないからである。**検査を足すと設計上の意図を検査で否定する。**
+
+### 保存則は debug ビルドでしか効かない
+
+`apply_reinforce` の `avail_peek <= granted`（見積もりが実際の払い出しを
+超えない）は `#[cfg(debug_assertions)]` である。peek の再計算が高く、
+release のシミュレーションに載せる値段ではない。
+
+**つまり release で soak を回すと、最も強い検査種別が無効になる。**
+debug での実測（2026-09-21、自分で走らせた）: japan_hex の valid-fuzz
+905 秒・chaos-fuzz 686 秒、**いずれも違反 0 件。** japan47 の全モードと
+japan_hex の heuristic も 0 件。
+
+### 検証用の fixture
+
+`crates/sim/tests/fixtures/duplicate_nodes.json` は**地図ではない。**
+同じ地域に同種ノードを 2 つ宣言させて、4 回踏んだ「最小 id を返して誤る」
+欠陥を初めて端から端まで動かせるようにした器具である。`scenarios/` に
+置いていないのはそのため。**バランスの測定に使わないこと。**
+
 **シナリオ受け入れテストが最も重要。** 単体テストは機構を個別に検証するが、
 シナリオを端から端まで遊んだときに遊ぶに値するゲームになっているかは、
 これだけが検証する。今日の重大な欠陥はすべて手で遊んで発見されており、
-236 件の単体テストは 1 つも捕まえなかった。
+236 件の単体テストは 1 つも捕まえなかった（当時の件数。歴史として残す）。
+
+**2026-09-19 に 1 つ例外ができた。** `apply_break_treaty` の境界検査漏れ
+（HTTP API から到達するパニック）は、**人が遊んで見つけたのではなく
+soak の chaos-fuzz が見つけた。** 手で遊んでも見つからない類である——
+ヒューリスティック AI は `BreakTreaty` を一度も出さないので、この経路は
+人が普通に遊んでも実行されない。上記の「手で遊ぶしかない」は
+**遊びの質**（面白いか、読めるか、操作感）については今も正しいが、
+**到達されない経路**については soak のほうが強い。
 
 検査する性質:
 
