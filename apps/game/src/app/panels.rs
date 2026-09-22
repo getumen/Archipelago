@@ -292,11 +292,21 @@ pub(super) enum RegionActionKind {
     BuildCapacity,
     Repair,
     CancelBuild,
+    /// docs/capital-spec.md Stage C ("人間のプレイヤーが遷都できない"):
+    /// `Action::RelocateCapital`'s own button - the AI, the API and RL
+    /// could already issue it (`crates/agents`, `crates/api::action_codec`,
+    /// `python/env/schema.py`), but a `--play`ed human had no path to it at
+    /// all. Placed here, in the existing region context menu, rather than
+    /// as a new standalone panel - the task's own instruction ("follow it
+    /// rather than inventing a second idiom"), and the same reasoning that
+    /// already justifies every other item in this menu: `RelocateCapital`
+    /// targets a region exactly the way `RecruitLand`/`BuildInfra`/... do.
+    RelocateCapital,
 }
 
 /// Same order as `input::MENU_ITEMS`/`input::handle_menu_keys`'s digit keys -
 /// `index()` below is the shared key between the two.
-const REGION_ACTION_KINDS: [RegionActionKind; 8] = [
+const REGION_ACTION_KINDS: [RegionActionKind; 9] = [
     RegionActionKind::RecruitLand,
     RegionActionKind::RecruitSea,
     RegionActionKind::RecruitAir,
@@ -305,6 +315,7 @@ const REGION_ACTION_KINDS: [RegionActionKind; 8] = [
     RegionActionKind::BuildCapacity,
     RegionActionKind::Repair,
     RegionActionKind::CancelBuild,
+    RegionActionKind::RelocateCapital,
 ];
 
 impl RegionActionKind {
@@ -343,6 +354,7 @@ impl RegionActionKind {
             RegionActionKind::BuildCapacity => Action::Build { region, project: Project::Capacity(active_good) },
             RegionActionKind::Repair => Action::Build { region, project: Project::Repair },
             RegionActionKind::CancelBuild => Action::CancelBuild { region },
+            RegionActionKind::RelocateCapital => Action::RelocateCapital { region },
         }
     }
 
@@ -386,6 +398,25 @@ impl RegionActionKind {
             RegionActionKind::CancelBuild => {
                 if region.construction.is_none() {
                     Some(action_error_ja(ActionError::NoConstruction).to_string())
+                } else {
+                    None
+                }
+            }
+            // Mirrors `action::apply_relocate_capital`'s own two remaining
+            // preconditions beyond "owned"/"uncontested" (already checked
+            // above, before this `match`): the destination must actually
+            // differ from the current capital, and no relocation can
+            // already be under way - see that function's own doc for why
+            // both exist. `f.capital`/`capital_transition_days` are read
+            // fresh from `world` every call, the same "never bake a
+            // snapshot" rule `sync_region_label_visibility`'s own capital
+            // check already follows.
+            RegionActionKind::RelocateCapital => {
+                let f = world.faction(faction);
+                if region_id == f.capital {
+                    Some("この地域はすでに首都".to_string())
+                } else if f.capital_transition_days > 0 {
+                    Some("遷都の移行期間中（完了を待つ）".to_string())
                 } else {
                     None
                 }
@@ -2466,6 +2497,57 @@ mod tests {
         let mut sim = world.resource_mut::<SimRes>();
         sim.0.tick();
         assert!(sim.0.last_human_actions().is_empty(), "a click on a region the player doesn't own must never be queued, but got {:?}", sim.0.last_human_actions());
+    }
+
+    /// docs/capital-spec.md Stage C ("人間のプレイヤーが遷都できない"): the
+    /// human path for `Action::RelocateCapital`, driven through the real
+    /// click handler exactly like `region_action_click_enqueues_recruit_
+    /// for_the_players_own_region` above, but going one step further and
+    /// checking the *simulation's own state* changed - not just that the
+    /// right `Action` was queued and accepted, but that `Faction::capital`
+    /// actually moved and a transition actually started, since a human
+    /// clicking this button has no other way to confirm it worked besides
+    /// the map/UI actually reflecting the new capital afterward.
+    ///
+    /// Checked this fails when broken: temporarily deleted the
+    /// `RegionActionKind::RelocateCapital` arm from `to_action` (leaving the
+    /// match non-exhaustive would not compile, so this instead points it at
+    /// `Action::CancelBuild { region }`, the same "wrong action" substitution
+    /// the recruit test above uses) - `last_human_actions` then held
+    /// `CancelBuild` instead of `RelocateCapital`, and `capital` never
+    /// changed. Reverted before committing.
+    #[test]
+    fn region_action_click_enqueues_relocate_capital_and_it_actually_moves_the_capital() {
+        let mut world = World::new();
+        let sim = player_sim();
+        let old_capital = sim.0.world().faction(FactionId(0)).capital;
+        let destination = sim
+            .0
+            .world()
+            .regions_of(FactionId(0))
+            .into_iter()
+            .find(|&r| r != old_capital)
+            .expect("mvp gives faction 0 more than one region");
+        world.insert_resource(sim);
+        world.insert_resource(PlayerFaction(Some(FactionId(0))));
+        world.insert_resource(SelectedRegion(Some(destination)));
+        world.insert_resource(ActiveGood::default());
+        world.insert_resource(ActiveBranch::default());
+        world.spawn((Interaction::Pressed, RegionActionKind::RelocateCapital));
+
+        run(&mut world, handle_region_action_clicks);
+
+        let mut sim = world.resource_mut::<SimRes>();
+        sim.0.tick();
+        assert_eq!(
+            sim.0.last_human_actions(),
+            &[Action::RelocateCapital { region: destination }],
+            "the click must have queued exactly one RelocateCapital to the selected region"
+        );
+        assert!(sim.0.last_human_action_errors().is_empty(), "a legal relocation must not be rejected: {:?}", sim.0.last_human_action_errors());
+        let faction = sim.0.world().faction(FactionId(0));
+        assert_eq!(faction.capital, destination, "Faction::capital must actually have moved to the clicked region after the tick");
+        assert!(faction.capital_transition_days > 0, "a just-issued relocation must leave the faction mid-transition after the tick");
     }
 
     /// Defect fix: `recruit_reason`'s `InsufficientEquipment` case used to

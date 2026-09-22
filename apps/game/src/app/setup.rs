@@ -15,9 +15,10 @@ use super::fonts::AppFont;
 use super::map_mode::{ModeLegendHeader, ModeLegendRow, MODE_LEGEND_ROWS};
 use super::overlay;
 use super::palette::faction_color;
+use super::visuals;
 use super::{
-    AirfieldMarker, EventLogText, FactionPanelText, InspectText, LeftColumnRoot, MainCamera, OwnerBorderMarker,
-    PlayerPanelText, PortMarker, RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii,
+    AirfieldMarker, CapitalMarker, EventLogText, FactionPanelText, InspectText, LeftColumnRoot, MainCamera,
+    OwnerBorderMarker, PlayerPanelText, PortMarker, RegionLabelMarker, RegionLayout, RegionMarker, RegionRadii,
     RightColumnRoot, SeaZoneCenters, SeaZoneMarker, SimRes, StandingsPanelText, TopBarText, UnitMarker,
 };
 
@@ -274,6 +275,32 @@ const PORT_MARKER_RADIUS: f32 = AIRFIELD_MARKER_RADIUS;
 /// none of the three ever compete for the same screen position.
 const Z_PORT: f32 = 0.3;
 
+/// docs/capital-spec.md Stage C: how large the capital badge's two triangle
+/// meshes are, as a fraction of the region's own fill radius
+/// (`compute_region_radii`) - large enough to read clearly at a glance on
+/// both the sparse (`region_radius`-scaled) and dense (uniform hex) maps,
+/// small enough that the region's own owner-color fill still shows through
+/// the hexagram's points and its concave notches rather than being fully
+/// blotted out.
+const CAPITAL_MARKER_RADIUS_RATIO: f32 = 0.55;
+/// Capital badge's own layer - *above* `Z_UNIT` (`1.0`), not just above
+/// `Z_AIRFIELD`/`Z_PORT`/`Z_CONSTRUCTION` (`0.3`)/`Z_REGION_LABEL` (`0.5`).
+///
+/// Confirmed this matters by actually looking at a screenshot
+/// (CLAUDE.md's own 「画面は見る。数えない」), not by inspecting the
+/// numbers: at `Z_CAPITAL == 0.45` (below `Z_UNIT`), a capital garrisoned by
+/// even one unit - exactly the case a capital most often is - had its star
+/// completely hidden, because `station_position` places every unit at a
+/// region's station position with no jitter of its own (`Station::
+/// Region(r) => region_pos[r.index()]`, this file's own doc), the identical
+/// point this badge is centered on. Only 2 of 8 factions' capitals were
+/// visible in a `japan_hex` day-30 screenshot at the lower layer; all 8
+/// showed once this moved above `Z_UNIT`. The six-pointed star's own
+/// concave notches (`CAPITAL_MARKER_RADIUS_RATIO`'s own doc) still leave a
+/// unit's own color showing through around and between the points, so this
+/// does not hide the garrison in exchange for showing the capital.
+const Z_CAPITAL: f32 = 1.1;
+
 pub(super) fn region_radius(population: f32) -> f32 {
     (population.max(0.0).sqrt() * POP_SCALE).clamp(MIN_REGION_RADIUS, MAX_REGION_RADIUS)
 }
@@ -511,6 +538,31 @@ pub(super) fn setup(
             Visibility::Hidden,
             PortMarker(region.id),
         ));
+
+        // docs/capital-spec.md Stage C: the capital badge, a six-pointed
+        // star built from two overlapping equilateral-triangle meshes (the
+        // second rotated 60 degrees from the first - the classic hexagram
+        // construction), centered on the region rather than tucked into a
+        // corner like the three markers above: every corner is already
+        // spoken for (`CONSTRUCTION_MARKER_RADIUS`'s own doc names all
+        // four), and unlike those three status dots this is meant to read
+        // as *the* thing marking this region out, not one more small
+        // indicator competing with them. `visuals::sync_capital_markers`
+        // shows and colors both triangles together every frame from live
+        // `Faction::capital`/`capital_transition_days` - pre-spawned hidden
+        // here regardless of whether this region is a capital right now,
+        // the same "region graph is fixed, only `Visibility` moves"
+        // convention every other per-region marker in this function uses.
+        for rotation_turns in [0.0, 1.0 / 6.0] {
+            commands.spawn((
+                Mesh2d(meshes.add(RegularPolygon::new(radius * CAPITAL_MARKER_RADIUS_RATIO, 3))),
+                MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::NONE))),
+                Transform::from_xyz(x, y, Z_CAPITAL)
+                    .with_rotation(Quat::from_rotation_z(rotation_turns * std::f32::consts::TAU)),
+                Visibility::Hidden,
+                CapitalMarker(region.id),
+            ));
+        }
 
         let [dx, dy] = region_label_dirs[region.id.index()];
         let label_pos = Vec2::new(x, y) + Vec2::new(dx, dy) * (radius + LABEL_MARGIN);
@@ -1372,6 +1424,11 @@ fn spawn_legend(commands: &mut Commands, font: &Handle<Font>, has_player: bool) 
             row("凡例", label_color);
             row("■ 港湾封鎖中", overlay::BLOCKADE_MARKER_COLOR);
             row("■ 建設中", overlay::CONSTRUCTION_TINT);
+            // docs/capital-spec.md Stage C ("クライアントで首都が視覚的に
+            // 区別されない"): `visuals::CapitalMarker`'s own legend row,
+            // `CONSTRUCTION_TINT`'s exact pattern just above - the swatch
+            // color doubles as this row's own text color.
+            row("★ 首都（紫=遷都中）", visuals::CAPITAL_SECURE_COLOR);
             row("外側の輪 = 所属勢力", label_color);
 
             // The active `MapMode`'s own header + up to `MODE_LEGEND_ROWS`

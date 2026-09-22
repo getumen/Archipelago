@@ -551,13 +551,15 @@ Phase 11 で実装したときに未着手側から消し忘れたもので、�
 
 観測ベクトルは Phase 10
 で航空・制空権・ノード状態が、Phase 11 で兵科の内訳と `Good` の増加
-（Arms → Infantry/Armour/Artillery）が、Stage 12C で研究 3 軸の進捗・配分が
-加わり長さが変わった。**現在値（Stage 12C 時点、`GET /schema` の
-`observation.length` を実測）: mvp 558・japan47 2424・japan_hex 12580 floats。**
-かつてここに Phase 10 時点の値（mvp 505・japan47 2223・japan_hex 11411）を
-書いていたが、Phase 11 の `Good` 増加分の反映を取り忘れたまま放置されていた
-——Stage 12C で確かめ直すまで誰も気づかなかった。**この数字も、書く前に
-自分で `GET /schema` を叩いて確かめること。**
+（Arms → Infantry/Armour/Artillery）が、Stage 12C で研究 3 軸の進捗・配分が、
+`docs/capital-spec.md` Stage C で `[capital_region_id,
+capital_transition_days]`（`Faction::capital`/`capital_transition_days`）が
+加わり長さが変わった。**現在値（Stage C 時点、`GET /schema` の
+`observation.length` を実測）: mvp 560・japan47 2426・japan_hex 12582
+floats。** かつてここに Phase 10 時点の値（mvp 505・japan47 2223・
+japan_hex 11411）を書いていたが、Phase 11 の `Good` 増加分の反映を取り忘れた
+まま放置されていた——Stage 12C で確かめ直すまで誰も気づかなかった。
+**この数字も、書く前に自分で `GET /schema` を叩いて確かめること。**
 
 ### 特に注意: 試合時間の長さは欠陥ではない
 

@@ -75,7 +75,31 @@ pub const SEA_ZONE_FIELD_COUNT: usize = 4;
 /// letting a consumer distinguish "no progress because unallocated" from
 /// "no progress because isolated/no machinery" (both zero the progress
 /// field alone would conflate).
-pub const FACTION_FIELD_COUNT: usize = 4 + GOOD_COUNT + GROUP_COUNT + 2 + 1 + 3 + 2 * RESEARCH_AXIS_COUNT;
+///
+/// Then `[capital_region_id, capital_transition_days]` (docs/capital-spec.md
+/// Stage C: the RL action table already carries `relocate_capital`
+/// (`crates/api/src/action_codec.rs`), but nothing before this let an agent
+/// see which region it would even be moving *from*, or that a relocation it
+/// already issued is still mid-transition - `apply_relocate_capital` rejects
+/// both "already there" and "already relocating" (`ActionError::
+/// InvalidValue`), and an agent flying blind on either can only discover the
+/// rejection by trying). This is the exact `[code, transition_days]` pair
+/// `national_focus_code`/`focus_transition_days` above already established
+/// for the same "which state, and is a transition still eating it" question
+/// (`Faction::national_focus`/`focus_transition_days`), applied to
+/// `Faction::capital`/`capital_transition_days` instead - two trailing
+/// faction scalars, not a per-region flag: a per-region "is this my
+/// capital" bit would cost `region_count` floats per faction on every
+/// scenario (289 on `japan_hex.json`) to answer a question two numbers
+/// already answer exactly, the same reasoning `national_focus_code` already
+/// settled by encoding "which one" as an index rather than one flag per
+/// `NationalFocus` variant. `capital_region_id` is `RegionId::index()` as an
+/// `f32` (comparable against the same per-region loop's implicit `RegionId`
+/// ordering above); `capital_transition_days` is `0.0` whenever no
+/// relocation is under way, mirroring `focus_transition_days`'s own
+/// convention exactly.
+pub const FACTION_FIELD_COUNT: usize =
+    4 + GOOD_COUNT + GROUP_COUNT + 2 + 1 + 3 + 2 * RESEARCH_AXIS_COUNT + 2;
 
 /// Stage 3B per-relation field count in `Observation::encode()`, one block
 /// per *other* faction (own row zeroed - see `encode`'s doc): `[stance_code,
@@ -374,15 +398,19 @@ impl<'a> Observation<'a> {
     /// national_focus_code, focus_transition_days, air_unit_count,
     /// infantry_count, armour_count, artillery_count,
     /// research_progress[RESEARCH_AXIS_COUNT]..., research_allocation
-    /// [RESEARCH_AXIS_COUNT]...]` (Stage 3A adds
+    /// [RESEARCH_AXIS_COUNT]..., capital_region_id,
+    /// capital_transition_days]` (Stage 3A adds
     /// `group_support`; Stage 3C adds the focus pair; Stage 10D adds
     /// `air_unit_count`; Stage 11C adds the trailing per-branch triple;
-    /// Stage 12C adds the trailing research pair -
+    /// Stage 12C adds the research pair; docs/capital-spec.md Stage C adds
+    /// the trailing capital pair -
     /// `FACTION_FIELD_COUNT`'s own doc has the full reasoning for each -
     /// `national_focus_code` is `NationalFocus::index()` as an `f32`,
     /// regardless of whether a switch is still transitioning - a consumer
     /// that needs "is it actually active" must additionally check
-    /// `focus_transition_days == 0`), then one Stage 3B
+    /// `focus_transition_days == 0`; `capital_region_id`/
+    /// `capital_transition_days` follow the identical convention for
+    /// `Faction::capital`/`capital_transition_days`), then one Stage 3B
     /// `DIPLOMACY_FIELD_COUNT`-sized relation block per faction (own row
     /// zeroed - see the loop below). `construction_progress` is
     /// `invested / required` in `0..=1`, or `0.0` when no project is in
@@ -489,6 +517,17 @@ impl<'a> Observation<'a> {
         for axis in ALL_RESEARCH_AXES {
             out.push(faction.research_allocation[axis.index()].get());
         }
+
+        // docs/capital-spec.md Stage C (`FACTION_FIELD_COUNT`'s own doc):
+        // the `[code, transition_days]` pair for `Faction::capital`, the
+        // same shape `national_focus_code`/`focus_transition_days` already
+        // use above - an agent that can already issue `Action::
+        // RelocateCapital` (the RL action table has carried it since Stage
+        // B) had no way to read which region it would be relocating away
+        // from, or whether a relocation it already issued is still
+        // mid-transition, until this pair existed.
+        out.push(faction.capital.index() as f32);
+        out.push(faction.capital_transition_days as f32);
 
         // Stage 3B (docs/phase3-spec.md "Stage 3B"): one `DIPLOMACY_FIELD_
         // COUNT`-sized block per faction in ascending `FactionId` order
@@ -888,7 +927,8 @@ mod tests {
             + FACTION_FIELD_COUNT
             - 1
             - 3 // Stage 11C appended 3 more trailing fields after this one
-            - 2 * RESEARCH_AXIS_COUNT; // Stage 12C appended 2*RESEARCH_AXIS_COUNT more after those
+            - 2 * RESEARCH_AXIS_COUNT // Stage 12C appended 2*RESEARCH_AXIS_COUNT more after those
+            - 2; // docs/capital-spec.md Stage C appended [capital_region_id, capital_transition_days] after those
         assert_eq!(
             encoded[air_unit_count_offset], 1.0,
             "moving one unit to an airfield must show up as air_unit_count == 1"
@@ -945,7 +985,8 @@ mod tests {
             + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
             + FACTION_FIELD_COUNT
             - 3 // the trailing [infantry_count, armour_count, artillery_count] triple
-            - 2 * RESEARCH_AXIS_COUNT; // Stage 12C appended research progress/allocation after that
+            - 2 * RESEARCH_AXIS_COUNT // Stage 12C appended research progress/allocation after that
+            - 2; // docs/capital-spec.md Stage C appended [capital_region_id, capital_transition_days] after that
         assert_eq!(
             encoded[branch_base], starting_infantry as f32,
             "infantry_count must count exactly the Infantry-branch units"
@@ -992,7 +1033,8 @@ mod tests {
         let progress_base = world.regions.len() * REGION_FIELD_COUNT
             + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
             + FACTION_FIELD_COUNT
-            - 2 * RESEARCH_AXIS_COUNT;
+            - 2 * RESEARCH_AXIS_COUNT
+            - 2; // docs/capital-spec.md Stage C appended [capital_region_id, capital_transition_days] after these
         let allocation_base = progress_base + RESEARCH_AXIS_COUNT;
 
         for axis in [ResearchAxis::Civilian, ResearchAxis::Munitions, ResearchAxis::Equipment] {
@@ -1005,5 +1047,65 @@ mod tests {
         assert_eq!(encoded[allocation_base + ResearchAxis::Civilian.index()], 0.1);
         assert_eq!(encoded[allocation_base + ResearchAxis::Munitions.index()], 0.75);
         assert_eq!(encoded[allocation_base + ResearchAxis::Equipment.index()], 0.15);
+    }
+
+    /// docs/capital-spec.md Stage C: `[capital_region_id,
+    /// capital_transition_days]` must reflect `Faction::capital`/
+    /// `capital_transition_days` at the trailing offset `FACTION_FIELD_
+    /// COUNT`'s own doc declares - the pair an RL agent needs to use the
+    /// `relocate_capital` action it can already issue: which region is its
+    /// capital right now, and whether a relocation it already ordered is
+    /// still mid-transition.
+    ///
+    /// Checked this fails when broken: temporarily swapped the two pushes
+    /// in `encode()` to both push `faction.capital.index() as f32` (i.e.
+    /// `capital_transition_days`'s own slot silently re-reads the region id
+    /// instead of the transition countdown). The transition-days assertion
+    /// below then failed (read back `2.0`, the capital region's index,
+    /// instead of `9`). Reverted before committing.
+    #[test]
+    fn capital_and_transition_are_observable() {
+        let mut world = crate::scenario::build_world();
+        let faction = FactionId(0);
+
+        // Relocate to some other owned, uncontested region so `capital` and
+        // `capital_transition_days` both move off their scenario defaults
+        // (`Faction::capital`'s doc: fixed at load, `RelocateCapital` is the
+        // only thing that ever changes it afterward).
+        let destination = world
+            .regions_of(faction)
+            .into_iter()
+            .find(|&r| r != world.faction(faction).capital)
+            .expect("mvp gives faction 0 more than one region");
+        crate::action::apply_action(
+            &mut world,
+            faction,
+            crate::action::Action::RelocateCapital { region: destination },
+        )
+        .expect("relocating to another owned, uncontested region must succeed");
+        assert_eq!(world.faction(faction).capital, destination, "test setup: relocation must flip capital");
+        assert!(
+            world.faction(faction).capital_transition_days > 0,
+            "test setup: a just-issued relocation must be mid-transition"
+        );
+
+        let obs = Observation { faction, world: &world };
+        let encoded = obs.encode();
+        let capital_region_offset = world.regions.len() * REGION_FIELD_COUNT
+            + world.sea_zones.len() * SEA_ZONE_FIELD_COUNT
+            + FACTION_FIELD_COUNT
+            - 2;
+        let capital_transition_offset = capital_region_offset + 1;
+
+        assert_eq!(
+            encoded[capital_region_offset],
+            destination.index() as f32,
+            "capital_region_id must reflect the region RelocateCapital just moved the capital to"
+        );
+        assert_eq!(
+            encoded[capital_transition_offset],
+            world.faction(faction).capital_transition_days as f32,
+            "capital_transition_days must reflect the just-started transition countdown"
+        );
     }
 }

@@ -417,7 +417,7 @@ pub(super) fn keyboard_input(
 /// Menu item order, matching the number keys `handle_menu_keys` reads and
 /// `ui::update_player_panel`'s legend text - kept in exactly one place so
 /// the two can't drift apart.
-pub(super) const MENU_ITEMS: [&str; 8] = [
+pub(super) const MENU_ITEMS: [&str; 9] = [
     "陸軍を徴募（対象兵科）",
     "艦隊を徴募（要港湾）",
     "空軍を徴募（要飛行場）",
@@ -426,6 +426,10 @@ pub(super) const MENU_ITEMS: [&str; 8] = [
     "生産設備建設（対象品目）",
     "修復",
     "建設中止",
+    // docs/capital-spec.md Stage C: `Action::RelocateCapital`'s own menu
+    // slot - see `panels::RegionActionKind::RelocateCapital`'s doc for why
+    // this menu, rather than a new panel, is where it belongs.
+    "遷都",
 ];
 
 fn handle_menu_keys(
@@ -458,6 +462,14 @@ fn handle_menu_keys(
         Some(Action::Build { region, project: Project::Repair })
     } else if keys.just_pressed(KeyCode::Digit8) {
         Some(Action::CancelBuild { region })
+    } else if keys.just_pressed(KeyCode::Digit9) {
+        // docs/capital-spec.md Stage C: safe to reuse `Digit9` here even
+        // though `keyboard_input` above already binds it globally (import
+        // plan +) - this function only ever runs while `menu.0` is `Some`,
+        // and the caller returns immediately after (`keyboard_input`'s own
+        // "takes over the number row" comment), so the two bindings never
+        // fire from the same keypress.
+        Some(Action::RelocateCapital { region })
     } else {
         None
     };

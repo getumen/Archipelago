@@ -706,6 +706,28 @@ pub(crate) struct AirfieldMarker(pub RegionId);
 #[derive(Component)]
 pub(crate) struct PortMarker(pub RegionId);
 
+/// docs/capital-spec.md Stage C ("クライアントで首都が視覚的に区別されない"):
+/// this region's own capital badge - a six-pointed star drawn as two
+/// overlapping triangle meshes (both tagged with this same component, same
+/// `region_id`; `setup::setup` spawns them as a pair) centered on the
+/// region. Pre-spawned hidden for every region alongside `RegionMarker`
+/// (the same "region graph never changes at runtime, only `Visibility`
+/// does" convention `AirfieldMarker`/`PortMarker` already use), but unlike
+/// those two - which exist only to answer an air-power question and so are
+/// gated to `MapMode::Air` - this stays visible in *every* map mode
+/// (`visuals::sync_capital_markers`, not `overlay`'s module): which region
+/// is a faction's seat of government is a political fact, not one specific
+/// overlay's own concern, the same reasoning `OwnerBorderMarker` already
+/// settled for "ownership stays visible in every mode".
+///
+/// Re-reads `Faction::capital`/`capital_transition_days` fresh every frame
+/// rather than baking anything in at spawn time - `Action::RelocateCapital`
+/// changes `capital` mid-game, and `RegionLabelMarker`'s own capital-status
+/// fix (`sync_region_label_visibility`'s doc) already hit exactly this trap
+/// once by baking a startup snapshot in instead.
+#[derive(Component)]
+pub(crate) struct CapitalMarker(pub RegionId);
+
 /// Builds and runs the Bevy `App`. `world` must already be validated
 /// (`archipelago_sim::scenario::build_world`/`load_str`/`load_file`) -
 /// `main.rs` never constructs one any other way.
@@ -964,16 +986,18 @@ pub fn run(
             // be this frame's own post-tick state, same as every system in
             // the chain above - `.after(...)` alone (no `.chain()`, nothing
             // else in this call to chain against) gets that without needing
-            // to grow that tuple at all. The five are independent of each
+            // to grow that tuple at all. The six are independent of each
             // other (disjoint entities: labels, `OwnerBorderMarker`
-            // materials, legend UI text, and - Stage 10D, extended by this
-            // task's own port-marker defect fix - `AirfieldMarker`/
-            // `PortMarker` materials), so no relative order between them is
-            // needed either.
+            // materials, `CapitalMarker` materials/visibility
+            // (docs/capital-spec.md Stage C), legend UI text, and - Stage
+            // 10D, extended by this task's own port-marker defect fix -
+            // `AirfieldMarker`/`PortMarker` materials), so no relative order
+            // between them is needed either.
             Update,
             (
                 visuals::sync_region_label_visibility,
                 visuals::sync_owner_border,
+                visuals::sync_capital_markers,
                 map_mode::sync_mode_legend,
                 overlay::sync_airfield_markers,
                 overlay::sync_port_markers,

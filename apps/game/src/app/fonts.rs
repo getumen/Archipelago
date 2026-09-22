@@ -581,6 +581,18 @@ mod tests {
             "選択: 左クリック",
             "-- 自国プレイ時のみ --",
             "部隊操作: ボタン/H/J/K/U",
+            // docs/capital-spec.md Stage C: `input::MENU_ITEMS`'s new 9th
+            // entry and `panels::RegionActionKind::RelocateCapital`'s own
+            // `reason()` strings - none of these render through this
+            // fixture's own systems either (`MenuRegion` stays `None`
+            // above, and `panels::spawn_region_action_panel`/
+            // `sync_region_action_buttons` are never called here, the same
+            // gap this list already papers over for the other static
+            // strings above).
+            "遷都",
+            "この地域はすでに首都",
+            "遷都の移行期間中（完了を待つ）",
+            "★ 首都（紫=遷都中）",
         ] {
             rendered_text.push_str(literal);
         }

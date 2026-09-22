@@ -26,7 +26,7 @@ use super::map_mode::{self, MapMode, MapModeRes};
 use super::palette::{faction_color, Unit01, NEUTRAL};
 use super::setup::station_position;
 use super::{
-    ActiveGood, MainCamera, OwnerBorderMarker, RegionLabelMarker, RegionLayout, RegionMarker,
+    ActiveGood, CapitalMarker, MainCamera, OwnerBorderMarker, RegionLabelMarker, RegionLayout, RegionMarker,
     SeaZoneCenters, SeaZoneMarker, SelectedRegion, SimRes, UnitMarker,
 };
 
@@ -76,6 +76,28 @@ const DELEGATED_MARKER_TINT: Color = Color::srgb(0.98, 0.98, 0.95);
 /// `faction_color` underneath, the same way `MAX_DEVASTATION_MIX` keeps a
 /// devastated region's owner color partly visible.
 const DELEGATED_MARKER_MIX: f32 = 0.65;
+
+/// docs/capital-spec.md Stage C: `CapitalMarker`'s color while
+/// `Faction::capital_transition_days == 0` - a secure capital - also
+/// referenced by the static legend (`setup::spawn_legend`, `overlay::
+/// CONSTRUCTION_TINT`'s exact "swatch color doubles as the legend row
+/// color" convention). A warm, fully-saturated gold, deliberately
+/// independent of any `palette::faction_color` entry (the same reasoning
+/// `DELEGATED_MARKER_TINT` already uses for its own faction-independent
+/// highlight) so the badge reads as "capital" against all eight owner
+/// colors uniformly, rather than
+/// blending into whichever one happens to own the region.
+pub(super) const CAPITAL_SECURE_COLOR: Color = Color::srgb(1.0, 0.82, 0.15);
+/// `CapitalMarker`'s color while `Faction::capital_transition_days > 0` - a
+/// relocation is under way and `politics::tick_politics` is still applying
+/// the capital-loss shock (`Faction::capital_transition_days`'s own doc). A
+/// hue distinctly different from `CAPITAL_SECURE_COLOR`, not merely a
+/// darker/lighter version of it, so the two states are distinguishable at a
+/// glance rather than requiring a side-by-side comparison (CLAUDE.md's
+/// 「画面は見る。数えない」- a mid-transition capital's own screenshot
+/// check needs a color a viewer can actually name as "different", not just
+/// measure as different).
+const CAPITAL_TRANSITION_COLOR: Color = Color::srgb(0.85, 0.25, 0.85);
 
 /// Owner fill for `MapMode::Political`/`MapMode::Supply` (`map_mode`'s own
 /// doc for why those two modes share this): owner color mixed toward the
@@ -180,6 +202,53 @@ pub(super) fn sync_owner_border(
             && mat.color != color
         {
             mat.color = color;
+        }
+    }
+}
+
+/// docs/capital-spec.md Stage C: shows and colors both of a region's
+/// `CapitalMarker` triangles - visible, in `CAPITAL_SECURE_COLOR`, while
+/// `marker.0` is some faction's `Faction::capital` and that faction's
+/// `capital_transition_days == 0`; visible in `CAPITAL_TRANSITION_COLOR`
+/// while a relocation to or from it is still under way
+/// (`capital_transition_days > 0`); hidden for every other region. Rebuilds
+/// the `RegionId -> mid_transition` lookup fresh from `world.factions`
+/// every call rather than reading anything cached from spawn time -
+/// `CapitalMarker`'s own doc has the "why": `Action::RelocateCapital`
+/// changes which region this is true for while the game runs.
+pub(super) fn sync_capital_markers(
+    sim: Res<SimRes>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut query: Query<(&CapitalMarker, &MeshMaterial2d<ColorMaterial>, &mut Visibility)>,
+) {
+    let world = sim.0.world();
+    // **脱落した勢力は除く。** `sim.rs` は最後の領土を失った勢力の `alive` を
+    // false にするだけで `Faction::capital` は残すので、絞らないと**滅んだ国の
+    // 首都に星が立ち続ける。** 順位表で脱落勢力の補給率を消したのと同じ形で、
+    // 滅んだものが生きているように見える表示である（`codex review` の指摘）。
+    //
+    // 副次的に、`HashMap` へ畳むときの上書きも消える。首都は自国領でなければ
+    // ならず（`apply_relocate_capital` が検証する）、1 地域の所有者は 1 つなので、
+    // **生存勢力どうしが同じ地域を首都にすることはありえない。** 脱落勢力を
+    // 含めている間だけ、遷都中の紫が金に上書きされうる経路があった。
+    let capitals: std::collections::HashMap<archipelago_sim::ids::RegionId, bool> = world
+        .factions
+        .iter()
+        .filter(|f| f.alive)
+        .map(|f| (f.capital, f.capital_transition_days > 0))
+        .collect();
+    for (marker, material_handle, mut visibility) in &mut query {
+        match capitals.get(&marker.0) {
+            Some(&mid_transition) => {
+                *visibility = Visibility::Visible;
+                let color = if mid_transition { CAPITAL_TRANSITION_COLOR } else { CAPITAL_SECURE_COLOR };
+                if let Some(mut mat) = materials.get_mut(&material_handle.0)
+                    && mat.color != color
+                {
+                    mat.color = color;
+                }
+            }
+            None => *visibility = Visibility::Hidden,
         }
     }
 }
@@ -550,6 +619,120 @@ mod tests {
 
         run(&mut world, sync_owner_border);
         assert_eq!(material_color(&world, &handle), faction_color(owner.index()), "the border must match the region's current owner color");
+    }
+
+    /// docs/capital-spec.md Stage C: `sync_capital_markers` must (1) hide a
+    /// non-capital region's marker, (2) show a secure capital's marker in
+    /// `CAPITAL_SECURE_COLOR`, and (3) switch it to `CAPITAL_TRANSITION_COLOR`
+    /// the instant `Action::RelocateCapital` starts a transition - all from
+    /// live `world.factions` state, never anything baked in at spawn time
+    /// (`CapitalMarker`'s own doc).
+    ///
+    /// Checked this fails when broken: temporarily made the `mid_transition`
+    /// branch always use `CAPITAL_SECURE_COLOR` (i.e. ignored
+    /// `capital_transition_days` entirely) - the third assertion below then
+    /// failed (read back the secure gold instead of the transition color).
+    /// Reverted before committing.
+        /// **脱落した勢力の首都には星を立てない。**
+    ///
+    /// `sim.rs` は最後の領土を失った勢力の `alive` を false にするだけで
+    /// `Faction::capital` は残す。絞らないと**滅んだ国の首都に星が立ち続ける**
+    /// ——順位表で脱落勢力の補給率を消したのと同じ、滅んだものが生きている
+    /// ように見える表示である（`codex review` が指摘）。
+    ///
+    /// 既存の `sync_capital_markers_shows_and_colors_the_current_capital` は
+    /// **この欠陥の前後どちらでも通る**（生存勢力しか登場しない）。
+    /// 捕まえるテストが無かったので足した。`.filter(|f| f.alive)` を外すと
+    /// 赤くなることを確認済み。
+    #[test]
+    fn sync_capital_markers_hides_an_eliminated_factions_capital() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<ColorMaterial>>();
+
+        let mut sim_world = scenario::build_world();
+        let doomed = archipelago_sim::ids::FactionId(1);
+        let doomed_capital = sim_world.faction(doomed).capital;
+        sim_world.faction_mut(doomed).alive = false;
+
+        let handle = world.resource_mut::<Assets<ColorMaterial>>().add(ColorMaterial::from_color(Color::NONE));
+        world.spawn((CapitalMarker(doomed_capital), MeshMaterial2d(handle), Visibility::Visible));
+
+        world.insert_resource(SimRes(SimDriver::new(sim_world, 1)));
+        run(&mut world, sync_capital_markers);
+
+        let mut visibilities = world.query::<(&CapitalMarker, &Visibility)>();
+        for (marker, visibility) in visibilities.iter(&world) {
+            assert_eq!(
+                *visibility,
+                Visibility::Hidden,
+                "region {:?} is an eliminated faction's former capital - it must not keep a star",
+                marker.0
+            );
+        }
+    }
+
+#[test]
+    fn sync_capital_markers_shows_and_colors_the_current_capital() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<ColorMaterial>>();
+
+        let mut sim_world = scenario::build_world();
+        let faction = archipelago_sim::ids::FactionId(0);
+        let capital = sim_world.faction(faction).capital;
+        let non_capital = sim_world
+            .regions_of(faction)
+            .into_iter()
+            .find(|&r| r != capital)
+            .expect("mvp gives faction 0 more than one region");
+
+        let capital_handle = world.resource_mut::<Assets<ColorMaterial>>().add(ColorMaterial::from_color(Color::NONE));
+        let other_handle = world.resource_mut::<Assets<ColorMaterial>>().add(ColorMaterial::from_color(Color::NONE));
+        world.spawn((CapitalMarker(capital), MeshMaterial2d(capital_handle.clone()), Visibility::Hidden));
+        world.spawn((CapitalMarker(non_capital), MeshMaterial2d(other_handle.clone()), Visibility::Hidden));
+
+        world.insert_resource(SimRes(SimDriver::new(sim_world.clone(), 1)));
+        run(&mut world, sync_capital_markers);
+
+        assert_eq!(material_color(&world, &capital_handle), CAPITAL_SECURE_COLOR, "a secure capital's marker must be CAPITAL_SECURE_COLOR");
+        let mut visibilities = world.query::<(&CapitalMarker, &Visibility)>();
+        for (marker, visibility) in visibilities.iter(&world) {
+            let expect_visible = marker.0 == capital;
+            assert_eq!(
+                *visibility,
+                if expect_visible { Visibility::Visible } else { Visibility::Hidden },
+                "region {:?} visibility must match whether it is the current capital",
+                marker.0
+            );
+        }
+
+        // Now relocate - `capital` moves to `non_capital` and a transition
+        // starts (`Faction::capital_transition_days > 0`).
+        archipelago_sim::action::apply_action(
+            &mut sim_world,
+            faction,
+            archipelago_sim::action::Action::RelocateCapital { region: non_capital },
+        )
+        .expect("relocating to another owned, uncontested region must succeed");
+        world.insert_resource(SimRes(SimDriver::new(sim_world, 1)));
+        run(&mut world, sync_capital_markers);
+
+        assert_eq!(
+            material_color(&world, &other_handle),
+            CAPITAL_TRANSITION_COLOR,
+            "the new, still-mid-transition capital's marker must be CAPITAL_TRANSITION_COLOR, not the secure gold"
+        );
+        let mut visibilities = world.query::<(&CapitalMarker, &Visibility)>();
+        for (marker, visibility) in visibilities.iter(&world) {
+            let expect_visible = marker.0 == non_capital;
+            assert_eq!(
+                *visibility,
+                if expect_visible { Visibility::Visible } else { Visibility::Hidden },
+                "after relocating, only the new capital's region {:?} may stay visible",
+                marker.0
+            );
+        }
     }
 
     /// What is clickable must be what is drawn (`codex review`, P2).
