@@ -114,7 +114,14 @@ fn apply_completion(world: &mut World, region_index: usize, project: Project) {
 /// Machinery/Steel into - and eventually unconditionally repair - a line no
 /// longer entirely that owner's, which `apply_build` would reject outright
 /// if the same faction tried to start it fresh in this state.
-fn transport_line_still_owned(world: &World, host: usize, line_id: TransportLineId) -> bool {
+///
+/// `pub(crate)` (not private) since `economy::tick_economy`'s own
+/// construction-demand estimate reuses this exact check too (a codex
+/// review P2: without it, a `TransportLine` project about to be cancelled
+/// here for free - this same tick, right after `tick_economy` runs - would
+/// still count toward that tick's Machinery/Steel demand, loosening the
+/// throttle for a project that never actually draws on either stock).
+pub(crate) fn transport_line_still_owned(world: &World, host: usize, line_id: TransportLineId) -> bool {
     let line = &world.transport_lines[line_id.index()];
     let owner = world.regions[host].owner;
     let ra = world.transport_node(line.from).region;

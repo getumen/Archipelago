@@ -40,6 +40,25 @@ pub const MUNITIONS_INPUT_ENERGY: f32 = 0.2;
 pub const INFANTRY_INPUT_MACHINERY: f32 = 0.5;
 pub const INFANTRY_INPUT_STEEL: f32 = 0.3;
 
+/// Horizon `economy::tick_economy`'s stock-aware production throttle
+/// (`production_throttle_mult`) treats as "a reserve worth holding, not yet
+/// overproduction." Below this many `buffer_days` (`stock / needed` - the
+/// same shape `crates/agents`' `munitions_buffer_days`/`growth_buffer_days`
+/// already use for "how long would this stock last at today's real draw")
+/// a good's production runs at full potential; beyond it, output eases
+/// down smoothly, never cut off at any finite value (`production_throttle_
+/// mult`'s own doc has the exact curve).
+///
+/// Deliberately reuses `REGIME_CHANGE_DAYS` (30) rather than picking a
+/// fresh number: that is already this codebase's answer for "how long can
+/// a production disruption run" (`REGIME_CHANGE_DAYS`'s own doc - the
+/// longest scripted output disruption this simulation ever schedules). A
+/// national reserve able to carry a faction through its single worst
+/// disruption without ever touching `shortage` is exactly the amount worth
+/// holding before a good's own production has any business easing off -
+/// not a number chosen to make a stock chart look tidy.
+pub const PRODUCTION_RESERVE_TARGET_DAYS: f32 = REGIME_CHANGE_DAYS as f32;
+
 /// Stage 3C playtest fix (the ninth defect of docs/phase3-spec.md §0's
 /// shape, found post-Stage-3C): `economy::tick_economy`'s Step 0/1
 /// `efficiency`/`stability_mult` terms used to apply the *same*

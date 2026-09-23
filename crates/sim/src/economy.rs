@@ -14,8 +14,31 @@
 //! its population, not as an unavoidable side effect of solve order:
 //! 1. `potential[g]` per faction = the capacity-weighted output every
 //!    commodity *could* produce this tick, before any input constraint.
-//! 2. `Food`/`Energy` have no inputs, so they're produced in full and
-//!    added straight to stock.
+//! 1.5. **Production reads `Faction::stock` back** (`production_throttle_
+//!    mult`, added once expanded reproduction (commit 52bb761) made
+//!    industrial capacity actually compound: capacity that outgrows its own
+//!    steady demand used to run flat out into a warehouse forever, since
+//!    nothing upstream of this step ever read `Faction::stock` at all).
+//!    `Food`/`Energy`/`Steel`/`Machinery`/`Munitions` each have their
+//!    `pot[g]` eased down, continuously and without any cutoff, once their
+//!    own national stock already covers more than `PRODUCTION_RESERVE_
+//!    TARGET_DAYS` of that good's real structural demand - see that
+//!    function's own doc for the exact curve, why it never reaches zero,
+//!    and why a good with no demand yet is never punished for it. The
+//!    Steel/Energy a throttled-down good would have drawn on is not
+//!    redirected anywhere *this* tick (step 4's own doc: no
+//!    redistribution mid-tick) - it simply stays unspent in stock, which
+//!    raises every good's own budget share of it starting next tick. Five
+//!    goods only: `Infantry`/`Armour`/`Artillery`/`Naval`/`Aircraft` have no
+//!    comparable demand figure anywhere in this codebase and are not grown
+//!    by investment either - see the throttle's own call site for why.
+//!    Resolved in a fixed, dependency-respecting order - `Food`/`Machinery`/
+//!    `Munitions` first (their own `needed` references nothing else in this
+//!    group), then `Steel` (reads `Machinery`'s/`Munitions`' just-throttled
+//!    `pot`), then `Energy` (reads `Steel`'s) - never an iterative solve;
+//!    see the throttle call site's own doc for why one pass is exact here.
+//! 2. `Food`/`Energy` have no inputs, so they're produced in full (net of
+//!    step 1.5's throttle) and added straight to stock.
 //! 3. Civilians draw `Food` and `Energy` from that stock (see
 //!    `Faction::civilian_ration`); the worst-served of the two so far
 //!    seeds `Faction::shortage`.
@@ -45,17 +68,20 @@
 //!    contends with `Infantry` for the shared Machinery/Steel budget above.
 
 use crate::balance::{
-    INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL, CAPITAL_FLIGHT_MACHINERY_MULT,
+    INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL, CAPITAL_FLIGHT_CONSTRUCTION_MULT, CAPITAL_FLIGHT_MACHINERY_MULT,
     CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP,
-    CONSCRIPT_RATE, FOCUS_TECHNOCRACY_PRODUCTION_MULT, FOOD_EFFICIENCY_DAMPENING,
+    CONSCRIPT_RATE, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE, CONSTRUCTION_STEEL_PER_POINT,
+    FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT, FOCUS_TECHNOCRACY_PRODUCTION_MULT, FOOD_EFFICIENCY_DAMPENING,
     FOOD_EFFICIENCY_FLOOR, INDUSTRIAL_STABILITY_FLOOR, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL,
     MANPOWER_DEMOBILIZATION_RATE, MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL,
-    REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY, STRIKE_OUTPUT_MULT,
+    PRODUCTION_RESERVE_TARGET_DAYS, REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY, STRIKE_OUTPUT_MULT,
 };
+use crate::construction;
 use crate::focus::{self, NationalFocus};
 use crate::good::{Good, ALL_GOODS, GOOD_COUNT};
+use crate::logistics;
 use crate::research::{self, ResearchAxis};
-use crate::world::World;
+use crate::world::{Station, World};
 
 /// `stock[good] -> min(stock[good], input_budget / coefficient)`, treating a
 /// zero coefficient as "no input needed" (unbounded).
@@ -91,6 +117,164 @@ fn consume(stock: &mut f32, need: f32, ration: f32) -> f32 {
 /// could drift apart.
 fn stability_output_mult(stability: f32) -> f32 {
     0.6 + 0.4 * (stability / 100.0)
+}
+
+/// National Munitions demand this tick: every alive unit's own upkeep draw
+/// (`logistics::unit_supply_demand`'s own formula - reused rather than
+/// reimplemented, exactly the per-unit figure `logistics::distribute_
+/// supply` will draw `Faction::stock[Munitions]` down by later this same
+/// tick), summed by owner. Computed once, before the per-faction loop below
+/// takes `world.factions.iter_mut()`, the same "read `world.units` up
+/// front" shape this function's own `committed` pass (bottom of this file)
+/// already uses.
+///
+/// `in_combat` is read the same live "is an enemy actually present at this
+/// unit's station" check `logistics::region_demand`/`naval::sea_demand`/
+/// `air::air_demand` already run for their own domain, generalized across
+/// all three `Station` variants the way `crates/agents`' own
+/// `unit_contested` already does for AI decision-making - not a cached
+/// flag, so it can never go stale. This is a coarser, national total than
+/// the per-region figure `distribute_supply` computes later (Stage 2A's
+/// production runs before combat resolves for the day, so it can only see
+/// today's *opening* positions) - fine for a throttle that only needs
+/// "roughly how hungry is the standing army today," not the exact per-unit
+/// delivery `distribute_supply` separately computes and applies.
+///
+/// **A fifth codex review pass named a real gap here, reported rather than
+/// fixed.** `logistics::distribute_supply` only ever debits `Faction::
+/// stock[Munitions]` by `total_served` - what the transport network could
+/// actually *deliver* - so a unit cut off by a severed or saturated network
+/// contributes its full nominal upkeep to the sum below while drawing
+/// nothing from national stock for real, keeping this throttle's reserve
+/// target higher than the true realized draw. Closing this exactly would
+/// need this tick's real transport-flow result
+/// (`logistics::compute_transport_flow`) - but that runs *after* `economy`
+/// in `Simulation::step_timed`'s own fixed order, on top of `transport::
+/// tick_transport_condition`'s own today's-condition update, neither of
+/// which has run yet at this point in the tick. Reaching for it here would
+/// mean either reordering the tick (every other system's own doc already
+/// explains why its slot is where it is) or running the flow model a
+/// second time per tick - a real architectural change past a single
+/// function's scope, not something to reach for without raising it first
+/// (docs/conventions.md §1: propose new structure, don't just add it).
+fn national_munitions_demand(world: &World, n_factions: usize) -> Vec<f32> {
+    let mut demand = vec![0.0f32; n_factions];
+    for unit in &world.units {
+        if !unit.alive {
+            continue;
+        }
+        let in_combat = match unit.station {
+            Station::Region(r) => world.has_enemy_units(r, unit.owner),
+            Station::Sea(z) => world.has_enemy_fleets(z, unit.owner),
+            Station::Airfield(node) => world.has_enemy_units(world.transport_node(node).region, unit.owner),
+        };
+        let (munitions, _arms) = logistics::unit_supply_demand(unit, in_combat);
+        demand[unit.owner.index()] += munitions;
+    }
+    demand
+}
+
+/// A good's own production feedback from inventory - this file's module
+/// doc has the defect this closes (capacity that exceeds steady demand
+/// ran flat out into a warehouse forever, because nothing read `Faction::
+/// stock`). Reads `1.0` (no throttle at all) while `stock` covers no more
+/// than `PRODUCTION_RESERVE_TARGET_DAYS` of `needed`; beyond that horizon,
+/// output eases down in inverse proportion to how many multiples of the
+/// horizon the stock already covers - the same reciprocal-of-buffer-days
+/// shape `crates/agents`' `apportion_growth_goods` already uses to turn a
+/// buffer-days reading into a weight, here inverted into a `0..=1`
+/// multiplier bounded above by `1.0` instead of an unbounded scarcity
+/// weight.
+///
+/// **No hard cutoff.** At `buffer_days` = 1000x the target the multiplier
+/// reads `0.001`, not `0.0` - production only asymptotes toward zero, it
+/// never reaches it at any finite stock. A good that stops being
+/// overstocked (because `needed` rose, or something else drew `stock` back
+/// down) recovers to full output the very next tick this function runs
+/// with the new numbers - a pure function of today's `stock`/`needed`, not
+/// a persisted state, so there is no separate "unstick" step to forget
+/// (`docs/conventions.md` §6: 状態には必ず回復経路を持たせる).
+///
+/// **`needed` is floored at `potential / PRODUCTION_RESERVE_TARGET_DAYS`,
+/// never read as literally `0.0`.** A first version of this function read
+/// `needed <= 0.0` as "no throttle at all" (`1.0` forever) so a good
+/// nothing currently draws on - a faction with no units has no Munitions
+/// `needed`, and every faction in every shipped scenario starts this way -
+/// could still stockpile. A second `codex review` pass caught that this
+/// reopened the exact defect this mechanism exists to close, just for that
+/// one case: `1.0` forever means *no* feedback from inventory ever reaches
+/// that good, so its stock would grow completely unbounded at full
+/// capacity for as long as real demand stays at zero - indistinguishable
+/// from the pre-fix behaviour in that state.
+///
+/// The floor closes this without inventing a fresh tunable constant or a
+/// second vocabulary: `potential / PRODUCTION_RESERVE_TARGET_DAYS` is
+/// exactly the daily draw that would make *today's own full-capacity
+/// output* (`potential`, one day's worth) the comfortable reserve - so with
+/// zero real demand, a good can still freely stockpile up to one day of
+/// its own potential before this same curve starts easing it down, exactly
+/// the way any other good eases down beyond its own reserve horizon.
+///
+/// **The floor only ever replaces a `needed` that is exactly `0.0` - it
+/// never blends with, or overrides, a `needed` that is merely small.** This
+/// is not a stylistic choice: an earlier version used `needed.max(floor)`,
+/// which reads identically at `needed == 0.0` but silently inflates *every*
+/// small-but-real `needed` too - and `floor` scales with `potential`, this
+/// good's own raw capacity, which is exactly what can be arbitrarily large
+/// relative to a genuinely small downstream draw (the very shape this
+/// mechanism exists to correct). Measured directly: with `Machinery` itself
+/// heavily throttled down to a near-zero *real* draw on `Steel`,
+/// `steel_needed_by_chain` read a small but genuine positive number - and
+/// `needed.max(floor)` replaced it with `Steel`'s own multi-hundred-unit
+/// potential/30, undoing the P1 fix this same file's call site just made
+/// (Steel went right back to producing at full, un-throttled output). The
+/// exact-zero branch below reads a real, however-small, computed demand
+/// completely unmodified - only a `needed` that is *entirely absent* (a
+/// faction with no units at all summing to a literal `0.0`, never a
+/// continuously-hovering epsilon: unit counts are discrete, and every
+/// loaded scenario's `population > 0.0` is enforced at `Scenario::validate`)
+/// falls through to the floor.
+///
+/// **A third codex review pass named a real, structural limit of this
+/// floor - recorded here rather than left implicit.** Once `stock` exceeds
+/// `potential` (the free-to-produce zone), output decays as `potential² /
+/// stock` - the same reciprocal shape this whole function uses everywhere
+/// else - which, integrated over time with nothing ever consuming a truly
+/// zero-demand good, makes `stock` grow roughly as `sqrt(time)`: slow, but
+/// not a *bounded* equilibrium. Measured directly (a faction with zero
+/// units, forever, `Good::Munitions` potential pinned at 40/day since
+/// nothing invests in a good nobody needs - `crates/agents::growth_buffer_
+/// days` scores its own buffer as infinite, giving it zero investment
+/// weight): stock reaches 2,899 by day 2,880 (the horizon this whole change
+/// was measured against - about 72x potential, nowhere near the 16,000-
+/// 112,000 the *compounding-capacity* defect this change fixes actually
+/// produced) and 17,561 even out to day 100,000 (roughly matching the
+/// `sqrt(time)` prediction, ~439x potential).
+///
+/// **This is not fixable within this function's own constraints, and is
+/// reported rather than silently resolved.** A genuine bounded equilibrium
+/// needs `mult` to fall away *faster than any reciprocal power* of `stock`
+/// (an exponential-decay shape, an actual cutoff, or a real consumption/
+/// decay mechanic on `Faction::stock` itself) - every one of which is
+/// either a hard cutoff (this task's own "no cliffs, they oscillate" rule)
+/// or a genuinely new mechanic/vocabulary this codebase does not have
+/// today and this change was not asked to add
+/// (docs/conventions.md §1: propose new business logic, do not just add
+/// it). What this floor *does* guarantee - the actual defect this whole
+/// mechanism exists to close - is that a good's own **capacity** no longer
+/// compounds into an ever-faster flood the way `crates/agents`'
+/// `apportion_growth_goods` measured before this change (`022ddaa`/
+/// `52bb761`'s own reports): a zero-demand good's `potential` stays fixed
+/// (nothing invests in it), so the residual growth here is bounded by a
+/// slow, non-compounding tail on a *constant* capacity, not the compounding
+/// one the defect this file's module doc names was actually about.
+fn production_throttle_mult(stock: f32, needed: f32, potential: f32) -> f32 {
+    let effective_needed = if needed > 0.0 { needed } else { potential.max(0.0) / PRODUCTION_RESERVE_TARGET_DAYS };
+    if effective_needed <= 0.0 {
+        return 1.0;
+    }
+    let buffer_days = stock.max(0.0) / effective_needed;
+    (PRODUCTION_RESERVE_TARGET_DAYS / buffer_days.max(PRODUCTION_RESERVE_TARGET_DAYS)).clamp(0.0, 1.0)
 }
 
 pub fn tick_economy(world: &mut World) {
@@ -130,6 +314,33 @@ pub fn tick_economy(world: &mut World) {
     // uses - see Step 0's comment.
     let mut potential = vec![[0.0f32; GOOD_COUNT]; n_factions];
     let mut total_pop = vec![0.0f32; n_factions];
+    // Step 1.5's own Steel/Machinery `needed` (below) has to count today's
+    // active construction projects too: `construction::tick_construction`
+    // draws both goods from this same national stock immediately after this
+    // function runs every tick - a direct same-tick consumer the throttle
+    // would otherwise not know about (codex review: a faction with a full
+    // stockpile but several in-progress projects would get throttled by
+    // civilian/recipe demand alone and stall those projects until the
+    // stockpile fell below an unrelated reserve target).
+    //
+    // This mirrors `tick_construction`'s own per-region cost exactly, not
+    // just its project count - a second codex review pass caught that a
+    // flat `count * CONSTRUCTION_RATE` (this function's first cut, and the
+    // same simplification `crates/agents`' own `active_construction_draw`
+    // already makes for its own, different purpose) over- or under-states
+    // real draw whenever a faction is under Capital Flight/Technocracy
+    // (`tick_construction`'s own `rate` multipliers) or a project is on its
+    // last, partial tick (`tick_construction`'s own `rate.min(required -
+    // invested)` cap) - both read here from the exact same fields
+    // `tick_construction` itself reads, before this tick's own mutable
+    // per-faction loop below needs `world.factions` mutably. Deliberately
+    // *not* also reproducing `tick_construction`'s `funded_ratio` clamp:
+    // that depends on stock *availability*, which is what this throttle is
+    // for - every other `needed` term in this function is an appetite
+    // figure, not a pre-clamped one, and construction's should read the
+    // same way.
+    let mut construction_machinery_demand = vec![0.0f32; n_factions];
+    let mut construction_steel_demand = vec![0.0f32; n_factions];
     for region in &world.regions {
         let f = region.owner.index();
         total_pop[f] += region.population;
@@ -139,7 +350,40 @@ pub fn tick_economy(world: &mut World) {
             let mult = if good == Good::Food { food_e } else { e };
             potential[f][good.index()] += region.effective_capacity(good) * mult;
         }
+        // A `Project::TransportLine` whose far endpoint has since changed
+        // hands is cancelled for free, no cost charged, the moment
+        // `construction::tick_construction` reaches it - this same tick,
+        // immediately after `tick_economy` returns (`Simulation::step_timed`'s
+        // own fixed order). Skipping it here too (`construction::
+        // transport_line_still_owned`, the exact check `tick_construction`
+        // itself uses) keeps this demand estimate from counting a project
+        // that will not actually draw on either stock today.
+        let stale_transport_line = matches!(
+            region.construction.map(|c| c.project),
+            Some(construction::Project::TransportLine(line_id))
+                if !construction::transport_line_still_owned(world, region.id.index(), line_id)
+        );
+        if let Some(constr) = region.construction.filter(|_| !stale_transport_line) {
+            let owner_faction = &world.factions[f];
+            let mut rate = CONSTRUCTION_RATE;
+            if owner_faction.capital_flight_active {
+                rate *= CAPITAL_FLIGHT_CONSTRUCTION_MULT;
+            }
+            if focus::active(owner_faction) == Some(NationalFocus::Technocracy) {
+                rate *= FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT;
+            }
+            let attempted = rate.min(constr.required - constr.invested).max(0.0);
+            construction_machinery_demand[f] += attempted * CONSTRUCTION_MACHINERY_PER_POINT;
+            construction_steel_demand[f] += attempted * CONSTRUCTION_STEEL_PER_POINT;
+        }
     }
+
+    // Step 1.5's own demand signal for Munitions (see `national_munitions_
+    // demand`'s doc) has to be read before the loop below takes
+    // `world.factions.iter_mut()` - the same "read `world.units` up front"
+    // shape this function's own `committed` pass (bottom of this file)
+    // already follows.
+    let munitions_demand = national_munitions_demand(world, n_factions);
 
     let mut draft = vec![0.0f32; n_factions];
     for faction in world.factions.iter_mut() {
@@ -231,10 +475,297 @@ pub fn tick_economy(world: &mut World) {
             pot[good.index()] *= munitions_mult;
         }
 
-        let ration = faction.civilian_ration;
         let food_need = total_pop[f] * CIVILIAN_FOOD_DEMAND_PER_POP;
         let energy_need = total_pop[f] * CIVILIAN_ENERGY_DEMAND_PER_POP;
         let machinery_need = total_pop[f] * CIVILIAN_MACHINERY_DEMAND_PER_POP;
+        // Read here (moved up from just before Step 2 below) so Step 1.5's
+        // own throttle can use it too - see `food_need_rationed`'s own
+        // comment for why.
+        let ration = faction.civilian_ration;
+        // Step 1.5's own throttle reads the *rationed* civilian draw, not
+        // the full `food_need`/`energy_need`/`machinery_need` `consume`
+        // below still uses for shortage accounting - a sixth codex review
+        // pass caught that using the full figure overstates real
+        // consumption whenever `civilian_ration < 1.0`: `consume` itself
+        // only ever withdraws `need * ration` (this file's own `consume`
+        // doc), so a faction rationing civilians to, say, 25% draws stock
+        // four times slower than `food_need` alone implies - reading the
+        // un-rationed figure would let a deliberately-rationed stockpile
+        // read as a much shorter "reserve" than it actually is, keeping
+        // production open (and consuming Steel/Energy inputs) for far
+        // longer than the intended horizon. `consume`'s own unrationed
+        // `food_need`/`energy_need`/`machinery_need` calls below are
+        // unaffected - shortage accounting is about the *full* population's
+        // need regardless of policy, a different question from how fast
+        // policy is actually letting stock drain.
+        let food_need_rationed = food_need * ration;
+        let energy_need_rationed = energy_need * ration;
+        let machinery_need_rationed = machinery_need * ration;
+
+        // Step 1.5: give production a feedback from inventory (this file's
+        // module doc has the defect - capacity exceeding steady demand ran
+        // flat out into a warehouse forever). Each of these five goods
+        // already has a real structural "how much does the chain actually
+        // want today" figure available at this point in the tick: `Food`/
+        // `Machinery`'s civilian draw just computed above, `Energy`/`Steel`'s
+        // own recipe draw from downstream `pot`, and `Munitions` from the
+        // standing army `national_munitions_demand` computed once above.
+        // `Steel`/`Machinery` also add today's active `construction::
+        // tick_construction` draw (`construction_machinery_demand[f]`/
+        // `construction_steel_demand[f]`, computed above from each active
+        // project's own real rate and remaining-progress cap) - a direct
+        // same-tick consumer of both goods this throttle would otherwise
+        // not know about, which a codex review caught: without it, a
+        // faction mid-build with a full stockpile could have its own
+        // construction throttled by civilian/recipe demand alone, stalling
+        // in-progress projects until the stockpile fell below a reserve
+        // target that has nothing to do with what construction is actually
+        // drawing. `Infantry`/`Armour`/`Artillery`/`Naval`/
+        // `Aircraft` are deliberately left out: none of them has a
+        // comparable flow-demand figure anywhere in this codebase (their
+        // stock is only ever drawn down in lumps by `action::apply_recruit`/
+        // `apply_reinforce`, at whatever rate a player or AI happens to be
+        // recruiting - `crates/agents`' own `growth_buffer_days` doc records
+        // the same gap), and inventing one here would be exactly the
+        // "pick a number, tune it until the outcome looks right" mistake
+        // CLAUDE.md's own "繰り返し踏んだ欠陥" record warns against. Their
+        // capacity is also never grown by investment (`crates/agents`'
+        // `apportion_growth_goods` only ever targets Energy/Steel/Machinery/
+        // Munitions), so they are not the compounding-capacity defect this
+        // change exists to close in the first place.
+        //
+        // **Order is load-bearing here - a second codex review (P1) caught
+        // that the first version read every good's downstream `pot` fully
+        // un-throttled**, i.e. each good's *structural potential* rather than
+        // what its own throttle actually leaves it drawing. That let a
+        // downstream good sitting on a saturated stockpile of its own (and
+        // therefore barely drawing on its inputs any more) keep reporting
+        // its *full, un-throttled* appetite upstream - so Steel's own
+        // `buffer_days` never rose even once Machinery/Munitions had already
+        // eased off, and Steel just kept piling up behind them (measured:
+        // Machinery's peak fell 112,148 -> 10,539 on japan_hex seed 3 while
+        // Steel's barely moved, 36,242 -> 22,756 - the good whose `needed`
+        // was computed correctly improved, the one computed from stale
+        // upstream demand did not).
+        //
+        // The fix is *not* an iterative solve - `docs/conventions.md` bans
+        // float-convergence loops, and this group has no cycle to converge
+        // in the first place. The four goods form a strict one-way chain:
+        // `Machinery`'s and `Munitions`' own `needed` never reference `Steel`
+        // or `Energy` at all (civilian population / `Infantry`'s potential,
+        // which is never throttled / construction draw for `Machinery`; the
+        // standing army's upkeep for `Munitions`), so both can be resolved
+        // first, independent of everything else in this group and of each
+        // other. `Steel`'s `needed` sums exactly those two goods' (and
+        // `Infantry`'s) appetite for `Steel`, so it is resolved next, reading
+        // `pot[Machinery]`/`pot[Munitions]` *after* they were just throttled
+        // above - their real, post-throttle draw, not their un-throttled
+        // potential. `Energy`'s `needed` sums `Steel`'s own appetite (plus
+        // `Machinery`'s/`Munitions`'), so it is resolved last, reading
+        // `pot[Steel]` after *it* was just throttled. `Food` depends on
+        // nothing in this group and can be resolved anywhere. One fixed pass
+        // in this order is exact - not an approximation that would need
+        // iterating toward a fixed point, the way `SUPPLY_FLOW_ROUNDS` in
+        // `logistics.rs` iterates a genuine mutual-contention loop.
+        // `industry_priority`'s own share weights (Step 3/4's own doc has
+        // the full account of the split itself) moved up from where they
+        // used to be computed, so `machinery_feasible`/`munitions_feasible`
+        // just below can use the *same* shares - a seventh codex review
+        // pass (P2) caught that the feasibility cap was treating a
+        // faction's *entire* Steel/Energy stock as available to Machinery/
+        // Munitions, when Steps 3/4 below only ever hand each good its own
+        // `industry_priority`-weighted slice: a good with a near-zero
+        // priority weight can be starved by policy just as thoroughly as by
+        // genuine physical scarcity, and the feasibility cap needs to see
+        // that the same way. Pure weight ratios, independent of any stock
+        // value, so computing them here (before `stock[Energy]`/`stock[
+        // Steel]` have even received this tick's own production) changes
+        // nothing about what they mean - only *which* stock they get
+        // multiplied against differs between here and Step 3/4's own use.
+        let w_steel = faction.industry_priority[Good::Steel.index()].max(0.0);
+        let w_machinery = faction.industry_priority[Good::Machinery.index()].max(0.0);
+        let w_munitions = faction.industry_priority[Good::Munitions.index()].max(0.0);
+
+        let energy_weight_sum = w_steel + w_machinery + w_munitions;
+        let (energy_share_steel, energy_share_machinery, energy_share_munitions) =
+            if energy_weight_sum > 0.0 {
+                (
+                    w_steel / energy_weight_sum,
+                    w_machinery / energy_weight_sum,
+                    w_munitions / energy_weight_sum,
+                )
+            } else {
+                (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+            };
+
+        let steel_weight_sum = w_machinery + w_munitions;
+        let (share_machinery, share_munitions) = if steel_weight_sum > 0.0 {
+            (w_machinery / steel_weight_sum, w_munitions / steel_weight_sum)
+        } else {
+            (0.5, 0.5)
+        };
+
+        let constr_machinery = construction_machinery_demand[f];
+        let constr_steel = construction_steel_demand[f];
+
+        pot[Good::Food.index()] *= production_throttle_mult(
+            faction.stock[Good::Food.index()],
+            food_need_rationed,
+            pot[Good::Food.index()],
+        );
+
+        let machinery_needed_by_chain =
+            machinery_need_rationed + pot[Good::Infantry.index()] * INFANTRY_INPUT_MACHINERY + constr_machinery;
+        pot[Good::Machinery.index()] *= production_throttle_mult(
+            faction.stock[Good::Machinery.index()],
+            machinery_needed_by_chain,
+            pot[Good::Machinery.index()],
+        );
+
+        pot[Good::Munitions.index()] *= production_throttle_mult(
+            faction.stock[Good::Munitions.index()],
+            munitions_demand[f],
+            pot[Good::Munitions.index()],
+        );
+
+        // Reads `pot[Machinery]`/`pot[Munitions]` *after* the two throttles
+        // just above - see this block's own doc for why that ordering,
+        // not iteration, is what closes the P1.
+        //
+        // **Feasibility-capped, not raw `pot` - a fourth codex review pass
+        // (P1).** `pot[Machinery]`/`pot[Munitions]` at this point are each
+        // already throttled against *their own* inventory, but neither is
+        // yet capped by whatever a *third* input actually leaves them able
+        // to produce: a Machinery chain genuinely starved of Steel (a real
+        // capacity shortfall, not an inventory throttle - `supply_ratio`
+        // running under 1.0 is this game's normal state, `docs/future-
+        // work.md`'s "需要が生産を上回る理由") still reports its full,
+        // un-starved potential as Energy's downstream appetite, so Energy
+        // never learns that draw will not actually materialize and keeps
+        // producing for a demand that structurally cannot show up - the
+        // warehouse-growth shape persisting specifically for input-starved
+        // chains. `machinery_feasible`/`munitions_feasible` cap each by
+        // *today's starting* `faction.stock[Steel]`/`[Energy]` (untouched -
+        // Step 2 below hasn't run yet, so this is a real figure already
+        // known, not a second good's not-yet-computed output): if Steel has
+        // been chronically scarce, today's starting Steel stock already
+        // reflects that scarcity. This is deliberately a cheap, single-pass
+        // *estimate*, not the exact `input_limit`/budget-split cascade
+        // Steps 3-4 below compute for real (that would need a second full
+        // pass through this tick's own production to know, which is
+        // circular - Steel's real output depends on Energy's, and Energy's
+        // throttle is exactly what this estimate feeds) - conservative in
+        // the sense that a good already unthrottled by its own inventory is
+        // never capped *below* what it could actually fund from today's
+        // stock, only prevented from reporting appetite the stock plainly
+        // cannot back.
+        //
+        // Each good's slice of that stock is its own `industry_priority`
+        // share (`share_machinery`/`share_munitions` for Steel,
+        // `energy_share_machinery`/`energy_share_munitions` for Energy -
+        // computed just above, the exact shares Steps 3/4 below apply to
+        // the *real* stock at that later point in the tick), not the whole
+        // stock - a seventh codex review pass (P2): a good with a near-zero
+        // priority weight can be starved by policy as thoroughly as by
+        // genuine scarcity, and this estimate needs to see that too, or it
+        // just relocates the same "phantom demand" defect from physical
+        // scarcity to policy allocation.
+        //
+        // **Starting stock only - deliberately *not* also crediting this
+        // tick's own raw potential output, after a real back-and-forth
+        // across two more codex review passes.** An eighth pass (P1) first
+        // caught that starting stock alone under-counts: Step 3 adds this
+        // tick's own `actual_steel` to `stock[Steel]` *before* Step 4 ever
+        // splits it among Machinery/Munitions, so a faction with low
+        // starting Steel but real Steel *capacity* can still fund a real
+        // Machinery/Munitions draw this same tick - reading only the
+        // opening stock made that draw look infeasible and suppressed
+        // `Energy`'s own `needed` for it, throttling Energy against a
+        // shortage that was never real. Crediting `pot[Steel]`/`pot[Energy]`
+        // (their raw, pre-throttle Step 1 values - the only figures
+        // available here without a genuinely circular second pass, since
+        // Steel's own throttle is computed *from* `steel_needed_by_chain`,
+        // which these two `_feasible` values feed) fixed that specific
+        // case - but a ninth pass (P1) then caught what the eighth pass's
+        // own "the two failure modes don't overlap" reasoning missed: raw,
+        // *un-throttled* potential is exactly what makes a good look
+        // "available" regardless of how comfortably oversupplied it already
+        // is - a large-capacity Steel/Energy stockpile now justified its
+        // own continued full-tilt production by crediting Machinery with
+        // an appetite for Steel that was never going to survive Steel's
+        // *own* throttle a few lines below, self-justifying in exactly the
+        // compounding-capacity, already-overstocked case this whole
+        // mechanism exists to close.
+        //
+        // Between the two, the un-credited (starting-stock-only) version is
+        // kept: it can read a transiently-low Steel stock as "Machinery
+        // can't fund this" when Steel capacity would in fact cover it this
+        // same tick - a real but bounded imprecision (found but not fixed;
+        // it only ever makes the throttle *more* conservative, never
+        // reopens unbounded growth) - while the credited version can be
+        // gamed by the *exact* shape (already-large capacity, low stock
+        // relative to it) this task exists to fix. A correct fix needs
+        // Steel's real, *post-throttle* output, which only exists after
+        // Steel's own throttle runs - a genuine two-pass dependency, not
+        // something a single-pass estimate can resolve either way; closing
+        // it properly is future work, not a call to make silently by
+        // picking whichever single-pass estimate happens to read better on
+        // one measured scenario.
+        let steel_available_for_downstream = faction.stock[Good::Steel.index()];
+        // Net of civilians' own rationed claim (`energy_need_rationed`,
+        // already computed above): a tenth codex review pass (P2) caught
+        // that Step 2.5 withdraws civilians' share of `stock[Energy]`
+        // *before* Step 3 ever hands industry its own budget from what's
+        // left - a known, already-computed quantity, not a second good's
+        // not-yet-decided output, so crediting it here carries none of the
+        // circularity risk the Steel/Machinery credit above does. Without
+        // this, an Energy stock already mostly earmarked for civilians
+        // still read as "available" to Machinery/Munitions, overstating
+        // their real feasible draw the same direction (if more mildly) as
+        // the raw-potential credit just above was reverted for.
+        let energy_available_for_downstream = (faction.stock[Good::Energy.index()] - energy_need_rationed).max(0.0);
+        let machinery_feasible = pot[Good::Machinery.index()]
+            .min(input_limit(steel_available_for_downstream * share_machinery, MACHINERY_INPUT_STEEL))
+            .min(input_limit(energy_available_for_downstream * energy_share_machinery, MACHINERY_INPUT_ENERGY));
+        let munitions_feasible = pot[Good::Munitions.index()]
+            .min(input_limit(steel_available_for_downstream * share_munitions, MUNITIONS_INPUT_STEEL))
+            .min(input_limit(energy_available_for_downstream * energy_share_munitions, MUNITIONS_INPUT_ENERGY));
+
+        let steel_needed_by_chain = machinery_feasible * MACHINERY_INPUT_STEEL
+            + munitions_feasible * MUNITIONS_INPUT_STEEL
+            + pot[Good::Infantry.index()] * INFANTRY_INPUT_STEEL
+            + constr_steel;
+        pot[Good::Steel.index()] *= production_throttle_mult(
+            faction.stock[Good::Steel.index()],
+            steel_needed_by_chain,
+            pot[Good::Steel.index()],
+        );
+
+        // Reads `pot[Steel]` after *its* throttle just above, for the same
+        // reason. Steel has no input but Energy, but its raw (already
+        // inventory-throttled) `pot` is still not its real appetite for
+        // Energy - an eleventh codex review pass (P2), the same shape as
+        // `machinery_feasible`/`munitions_feasible` above but for Steel's
+        // own claim: a faction with `industry_priority[Steel]` at or near
+        // `0.0` gets little or none of `energy_available_for_downstream`
+        // in Step 3 below (`energy_share_steel`, computed with `share_
+        // machinery`/`share_munitions` above), so `actual_steel` stays
+        // small regardless of how large `pot[Steel]` reads - reporting the
+        // whole un-capped `pot[Steel]` as Energy demand here would be
+        // exactly the policy-allocation phantom demand `energy_share_
+        // machinery`/`energy_share_munitions` already exist to prevent for
+        // Machinery/Munitions, just left open for Steel's own claim.
+        let steel_feasible = pot[Good::Steel.index()]
+            .min(input_limit(energy_available_for_downstream * energy_share_steel, STEEL_INPUT_ENERGY));
+        let energy_needed_by_chain = energy_need_rationed
+            + steel_feasible * STEEL_INPUT_ENERGY
+            + machinery_feasible * MACHINERY_INPUT_ENERGY
+            + munitions_feasible * MUNITIONS_INPUT_ENERGY;
+        pot[Good::Energy.index()] *= production_throttle_mult(
+            faction.stock[Good::Energy.index()],
+            energy_needed_by_chain,
+            pot[Good::Energy.index()],
+        );
 
         let stock = &mut faction.stock;
 
@@ -262,22 +793,10 @@ pub fn tick_economy(world: &mut World) {
         // (because its own potential is the binding constraint) doesn't
         // hand the rest to another good this tick — the same
         // no-redistribution behaviour step 4 already relies on for Steel.
-        let w_steel = faction.industry_priority[Good::Steel.index()].max(0.0);
-        let w_machinery = faction.industry_priority[Good::Machinery.index()].max(0.0);
-        let w_munitions = faction.industry_priority[Good::Munitions.index()].max(0.0);
-
-        let energy_weight_sum = w_steel + w_machinery + w_munitions;
-        let (energy_share_steel, energy_share_machinery, energy_share_munitions) =
-            if energy_weight_sum > 0.0 {
-                (
-                    w_steel / energy_weight_sum,
-                    w_machinery / energy_weight_sum,
-                    w_munitions / energy_weight_sum,
-                )
-            } else {
-                (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
-            };
-
+        // (`w_steel`/`w_machinery`/`w_munitions`/`energy_share_*`/
+        // `share_machinery`/`share_munitions` are computed once, above
+        // Step 1.5, so its own feasibility estimate can use the identical
+        // shares - see that computation's own doc.)
         let energy_stock = stock[Good::Energy.index()];
         let energy_budget_steel = energy_stock * energy_share_steel;
         let energy_budget_machinery = energy_stock * energy_share_machinery;
@@ -299,13 +818,6 @@ pub fn tick_economy(world: &mut World) {
         // good this tick — but it is deterministic, keeps the shared input
         // conserved, and makes `industry_priority`'s ratio directly control
         // how the contended input is split, which is all Stage 2A asks for.
-        let steel_weight_sum = w_machinery + w_munitions;
-        let (share_machinery, share_munitions) = if steel_weight_sum > 0.0 {
-            (w_machinery / steel_weight_sum, w_munitions / steel_weight_sum)
-        } else {
-            (0.5, 0.5)
-        };
-
         let steel_stock = stock[Good::Steel.index()];
         let steel_budget_machinery = steel_stock * share_machinery;
         let steel_budget_munitions = steel_stock * share_munitions;

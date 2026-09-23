@@ -4,12 +4,13 @@ use crate::action::{self, Action, ActionError, Layer, ALL_LAYERS};
 use crate::air;
 use crate::balance::{
     AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, CAPITAL_RELOCATION_DAYS, CAPTURE_UNREST,
-    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX,
     CIVILIAN_RATION_MIN, COMBAT_DAMAGE, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
     CONSTRUCTION_REQUIRED_CAPACITY, CONSTRUCTION_STEEL_PER_POINT, DEVASTATION_ON_CAPTURE,
     EQUIPMENT_LOSS_PER_DAMAGE, FOCUS_SWITCH_DAYS, FOOD_EFFICIENCY_FLOOR, GROUP_SUPPORT_BASELINE, IMPORT_PER_PORT,
     INDUSTRIAL_STABILITY_FLOOR, LINE_INTERDICTION_DAMAGE, MANPOWER_LOSS_PER_DAMAGE, NL_PROPOSAL_COOLDOWN_DAYS,
     NODE_OPERATIONAL_THRESHOLD, NODE_STRIKE_DAMAGE, OCCUPATION_RATE, ORG_DAMAGE_MULT,
+    PRODUCTION_RESERVE_TARGET_DAYS,
     RELOCATE_CAPITAL_GOVERNMENT_SUPPORT_COST, RELOCATE_CAPITAL_LOCALGOV_SUPPORT_COST,
     SEPARATISM_THRESHOLD, STRIKE_DAYS, STRIKE_OUTPUT_MULT, TRANSPORT_LINE_REPAIR_STEP, TREATY_ACCEPT_OPINION_BONUS,
     UNIT_DEATH_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER, UNIT_ORG,
@@ -903,6 +904,622 @@ fn industry_priority_splits_shared_input() {
     assert!(
         machinery_favored_mu < munitions_favored_mu,
         "shifting priority toward Machinery should reduce Munitions' output"
+    );
+}
+
+/// Test-only unit factory shared by the `production_throttle_mult` tests
+/// below - every field but `station`/`owner`/`manpower` is a fixed,
+/// unremarkable "healthy unit" value, matching `supply_corridor_cut`'s own
+/// `station_garrison` helper.
+fn throttle_test_unit(id: u32, owner: FactionId, station: Station, manpower: f32) -> military::Unit {
+    military::Unit {
+        id: UnitId(id),
+        owner,
+        name: format!("Garrison {id}"),
+        station,
+        movement: None,
+        manpower,
+        equipment: crate::balance::UNIT_EQUIPMENT,
+        organization: 100.0,
+        morale: 1.0,
+        supply: 1.0,
+        arms_delivery: 1.0,
+        arms_budget: 0.0,
+        arms_delivery_station: station,
+        branch: Some(military::Branch::Infantry),
+        experience: 0.0,
+        alive: true,
+    }
+}
+
+/// Regression guard for a P2 a sixth `codex review` pass caught: Step 1.5's
+/// throttle used to read the *full* `food_need`/`energy_need`/
+/// `machinery_need` for its civilian component, but `consume` (this file's
+/// own doc) only ever withdraws `need * civilian_ration` - so a faction
+/// rationing civilians hard (a deliberate policy to stockpile surplus) got
+/// a reserve target scaled to demand nobody was actually drawing at that
+/// rate, letting production stay open (and consume Steel/Energy inputs)
+/// far past the intended `PRODUCTION_RESERVE_TARGET_DAYS` horizon. Fixed by
+/// feeding `production_throttle_mult` the *rationed* civilian draw
+/// (`food_need_rationed`/`energy_need_rationed`/`machinery_need_rationed`)
+/// while `consume`'s own shortage accounting keeps reading the full,
+/// unrationed figure (a different question - how large the population's
+/// need is, not how fast policy is letting stock drain).
+///
+/// Isolates this on `Good::Food` (no recipe, no other consumer within
+/// `tick_economy` - this file's own module doc): a stock chosen to sit
+/// comfortably under the reserve horizon at `civilian_ration == 1.0` but
+/// several multiples over it once rationed down to `0.25` (the real daily
+/// draw is a quarter the size, so the *same* stock represents four times as
+/// many days of real cover) must produce less at the harsher ration, not
+/// the same or more.
+#[test]
+fn heavy_rationing_tightens_the_throttle_not_loosens_it() {
+    const POPULATION_PER_REGION: f32 = 100.0;
+
+    fn build(ration: f32, stock_before: f32) -> f32 {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Food.index()] = 10.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = POPULATION_PER_REGION;
+            }
+        }
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Food.index()] = stock_before;
+            f.stability = 100.0;
+            f.civilian_ration = ration;
+        }
+        world.units.retain(|u| u.owner != faction);
+
+        economy::tick_economy(&mut world);
+        world.faction(faction).stock[Good::Food.index()] - stock_before
+    }
+
+    // The real `food_need` the sim will compute - not guessed, but read
+    // back from how many regions this fixture actually hands to faction 0,
+    // so this test can't silently drift from `build`'s own setup.
+    let n_regions =
+        scenario::build_world().regions.iter().filter(|r| r.owner == FactionId(0)).count() as f32;
+    let food_need = n_regions * POPULATION_PER_REGION * CIVILIAN_FOOD_DEMAND_PER_POP;
+
+    // Several multiples of `food_need` beyond `PRODUCTION_RESERVE_TARGET_
+    // DAYS` worth of the *rationed* draw (so `civilian_ration == 0.25`
+    // reads this as deep into throttled territory) but still comfortably
+    // under the *full* `food_need`'s own reserve horizon (so `civilian_
+    // ration == 1.0` reads it as fine, near-un-throttled).
+    let stock = food_need * PRODUCTION_RESERVE_TARGET_DAYS * 2.0;
+
+    let full_ration = build(1.0, stock);
+    let heavy_ration = build(0.25, stock);
+
+    assert!(
+        heavy_ration < full_ration,
+        "the same stock represents four times as many days of *real* cover once rationed to 0.25 - production \
+         must throttle down more, not stay the same or open up further: full_ration={full_ration}, \
+         heavy_ration={heavy_ration}"
+    );
+}
+
+/// The stock-aware production throttle (`economy::production_throttle_
+/// mult`, added to close the defect commit 52bb761's own report measured:
+/// expanded reproduction made industrial capacity actually compound, and
+/// nothing in `tick_economy` ever read `Faction::stock` back, so capacity
+/// that outgrew its own steady demand ran flat out into a warehouse forever
+/// - idle Machinery/Steel stock in the tens of thousands after 2880 days).
+///
+/// `Good::Munitions` is the cleanest good to isolate this on: nothing else
+/// in `tick_economy` consumes it (this module's own doc - only `logistics::
+/// distribute_supply`, a later system this test never runs, ever draws it
+/// down), so one tick's `Faction::stock[Munitions]` delta *is* that tick's
+/// `actual_munitions` exactly, with no other consumer to confound it.
+///
+/// Asserts the whole shape the task demands: full output under the reserve
+/// horizon, a smooth (never-zero) ease-down beyond it, and strictly more
+/// throttling as idle stock climbs further - never a cliff.
+#[test]
+fn idle_stock_throttles_production_smoothly_with_no_cutoff() {
+    fn build(stock_before: f32, n_units: usize) -> f32 {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        let capital = world.faction(faction).capital;
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Munitions.index()] = 10.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 1.0;
+            }
+        }
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Munitions.index()] = stock_before;
+            f.stock[Good::Energy.index()] = 1_000_000.0;
+            f.stock[Good::Steel.index()] = 1_000_000.0;
+            f.stability = 100.0;
+            f.industry_priority[Good::Munitions.index()] = 1.0;
+        }
+        for i in 0..n_units {
+            world
+                .units
+                .push(throttle_test_unit(i as u32, faction, Station::Region(capital), 10.0));
+        }
+
+        economy::tick_economy(&mut world);
+        world.faction(faction).stock[Good::Munitions.index()] - stock_before
+    }
+
+    let n_units = 5;
+    // The exact per-unit demand `production_throttle_mult` throttles
+    // against, computed via the *same* formula `national_munitions_demand`
+    // uses (`logistics::unit_supply_demand`) rather than hardcoded, so this
+    // test can't silently drift from what the mechanism actually reads.
+    let sample = throttle_test_unit(0, FactionId(0), Station::Region(RegionId(0)), 10.0);
+    let (per_unit_munitions, _) = logistics::unit_supply_demand(&sample, false);
+    let needed = per_unit_munitions * n_units as f32;
+    let target_stock = PRODUCTION_RESERVE_TARGET_DAYS * needed;
+
+    let baseline = build(0.0, n_units);
+    let still_comfortable = build(target_stock * 0.5, n_units);
+    let at_the_edge = build(target_stock, n_units);
+    let over_by_5x = build(target_stock * 5.0, n_units);
+    // Deliberately not a still-larger multiple: `Faction::stock` is `f32`,
+    // and beyond roughly this point the daily increment this throttle
+    // still allows falls below the representable precision at a stock
+    // magnitude this size (`stock_before + tiny_increment` rounds back to
+    // `stock_before` exactly) - a real limit of the storage type, not of
+    // the throttle, and not what this test is checking.
+    let over_by_50x = build(target_stock * 50.0, n_units);
+
+    assert!(
+        (still_comfortable - baseline).abs() < baseline * 0.01,
+        "under the reserve horizon, production should run at full potential: \
+         baseline={baseline}, still_comfortable={still_comfortable}"
+    );
+    assert!(
+        (at_the_edge - baseline).abs() < baseline * 0.01,
+        "right at the reserve horizon, production should still be un-throttled: \
+         baseline={baseline}, at_the_edge={at_the_edge}"
+    );
+    assert!(
+        over_by_5x < at_the_edge,
+        "beyond the reserve horizon, production must ease down: at_the_edge={at_the_edge}, over_by_5x={over_by_5x}"
+    );
+    assert!(
+        over_by_50x < over_by_5x,
+        "production should keep easing down as idle stock grows further: \
+         over_by_5x={over_by_5x}, over_by_50x={over_by_50x}"
+    );
+    assert!(
+        over_by_50x > 0.0,
+        "no hard cutoff: even at 50x the reserve horizon, production must stay strictly positive, got {over_by_50x}"
+    );
+}
+
+/// The task's own explicit requirement - "a good with temporarily zero
+/// demand must not have production pinned at zero forever" - proven both
+/// directions rather than asserted, plus the codex-caught corollary: zero
+/// demand also must not mean *no* throttle at all forever (that reopens the
+/// exact unbounded-warehouse defect this file exists to close, just for
+/// that one state).
+///
+/// **Rewritten after a second `codex review` P1.** The first version of
+/// this test asserted that adding real demand against a large stock made
+/// the throttle *engage harder* (`with_army < with_no_army`) - which was
+/// actually pinning the *bug* as the expected behaviour: under the old
+/// `needed <= 0.0 -> 1.0` rule, zero demand meant *no* throttle ever, so a
+/// faction with no army produced at full, un-throttled capacity forever
+/// while one with a real army got throttled by its own genuine demand -
+/// backwards from what a stock-aware throttle should do. With the fix
+/// (`production_throttle_mult`'s own doc has the floor), zero demand
+/// against a large stock is what gets throttled hard; real demand relieves
+/// it, because a large stock represents *fewer* days of cover once
+/// something is actually drawing on it. `production_throttle_mult` is
+/// still a pure function of today's `stock`/`needed`, not a persisted
+/// state, so there is nothing to "get stuck" - this test flips demand on
+/// and back off again against the *same* stock to prove the throttle
+/// reacts immediately, and correctly, in both directions.
+#[test]
+fn zero_demand_does_not_pin_production_and_recovers_when_demand_returns() {
+    fn build(stock_before: f32, n_units: usize) -> f32 {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        let capital = world.faction(faction).capital;
+        // The scenario ships with a starting garrison of its own -
+        // `national_munitions_demand` would otherwise fold that in on top
+        // of whatever this test adds, so "zero demand" has to mean zero
+        // units of *any* origin, not just none newly added here.
+        world.units.retain(|u| u.owner != faction);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Munitions.index()] = 10.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 1.0;
+            }
+        }
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Munitions.index()] = stock_before;
+            f.stock[Good::Energy.index()] = 1_000_000.0;
+            f.stock[Good::Steel.index()] = 1_000_000.0;
+            f.stability = 100.0;
+            f.industry_priority[Good::Munitions.index()] = 1.0;
+        }
+        for i in 0..n_units {
+            world
+                .units
+                .push(throttle_test_unit(i as u32, faction, Station::Region(capital), 10.0));
+        }
+
+        economy::tick_economy(&mut world);
+        world.faction(faction).stock[Good::Munitions.index()] - stock_before
+    }
+
+    // Case 1: no army, no stock - nothing yet to throttle against
+    // (`buffer_days == 0`), so production runs at full potential. This is
+    // the actual value "full potential" reads as for the rest of this test
+    // - measured, not assumed, so a change to capacity/efficiency elsewhere
+    // in this fixture can't silently invalidate the comparisons below.
+    let full_potential = build(0.0, 0);
+    assert!(full_potential > 0.0, "the fixture itself must have real Munitions potential to test anything: got 0");
+
+    // Case 2: no army, but a stock several multiples of the good's own
+    // *potential* (not of any real demand - there is none). A second
+    // `codex review` pass caught that the first version of this mechanism
+    // read zero demand as "never throttle" (`1.0` forever) - reopening the
+    // exact unbounded-warehouse defect this whole change exists to close,
+    // just for the zero-demand case. With the fix, zero real demand still
+    // implies a *bounded* comfortable reserve (`production_throttle_mult`'s
+    // own doc: one day of the good's own potential) - well below this
+    // stock - so output must fall hard here: strictly less than the full
+    // potential above, but never all the way to `0.0` (still able to
+    // slowly extend a reserve, not pinned).
+    let stock_far_beyond_potential = full_potential * 10.0;
+    let no_army_large_stock = build(stock_far_beyond_potential, 0);
+    assert!(
+        no_army_large_stock < full_potential,
+        "a large idle stock must throttle production even with zero real demand - the whole point of the codex \
+         P1 fix: full_potential={full_potential}, no_army_large_stock={no_army_large_stock}"
+    );
+    assert!(
+        no_army_large_stock > 0.0,
+        "no hard cutoff: even heavily throttled, a good with zero demand must still be able to slowly extend its \
+         reserve, not get pinned at literal zero: {no_army_large_stock}"
+    );
+
+    // Case 3: the *same* stock, but now a real army exists to draw on it.
+    // `stock_far_beyond_potential` covers this army's real daily draw for
+    // only a couple of days (`throttle_test_unit`'s manpower times 20
+    // units, `logistics::unit_supply_demand`'s formula) - nowhere near
+    // `PRODUCTION_RESERVE_TARGET_DAYS` - so the throttle should lift almost
+    // entirely: real demand justifies continued full production even
+    // against an absolute stock that looked enormous when nothing was
+    // drawing on it at all. This is the recovery this test is really
+    // after: the *same* stock reads completely differently once genuine
+    // demand appears, proving `production_throttle_mult` is reactive to
+    // today's real draw, not a stuck state.
+    let with_army_same_stock = build(stock_far_beyond_potential, 20);
+    assert!(
+        with_army_same_stock > no_army_large_stock,
+        "real demand appearing against the same stock must relieve the throttle, not deepen it: \
+         no_army_large_stock={no_army_large_stock}, with_army_same_stock={with_army_same_stock}"
+    );
+    assert!(
+        (with_army_same_stock - full_potential).abs() < full_potential * 0.01,
+        "a real army whose daily draw dwarfs the reserve horizon should see essentially full output, the same as \
+         an empty stockpile: full_potential={full_potential}, with_army_same_stock={with_army_same_stock}"
+    );
+
+    // Case 4: demand disappears again - the *exact* same stock as case 2
+    // must reproduce the *exact* same throttled output, proving this is a
+    // pure function of today's stock/demand, never a persisted state that
+    // stays stuck once entered.
+    let no_army_again = build(stock_far_beyond_potential, 0);
+    assert!(
+        (no_army_again - no_army_large_stock).abs() < full_potential * 1e-4,
+        "removing demand again must reproduce the exact same throttled output, not leave the earlier state stuck: \
+         no_army_large_stock={no_army_large_stock}, no_army_again={no_army_again}"
+    );
+}
+
+/// The point of throttling, per the task's own framing: not a tidier stock
+/// number, but that "the Steel and Energy it would have consumed stay
+/// available for goods that are actually short." Two otherwise-identical
+/// factions differ only in whether `Good::Machinery`'s own stock already
+/// looks saturated; Steel is deliberately kept scarce (capacity far below
+/// what Machinery's and Munitions' shared potential could use) so it is
+/// the genuine bottleneck both goods compete for via `industry_priority`.
+/// A saturated Machinery stockpile should leave strictly more Steel for
+/// Munitions - which is actually short - to draw on, over several ticks
+/// (the "budget share of a bigger stock next tick" mechanism this file's
+/// own module doc records, since nothing redistributes an unspent budget
+/// share *within* the same tick).
+#[test]
+fn throttling_one_good_leaves_more_of_its_shared_input_for_another() {
+    fn build(machinery_stock_before: f32) -> f32 {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        let capital = world.faction(faction).capital;
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Steel.index()] = 5.0;
+                region.capacity[Good::Machinery.index()] = 50.0;
+                region.capacity[Good::Munitions.index()] = 50.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 10.0;
+            }
+        }
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            f.stock[Good::Machinery.index()] = machinery_stock_before;
+            f.stock[Good::Energy.index()] = 1_000_000.0;
+            f.stability = 100.0;
+            f.industry_priority[Good::Machinery.index()] = 1.0;
+            f.industry_priority[Good::Munitions.index()] = 1.0;
+        }
+        for i in 0..10 {
+            world
+                .units
+                .push(throttle_test_unit(i as u32, faction, Station::Region(capital), 10.0));
+        }
+
+        let mut munitions_produced = 0.0;
+        for _ in 0..5 {
+            let before = world.faction(faction).stock[Good::Munitions.index()];
+            economy::tick_economy(&mut world);
+            munitions_produced += world.faction(faction).stock[Good::Munitions.index()] - before;
+        }
+        munitions_produced
+    }
+
+    let machinery_unthrottled = build(0.0);
+    let machinery_throttled = build(1_000_000_000.0);
+
+    assert!(
+        machinery_throttled > machinery_unthrottled,
+        "Steel a saturated Machinery stockpile no longer draws on should leave more for Munitions, which is \
+         actually short: unthrottled={machinery_unthrottled}, throttled={machinery_throttled}"
+    );
+}
+
+/// Regression guard for a P1 a second `codex review` pass caught (and this
+/// file's own git history has the measurement): the first version of this
+/// throttle computed `steel_needed_by_chain`/`energy_needed_by_chain` from
+/// every downstream good's *un-throttled* `pot` - so once `Machinery` (or
+/// `Munitions`) was itself heavily throttled and had all but stopped
+/// drawing on `Steel`, `Steel`'s own `needed` kept reporting the *full,
+/// un-throttled* appetite anyway, `Steel`'s own `buffer_days` never rose,
+/// and `Steel` just kept producing at full tilt into an already-huge
+/// stockpile. Measured directly on japan_hex seed 3, 2880 days: Machinery's
+/// peak fell 112,148 -> 10,539 (correctly throttled) while Steel's barely
+/// moved, 36,242 -> 22,756 (still reading stale upstream demand) - fixed by
+/// resolving `Machinery`/`Munitions` first and reading their *post-throttle*
+/// `pot` for `Steel`'s own `needed` (this file's own module doc has the
+/// full dependency-order argument for why this is a single fixed pass, not
+/// an iterative solve).
+///
+/// This constructs exactly that shape in isolation: `Munitions`/`Infantry`
+/// capacity are zeroed so `Steel`'s only downstream consumer is `Machinery`,
+/// and `Machinery`'s own `needed` is pinned tiny (a trivial population, no
+/// `Infantry`/construction draw) so a huge preloaded `Machinery` stock
+/// throttles it almost to zero. With `Machinery`'s *real* draw on `Steel`
+/// now near-nothing, a `Steel` stock of just a few thousand is already many
+/// times `PRODUCTION_RESERVE_TARGET_DAYS` worth of that real draw, and
+/// `Steel` output must fall hard to match - not stay in lockstep with
+/// `Machinery`'s raw, un-throttled potential.
+///
+/// Confirmed this can fail: temporarily reintroduced the exact bug (reading
+/// a pre-throttle snapshot of `pot[Machinery]`/`pot[Munitions]`/`pot[Steel]`
+/// for `steel_needed_by_chain`/`energy_needed_by_chain` instead of the
+/// live, already-throttled `pot`) and reran - `steel_produced` came back
+/// or forwards `pot[Good::Steel.index()]`'s full un-throttled potential
+/// (thousands of units in one tick) instead of the near-zero this test
+/// asserts. Reverted before committing.
+#[test]
+fn steel_throttle_reads_machinery_actual_throttled_draw_not_its_raw_potential() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.capacity[Good::Machinery.index()] = 1000.0;
+            region.capacity[Good::Steel.index()] = 1000.0;
+            region.infrastructure = 1.0;
+            region.unrest = 0.0;
+            // Trivial - just enough that `machinery_needed_by_chain` is a
+            // real, tiny, nonzero number rather than exactly `0.0` (which
+            // would take the `needed <= 0.0 -> no throttle` branch instead
+            // of the one this test means to exercise).
+            region.population = 1.0;
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stock = [0.0; GOOD_COUNT];
+        // Huge enough that Machinery's own throttle (against a population-
+        // of-a-few `machinery_needed_by_chain`) suppresses it almost to
+        // zero - see this test's own doc for the exact mechanism.
+        f.stock[Good::Machinery.index()] = 1_000_000_000.0;
+        // Modest in absolute terms, but already many times
+        // `PRODUCTION_RESERVE_TARGET_DAYS` worth of Machinery's *real*
+        // (post-throttle) draw on it - large enough that the un-fixed bug's
+        // stale, un-throttled `steel_needed_by_chain` would still read this
+        // as comfortably under its own reserve horizon and apply no
+        // throttle at all.
+        f.stock[Good::Steel.index()] = 5_000.0;
+        f.stock[Good::Energy.index()] = 1_000_000.0;
+        f.stability = 100.0;
+        f.industry_priority[Good::Machinery.index()] = 1.0;
+    }
+    // No units of any origin: Munitions demand stays exactly `0.0`, so
+    // Munitions capacity being zero above is not hiding a second channel.
+    world.units.retain(|u| u.owner != faction);
+
+    let steel_before = world.faction(faction).stock[Good::Steel.index()];
+    economy::tick_economy(&mut world);
+    let steel_produced = world.faction(faction).stock[Good::Steel.index()] - steel_before;
+
+    assert!(
+        steel_produced < 50.0,
+        "Steel's own throttle must reflect Machinery's actual (post-throttle) draw, not Machinery's raw \
+         un-throttled potential - Machinery is barely drawing on Steel here, so Steel's own reserve horizon is \
+         already deeply oversubscribed and output should be a small fraction of the ~1000-unit potential this \
+         region could otherwise produce. Got steel_produced={steel_produced}, which is the shape the stale-demand \
+         bug produces (full, un-throttled output)."
+    );
+}
+
+/// Regression guard for a P1 a fourth `codex review` pass caught:
+/// `energy_needed_by_chain`/`steel_needed_by_chain` used to read `pot[
+/// Machinery]`/`pot[Munitions]` straight - each already throttled against
+/// its *own* inventory, but not yet capped by whatever a genuinely scarce
+/// *third* input (Steel, for Machinery's Energy appetite) actually leaves
+/// it able to produce. A Machinery chain capped by real Steel scarcity
+/// (not an inventory throttle - this game's normal `supply_ratio < 1.0`
+/// state) still reported its full, un-starved potential as Energy's
+/// downstream draw, so Energy never learned that draw could not actually
+/// materialize and kept producing for a demand that structurally could not
+/// show up - `production_throttle_mult`'s own call site now caps
+/// `Machinery`'s/`Munitions`' contribution to `Steel`'s and `Energy`'s
+/// `needed` (`machinery_feasible`/`munitions_feasible`) by what *today's
+/// starting* Steel/Energy stock could actually fund, not raw `pot`.
+///
+/// This isolates the shape directly: Machinery has a large raw `pot`
+/// (ample capacity, its own stock always at `0.0` so it is never self-
+/// throttled - that path is already covered by the sibling test above),
+/// but Steel - Machinery's *other* input besides Energy - has zero capacity
+/// of its own and its stock is re-pinned to `0.0` every tick, so Machinery
+/// can *never actually draw on it*: a genuine, permanent, real capacity
+/// shortfall, not an inventory throttle. Under the bug, Energy's own
+/// `needed` still read Machinery's full raw potential (~1000/day * 0.3 =
+/// ~300/day) regardless, so Energy's own reserve target
+/// (`PRODUCTION_RESERVE_TARGET_DAYS * 300` = 9,000) stayed far above its
+/// own daily potential (~200), letting Energy's stock climb toward that
+/// inflated ceiling even though nothing was ever going to consume it -
+/// Machinery's real draw was `0.0` throughout. With the fix, `Steel`
+/// pinned at `0.0` makes `machinery_feasible` (`input_limit(stock[Steel],
+/// MACHINERY_INPUT_STEEL)`) read `0.0` too, so Energy's `needed` collapses
+/// to just civilian demand - a `needed <= 0.0`-adjacent case whose own
+/// floor (`production_throttle_mult`'s doc) caps the comfortable reserve at
+/// one day of Energy's own potential (~200), not 9,000.
+///
+/// **Confirmed this can fail.** Reverting `machinery_feasible`/
+/// `munitions_feasible` back to plain `pot[Machinery]`/`pot[Munitions]`
+/// (the bug) and rerunning this exact fixture: `energy_stock` reaches 5,440
+/// by day 30, versus 800 with the fix in place - the `2000.0` threshold
+/// sits with a wide margin between the two, not tuned to either. Reverted
+/// before committing.
+#[test]
+fn energy_throttle_reads_machinery_feasible_draw_not_raw_potential_when_steel_is_the_real_bottleneck() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.capacity[Good::Machinery.index()] = 1000.0;
+            region.capacity[Good::Energy.index()] = 200.0;
+            region.infrastructure = 1.0;
+            region.unrest = 0.0;
+            region.population = 1.0;
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stock = [0.0; GOOD_COUNT];
+        f.stability = 100.0;
+    }
+    world.units.retain(|u| u.owner != faction);
+
+    for _ in 0..30 {
+        economy::tick_economy(&mut world);
+        // Steel has zero capacity of its own here and Machinery can never
+        // draw on an empty stock, so it should already sit at (or very
+        // near) `0.0` every tick on its own - re-pinned defensively so a
+        // bug elsewhere in this fixture can't quietly hand Machinery a
+        // Steel budget this test doesn't intend it to have.
+        world.faction_mut(faction).stock[Good::Steel.index()] = 0.0;
+    }
+
+    let energy_stock = world.faction(faction).stock[Good::Energy.index()];
+    assert!(
+        energy_stock < 2000.0,
+        "Energy's own throttle must reflect Machinery's real (permanently Steel-starved, zero) draw, not \
+         Machinery's raw potential - with Steel permanently unavailable, Machinery can never actually consume the \
+         Energy its full potential would imply, so Energy production should stay throttled down close to its own \
+         one-day comfortable reserve (~200) instead of climbing toward the ~9,000 the stale, un-capped demand \
+         estimate would allow. Got energy_stock={energy_stock} after 30 days."
+    );
+}
+
+/// Regression guard for a P2 an eighth `codex review` pass caught:
+/// `machinery_feasible`/`munitions_feasible` used to cap Machinery's/
+/// Munitions' appetite against the faction's *entire* Steel/Energy stock,
+/// but Steps 3/4 below only ever hand each good its own `industry_priority`
+/// share of that stock - a good starved by *policy* (a near-zero priority
+/// weight) can be just as unable to actually draw on an input as one
+/// starved by genuine physical scarcity (the sibling test above), and the
+/// feasibility cap needs to see both the same way.
+///
+/// Isolates the policy-only case: Steel and Energy are both physically
+/// abundant throughout (never the binding constraint on their own), but
+/// `industry_priority[Machinery]` is pinned at `0.0` against a large
+/// `industry_priority[Munitions]` - Machinery's own *policy* share of both
+/// shared inputs is `0.0`, so it can never actually produce anything no
+/// matter how large its own raw potential is, exactly the way a genuinely
+/// scarce Steel stock did in the sibling test.
+#[test]
+fn energy_throttle_reads_machinery_industry_priority_share_not_the_whole_stock() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    for region in world.regions.iter_mut() {
+        if region.owner == faction {
+            region.capacity = [0.0; GOOD_COUNT];
+            region.capacity[Good::Machinery.index()] = 1000.0;
+            region.capacity[Good::Energy.index()] = 200.0;
+            region.infrastructure = 1.0;
+            region.unrest = 0.0;
+            region.population = 1.0;
+        }
+    }
+    {
+        let f = world.faction_mut(faction);
+        f.stock = [0.0; GOOD_COUNT];
+        // Steel and Energy both physically abundant - never the binding
+        // constraint on their own. Only `industry_priority` restricts
+        // Machinery here.
+        f.stock[Good::Steel.index()] = 1_000_000.0;
+        f.stability = 100.0;
+        f.industry_priority[Good::Machinery.index()] = 0.0;
+        f.industry_priority[Good::Munitions.index()] = 1.0;
+    }
+    world.units.retain(|u| u.owner != faction);
+
+    for _ in 0..30 {
+        economy::tick_economy(&mut world);
+    }
+
+    let energy_stock = world.faction(faction).stock[Good::Energy.index()];
+    assert!(
+        energy_stock < 2000.0,
+        "Energy's own throttle must reflect Machinery's real, policy-restricted (industry_priority == 0.0) share \
+         of the shared inputs, not Machinery's raw potential against the whole stock - Machinery can never draw on \
+         either Steel or Energy at a zero priority weight, so Energy production should stay throttled down close \
+         to its own one-day comfortable reserve (~200) instead of climbing toward what the un-capped demand \
+         estimate would allow. Got energy_stock={energy_stock} after 30 days."
     );
 }
 
@@ -5910,6 +6527,32 @@ fn missing_diplomacy_declaration_is_rejected() {
             assert!(msg.contains("diplomacy"), "expected the error to name `diplomacy`, got {msg:?}");
         }
         other => panic!("expected a distinct Schema error for a missing `diplomacy` field, got {other:?}"),
+    }
+}
+
+/// 人口 0 の地域は読み込み時に弾かれる。
+///
+/// `Region::labor_ratio` は `(workforce - mobilized) / workforce` で、
+/// `workforce = population * WORKFORCE_SHARE`。人口 0 だと 0/0 = NaN になり、
+/// **`f32::clamp` は NaN を止めない**（`<`/`>` の比較で実装されており、NaN は
+/// どちらにも引っかからず素通りする）。その NaN は `economy` の効率と
+/// `research` の労働力へ伝播し、**静かに経済を壊す。**
+///
+/// 出荷している 3 シナリオはどれも人口 0 の地域を持たないので soak の NaN 検査
+/// も捕まえない。`population` は読み込み後に一度も変更されないので、**到達
+/// 経路はシナリオファイルだけである。** 規約の fail-fast に従い読み込み時に
+/// 弾く——実行時に防御的な `.max()` を足すのはフォールバックで、規約違反である。
+///
+/// 落ちることを確認済み: `validate` の検査を外すと `load_str` が `Ok` を返し、
+/// その世界の `labor_ratio()` が NaN になることを見た。
+#[test]
+fn a_region_with_zero_population_is_rejected_at_load() {
+    let zero_pop = MINI_VALID_SCENARIO.replacen("\"population\": 10.0", "\"population\": 0.0", 1);
+    match scenario::load_str(&zero_pop) {
+        Err(scenario::ScenarioError::Schema(msg)) => {
+            assert!(msg.contains("population"), "expected the error to name `population`, got {msg:?}");
+        }
+        other => panic!("a region with population 0 must be rejected (labor_ratio would be NaN), got {other:?}"),
     }
 }
 

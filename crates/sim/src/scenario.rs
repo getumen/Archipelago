@@ -737,6 +737,26 @@ impl Scenario {
             if !region_ids.insert(r.id.as_str()) {
                 return Err(ScenarioError::DuplicateId { kind: "region", id: r.id.clone() });
             }
+            // **人口は正でなければならない。**
+            //
+            // `Region::labor_ratio` は `(workforce - mobilized) / workforce` で、
+            // `workforce = population * WORKFORCE_SHARE`。人口 0 だと 0/0 = NaN に
+            // なり、**`f32::clamp` は NaN を止めない**（`<`/`>` の比較で実装されて
+            // いるので NaN はどちらにも引っかからず素通りする）。その NaN は
+            // `economy` の効率と `research` の労働力に伝播し、**静かに経済を壊す。**
+            //
+            // 出荷している 3 シナリオはどれも人口 0 の地域を持たないので
+            // 実際には到達しない。`population` は読み込み後に一度も変更されない
+            // （`crates/sim` に `population` への代入は読み込み時しかない）ので、
+            // **到達経路はシナリオファイルだけである。** 規約の fail-fast に従い
+            // 読み込み時に弾く——実行時に防御的な `.max()` を足すのは
+            // フォールバックであり、規約が禁じている。
+            if !(r.population > 0.0) {
+                return Err(ScenarioError::Schema(format!(
+                    "region `{}` has population {} - must be > 0 (labor_ratio divides by it; 0 yields NaN and f32::clamp does not stop NaN)",
+                    r.id, r.population
+                )));
+            }
         }
         let mut zone_ids = std::collections::BTreeSet::new();
         for z in &self.sea_zones {
