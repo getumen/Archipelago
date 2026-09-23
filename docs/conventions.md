@@ -76,9 +76,12 @@ RL エージェントが大量の不正行動を投げることを前提とし�
 - `HashMap` / `HashSet` の反復順に依存する処理を書かない。
 - 浮動小数の加算順序を固定する。
 - 同じ seed と同じ入力列なら、必ず同じ結果になること。
-- `scenarios/mvp.json` の seed 1 / 720 日のハッシュ
-  `0138bf5d537417128e737d3fb68ff55591b8c5dc96e7f382cedaec3b63ffb714`
-  は Phase 1 から不変であり、リファクタリングの回帰ガードとして機能している。
+- **かつてここに `scenarios/mvp.json` の seed 1 / 720 日のハッシュを
+  「Phase 1 から不変の回帰ガード」として書いていた。廃止済みである**
+  （経緯は `CLAUDE.md`「ハッシュ固定はやめた」）。強制するテストはもう
+  存在しない（`grep 0138bf5d` は `.rs` に 0 件）。**この記述だけが
+  残っていた。** 決定論は `determinism` テストと
+  `power_table_matches_direct_computation_bit_for_bit` が守る。
 
 ## 6. 繰り返し踏んだ欠陥
 

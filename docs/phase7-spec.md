@@ -76,9 +76,10 @@ features = ["bevy_winit", "bevy_render", "bevy_core_pipeline",
 - `scenarios/mvp.json` と `scenarios/japan47.json` の両方に座標を入れる。
   日本列島の相対位置を反映させる
 - **座標はシミュレーションに一切影響しない。** 追加後も
-  `scenarios/mvp.json` の seed 1 / 720 日のハッシュが
-  `0138bf5d537417128e737d3fb68ff55591b8c5dc96e7f382cedaec3b63ffb714`
-  から動かないこと
+  ~~`scenarios/mvp.json` の seed 1 / 720 日のハッシュが `0138bf5d…` から
+  動かないこと~~ — **このハッシュ固定は廃止済み**（`CLAUDE.md`
+  「ハッシュ固定はやめた」）。当時の確認手段としてのみ残す。
+  座標が挙動を変えないこと自体は現行の不変条件である
 
 ### 描画
 
