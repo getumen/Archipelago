@@ -125,6 +125,47 @@ const DISBAND_SOLVENCY_BUFFER_DAYS: f32 = 7.0;
 /// (400+ day permanent streaks) blows past this threshold in the first
 /// couple of weeks and starts shrinking almost immediately.
 const CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM: u32 = 15;
+/// `cancel_stalled_construction`'s own chronic bar - the recovery path
+/// 022ddaa's own report named and left unfixed ("残る欠陥 — 止まった建設に
+/// 回復経路が無い"): once Machinery and Steel are both fully exhausted
+/// nationally, `construction::tick_construction`'s `funded_ratio` is
+/// exactly `0.0` and a region's `Construction::invested` stops advancing at
+/// all, occupying that region's one build slot forever (`docs/
+/// conventions.md` §6: "入ったら出られない状態を作らない") with no action
+/// `HeuristicAgent` had any way to issue - `Action::CancelBuild` existed in
+/// `crates/sim` (`action::apply_cancel_build`) but nothing in this crate
+/// ever emitted it.
+///
+/// Deliberately reuses `CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM`'s own
+/// value rather than tuning a second number - the instruction this fix was
+/// given is explicit about following the existing "this has been bad for a
+/// while, not one bad tick" idiom rather than inventing a second one, and a
+/// stalled project is the same severity of national shortfall
+/// `CHRONIC_LOW_MUNITIONS_FLOOR`'s own gate reacts to (both require the
+/// relevant stock to sit at its floor for `period`-days-apart call after
+/// call): `funded_ratio` only ever hits a hard `0.0` when the *national*
+/// Machinery or Steel stock is itself at `0.0`, not merely low, so this is
+/// gating on a shortfall as severe as the Munitions one that constant
+/// already treats as chronic at 15 ticks (~60 in-game days). One bad tick -
+/// a single day where a competing `recruit()`/`naval_recruit()` order drains
+/// the shared stock to zero and next tick's production refills it - must
+/// not cancel a project that was otherwise progressing; only a streak this
+/// long, past `CHRONIC_LOW_MUNITIONS_FLOOR`'s own established chronic bar,
+/// does.
+const CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL: u32 = CHRONIC_INSOLVENCY_TICKS_FOR_FLOOR_TRIM;
+/// Floor `apportion_growth_goods` clamps a good's own `buffer_days` to
+/// before inverting it into a weight (`1 / buffer_days.max(this)`) - purely
+/// numerical, to keep a literal `buffer_days == 0.0` (stock and structural
+/// need both landing on the same tick) from producing an infinite weight
+/// that would divide-by-zero the total or crowd out every other good's own
+/// finite weight outright. `0.1` days is far below any buffer this function
+/// would otherwise ever compare against in practice (single-digit-to-
+/// hundreds of days), so it only ever binds in the genuine zero-stock
+/// case, not in shaping any ordinary comparison between two positive
+/// buffers - the floor is symmetric across all four goods and never
+/// privileges one by name, so it is not the fixed priority `docs/
+/// conventions.md` §6 forbids.
+const APPORTION_FLOOR_DAYS: f32 = 0.1;
 /// Mirrors `apps/headless/tests/scenario_acceptance.rs`'s own
 /// `MUNITIONS_INSOLVENT_FLOOR` (`<= 0.01` rather than `== 0.0`, so float
 /// noise from a tick that nets out to a hair above zero doesn't reset a
@@ -1039,6 +1080,38 @@ pub struct HeuristicAgent {
     /// build the streak back up from scratch rather than carrying a stale
     /// near-threshold count into its next rough patch.
     chronic_insolvency_ticks: u32,
+    /// `cancel_stalled_construction`'s own per-region memory of what each
+    /// currently-building own region's `Construction::invested` read at its
+    /// last `decide_for_llm` call, and how many consecutive such calls in a
+    /// row it has not moved - the same "carry a streak across periodic
+    /// calls" shape `chronic_insolvency_ticks` already uses, just keyed per
+    /// `RegionId` instead of held as one faction-wide count, since whether a
+    /// project is stalled is a fact about that region's own project, not
+    /// about the faction as a whole. Entries for a region no longer
+    /// mid-construction (completed, captured, or just cancelled) are
+    /// dropped every call by `cancel_stalled_construction` itself - this
+    /// must never grow into a one-way accumulator of stale regions (`docs/
+    /// conventions.md` §6).
+    construction_stall: HashMap<RegionId, ConstructionStall>,
+}
+
+/// `HeuristicAgent::construction_stall`'s per-entry state - see that
+/// field's own doc and `cancel_stalled_construction`'s.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ConstructionStall {
+    /// The project this entry's `invested`/`ticks` are tracking progress
+    /// against - a region whose project changed (the old one completed, was
+    /// cancelled, or a fresh one was ordered into the same now-empty slot)
+    /// must not have its new project's progress compared against the old
+    /// project's `invested` total, so a project change always resets this
+    /// entry fresh (`cancel_stalled_construction`'s own first check).
+    project: Project,
+    /// `Construction::invested` as last observed.
+    invested: f32,
+    /// Consecutive `decide_for_llm` calls in a row (this agent's own,
+    /// `period`-days apart) where `invested` has not increased past what it
+    /// read the previous call.
+    ticks: u32,
 }
 
 /// Default per-faction caution spread (mvp-spec.md §7 suggests this
@@ -1179,6 +1252,7 @@ impl HeuristicAgent {
             offset: faction.0 % PERIOD,
             focus_initialized: false,
             chronic_insolvency_ticks: 0,
+            construction_stall: HashMap::new(),
         }
     }
 
@@ -1278,6 +1352,18 @@ impl HeuristicAgent {
             .collect();
 
         air_redeploy(self.faction, obs, &disbanding, &mut actions);
+        // Frees any region whose `Construction` has made no progress for
+        // `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` calls in a row
+        // before `build()` picks this tick's new orders - doesn't change
+        // what *this* call's `build()` sees (it reads the same pre-tick
+        // `obs` `cancel_stalled_construction` does, so a slot freed by the
+        // `Action::CancelBuild` pushed here only becomes selectable to
+        // `interior_regions_available`/`repair_target`/`bottleneck_good` on
+        // the *next* periodic call, once `Region::construction` has
+        // actually gone back to `None`), but placing it first keeps the
+        // read order natural: recognise what's stuck, then decide what to
+        // build.
+        cancel_stalled_construction(&mut self.construction_stall, obs, &mut actions);
         build(self.faction, obs, &mut actions);
         transport_repair_ai(self.faction, obs, &mut actions);
 
@@ -2926,6 +3012,87 @@ fn best_capital_relocation_target(faction: FactionId, obs: &Observation) -> Opti
     own.into_iter().find(|&r| !world.has_enemy_units(r, faction))
 }
 
+/// The recovery path `docs/conventions.md` §6 requires and 022ddaa's own
+/// report named and left unfixed: a region whose `Construction::invested`
+/// has not advanced at all for `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL`
+/// consecutive `decide_for_llm` calls in a row gets `Action::CancelBuild`ed,
+/// freeing its build slot for `repair_target`/`bottleneck_good`/`build`'s
+/// own growth tier to reach on a later call. Without this, a project that
+/// `construction::tick_construction`'s `funded_ratio` has driven to exactly
+/// `0.0` (national Machinery or Steel stock itself at `0.0`) sits in that
+/// region's one slot forever - `022ddaa` measured a dominant faction with
+/// `industry_total` frozen at exactly 313.3 and `active_construction` frozen
+/// at 21 for 1440 consecutive days this way.
+///
+/// **Chronic, not one bad tick.** `state` (`HeuristicAgent::
+/// construction_stall`, threaded through the same way `chronic_insolvency_
+/// ticks` is) remembers each currently-building own region's `invested` as
+/// of the last call and how many calls in a row it hasn't moved. A single
+/// call where the shared stock happens to be thin - `recruit()`/`naval_
+/// recruit()`/`air_recruit()` all draw on the same Machinery this tick,
+/// `build()` runs after all of them - is not enough to cancel anything;
+/// only a streak past the threshold, the same "sustained, not transient"
+/// bar `chronic_insolvency_ticks` already established for the Munitions
+/// case, does. Resources already invested are forfeited on cancel -
+/// `action::apply_cancel_build`'s own doc: this is a real cost, not a free
+/// retry, so the AI does not reach for it lightly.
+///
+/// **No thrash.** Once cancelled, `state`'s entry for that region is
+/// dropped. `build()` itself only ever re-claims a region once `obs` shows
+/// its `construction` back at `None` (`interior_regions_available`'s own
+/// filter), which only happens on the periodic call *after* this one's
+/// `Action::CancelBuild` has actually applied - there is no path from
+/// "just cancelled" straight back into "building again" within the same
+/// call, and a freshly ordered project always starts this function's
+/// streak back at `0` (the project-changed branch below), so a rebuild
+/// cannot inherit a stale near-threshold count from whatever it replaced.
+///
+/// Every region no longer mid-construction this call - completed, captured,
+/// or just cancelled above - has its `state` entry dropped at the end
+/// (`docs/conventions.md` §6: this map must not grow into a one-way
+/// accumulator of regions that finished or changed hands long ago).
+fn cancel_stalled_construction(
+    state: &mut HashMap<RegionId, ConstructionStall>,
+    obs: &Observation,
+    actions: &mut Vec<Action>,
+) {
+    let mut own = obs.own_regions();
+    own.sort_by_key(|r| r.0);
+    let mut still_building: BTreeSet<RegionId> = BTreeSet::new();
+
+    for region in own {
+        let Some(constr) = obs.world.region(region).construction else {
+            continue;
+        };
+        still_building.insert(region);
+
+        match state.get_mut(&region) {
+            None => {
+                state.insert(
+                    region,
+                    ConstructionStall { project: constr.project, invested: constr.invested, ticks: 0 },
+                );
+            }
+            Some(entry) if entry.project != constr.project => {
+                *entry = ConstructionStall { project: constr.project, invested: constr.invested, ticks: 0 };
+            }
+            Some(entry) if constr.invested > entry.invested => {
+                entry.invested = constr.invested;
+                entry.ticks = 0;
+            }
+            Some(entry) => {
+                entry.ticks = entry.ticks.saturating_add(1);
+                if entry.ticks > CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL {
+                    actions.push(Action::CancelBuild { region });
+                    state.remove(&region);
+                }
+            }
+        }
+    }
+
+    state.retain(|r, _| still_building.contains(r));
+}
+
 /// Build priorities (docs/phase2-spec.md Stage 2B, extended 2026-09-23 for
 /// the growth motive - CLAUDE.md's "拡大再生産が進み、成長した国が強くなる
 /// ことがゲーム性の芯"):
@@ -2933,14 +3100,17 @@ fn best_capital_relocation_target(faction: FactionId, obs: &Observation) -> Opti
 /// 2. Otherwise, add `Capacity` for whichever good is an actual, current
 ///    structural bottleneck (`bottleneck_good`) - an emergency outranks
 ///    proactive investment.
-/// 3. Otherwise, add `Capacity` for whichever good the growth policy
-///    (`growth_target_good`) currently favours, at as many currently safe,
-///    non-front interior regions with no project already running
+/// 3. Otherwise, add `Capacity` across as many currently safe, non-front
+///    interior regions with no project already running
 ///    (`interior_regions_available`) as today's real spare Machinery/Steel
 ///    can actually fund (`affordable_new_construction_projects`, at least
-///    `1` - see both functions' own docs for why this is no longer just
-///    the single best region `safest_interior_region` alone would pick, but
-///    also not literally every eligible one unconditionally) - proactive
+///    `1`), each ordered for whichever good the growth policy
+///    (`apportion_growth_goods`) apportions it - see all three functions'
+///    own docs for why this is no longer just the single best region
+///    `safest_interior_region` alone would pick, why it's not literally
+///    every eligible one unconditionally, and why a multi-region call no
+///    longer commits every one of those regions to the same single good -
+///    proactive
 ///    investment of a real surplus, not a response to any shortage. This is
 ///    the tier that didn't exist before 2026-09-23: without it,
 ///    `bottleneck_good` was the *only* path to `Project::Capacity`, and it
@@ -3000,9 +3170,9 @@ fn build(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
 
     let interior = interior_regions_available(faction, obs);
     if !interior.is_empty() {
-        let good = growth_target_good(faction, obs);
         let n = affordable_new_construction_projects(faction, obs).max(1).min(interior.len());
-        for region in interior.into_iter().take(n) {
+        let goods = apportion_growth_goods(faction, obs, n);
+        for (region, good) in interior.into_iter().zip(goods) {
             actions.push(Action::Build { region, project: Project::Capacity(good) });
         }
         return;
@@ -3416,7 +3586,7 @@ fn active_construction_draw(obs: &Observation) -> (f32, f32) {
 /// national Machinery stock it removes over a day, which is all a demand
 /// figure needs to track). `Steel` has no such gap: nothing civilian draws
 /// on it.
-fn growth_target_good(faction: FactionId, obs: &Observation) -> Good {
+fn growth_buffer_days(faction: FactionId, obs: &Observation) -> [(Good, f32); 4] {
     let c = national_chain_capacity(obs);
     let f = obs.world.faction(faction);
     let (constr_machinery, constr_steel) = active_construction_draw(obs);
@@ -3440,17 +3610,137 @@ fn growth_target_good(faction: FactionId, obs: &Observation) -> Good {
     // reaches a comparison this function's own tie-break logic depends on).
     let buffer_days = |stock: f32, needed: f32| if needed > 0.0 { stock / needed } else { f32::INFINITY };
 
-    let candidates = [
+    [
         (Good::Energy, buffer_days(f.stock[Good::Energy.index()], energy_needed)),
         (Good::Steel, buffer_days(f.stock[Good::Steel.index()], steel_needed)),
         (Good::Machinery, buffer_days(f.stock[Good::Machinery.index()], machinery_needed)),
         (Good::Munitions, buffer_days(f.stock[Good::Munitions.index()], munitions_needed)),
-    ];
+    ]
+}
 
-    candidates
-        .into_iter()
-        .fold((Good::Energy, f32::INFINITY), |best, (good, m)| if m < best.1 { (good, m) } else { best })
-        .0
+/// **Added 2026-09-23, third pass** (CLAUDE.md's own defect report on
+/// 022ddaa: "The policy swings hard into one good, exhausts another, and
+/// swings back"). `build()`'s growth tier used to read `growth_buffer_days`,
+/// fold it down to whichever single good had the smallest buffer, and spend
+/// `n` - every new `Project::Capacity` order a call's real surplus could
+/// fund, no longer capped at one region per call since
+/// `interior_regions_available`'s own 2026-09-23 second-pass change -
+/// entirely on that one good. With tier 3 now able to claim dozens of
+/// regions in one call, "every order the same good" meant dozens of
+/// `Project::Capacity(good)` orders landing on one good at once, and the
+/// *next* call's own fold swinging the following batch entirely onto
+/// whichever good that investment had just starved - measured (022ddaa's
+/// own report): Machinery capacity rising 12→106 while its own stock piled
+/// to 50,810 idle once Steel became the binding constraint
+/// (`Project::Capacity` costs 60 Steel vs 30 Machinery, so Steel starves
+/// first under a Machinery-heavy batch) - an all-or-nothing lurch between
+/// two goods, not the proportional allocation `docs/conventions.md` §6
+/// requires ("必ず比率で按分する").
+///
+/// This splits each call's own `n` seats across all four goods
+/// `growth_buffer_days` scores, weighted by scarcity
+/// (`1 / buffer_days.max(APPORTION_FLOOR_DAYS)`) instead of committing the
+/// whole batch to a single winner - several goods now get funded the same
+/// tick whenever several are genuinely short, and a good that has just been
+/// well-funded (rising `buffer_days`) sees its own share of the *next*
+/// batch shrink continuously rather than falling to zero the instant some
+/// other good's buffer reads one tick smaller. `n == 1` reduces to exactly
+/// the old single-good fold's own answer (the whole weight has nowhere else
+/// to go but the one seat), so this is a strict generalization, not a
+/// different rule for the single-order case tier 3 used to be limited to.
+///
+/// Seats are handed out by largest remainder (Hamilton's method): each
+/// good's exact share `n * weight / total_weight` is floored, and leftover
+/// seats go to the goods with the largest fractional remainder, ties broken
+/// by array order (`Energy < Steel < Machinery < Munitions`, the same fixed
+/// order `growth_buffer_days`/`bottleneck_good` already use for their own
+/// ties) - a deterministic tie-break applied only to an already-computed,
+/// live ratio, never a substitute for one. If every good reads
+/// `buffer_days == f32::INFINITY` (nothing anywhere currently draws on any
+/// of the four - only reachable if `build()`'s own reserve/repair/
+/// bottleneck gates above all passed while national demand is otherwise
+/// zero), weights fall back to an even four-way split rather than dividing
+/// by a zero total - itself a balanced answer, not a fixed priority, since
+/// no good is preferred over any other in that case.
+///
+/// Returns `n` goods in a fixed per-good block order (`Energy` seats first,
+/// then `Steel`, `Machinery`, `Munitions`) - `build()` zips this 1:1 against
+/// `interior_regions_available`'s own fixed `RegionId` order, so which
+/// specific region gets which good is arbitrary; only the totals need to
+/// come out proportional, and the block order keeps this deterministic
+/// without needing to interleave.
+///
+/// **What this does and does not fix - measured on `japan_hex`, all three
+/// shipped seeds, 2880 days (this change's own report has the full table).**
+/// It reliably ends 022ddaa's `industry_total` freeze on all three seeds (a
+/// dominant faction frozen at a fixed value for 1440+ days, versus steady
+/// growth throughout under this change) and it genuinely apportions by live
+/// ratio rather than a fixed order (confirmed both ways: reverting to a
+/// single-good fold visibly re-concentrates every seat onto one good in the
+/// tests above). It does **not** reliably reduce the *absolute* peak idle
+/// Machinery/Steel stock across all three seeds - seed 1 (022ddaa's own
+/// reproduction case) falls well below the 50,810 baseline, but seeds 2 and
+/// 3 read *higher* than their own un-apportioned baselines. Several other
+/// designs were tried and measured worse, not merely different - a
+/// deficit-from-target weighting (`(GROWTH_TARGET_BUFFER_DAYS -
+/// buffer_days).max(0.0)`, zeroing a good's share outright once its buffer
+/// clears a comfort target, alone or combined with a matching throttle on
+/// `n` itself) consistently produced *larger* combined idle stock on every
+/// seed than this plain inverse-ratio form, because whichever good's
+/// buffer happened to clear the target first handed literally its entire
+/// remaining share to the other, right when that other good's own capacity
+/// was largest - a sharper winner-take-all lurch than the one this function
+/// was written to remove. The root cause this change cannot reach from
+/// `crates/agents` alone: `economy::tick_economy` converts capacity into
+/// output up to capacity and input availability every tick, with nothing
+/// reading `Faction::stock` to throttle output once a good is already
+/// sitting on a huge pile of it - once *any* capacity meaningfully exceeds
+/// steady-state demand, its stock grows without bound regardless of how
+/// well new *investment* is apportioned, and ending the freeze (unlocking
+/// several times more total economic activity) simply gives that
+/// unconditional daily overproduction more room to compound before the
+/// 2880-day window ends. A stock-aware production throttle would need to
+/// live in `set_policy`'s `industry_priority` (crates/agents, but a
+/// different, un-requested lever than construction investment) or in
+/// `crates/sim` itself; neither is touched here.
+fn apportion_growth_goods(faction: FactionId, obs: &Observation, n: usize) -> Vec<Good> {
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let buffers = growth_buffer_days(faction, obs);
+    let mut weights: [f32; 4] =
+        buffers.map(|(_, days)| if days.is_finite() { 1.0 / days.max(APPORTION_FLOOR_DAYS) } else { 0.0 });
+    if weights.iter().all(|&w| w == 0.0) {
+        weights = [1.0; 4];
+    }
+    let total: f32 = weights.iter().sum();
+
+    let quotas: [f32; 4] = weights.map(|w| n as f32 * w / total);
+    let mut counts: [usize; 4] = quotas.map(|q| q.floor() as usize);
+    let assigned: usize = counts.iter().sum();
+    let mut remaining = n.saturating_sub(assigned);
+
+    // Largest-remainder seats: rank the four goods by fractional quota
+    // remainder, descending; `sort_by` is stable, so a tie (equal
+    // remainder) keeps the goods in their original `Energy < Steel <
+    // Machinery < Munitions` array order, the same fixed tie-break this
+    // function's own doc names.
+    let mut remainders: [(usize, f32); 4] = std::array::from_fn(|i| (i, quotas[i] - counts[i] as f32));
+    remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("quotas are finite: n and weights are finite/nonnegative"));
+    for &(i, _) in remainders.iter() {
+        if remaining == 0 {
+            break;
+        }
+        counts[i] += 1;
+        remaining -= 1;
+    }
+
+    let mut goods = Vec::with_capacity(n);
+    for (i, &(good, _)) in buffers.iter().enumerate() {
+        goods.extend(std::iter::repeat(good).take(counts[i]));
+    }
+    goods
 }
 
 /// The safest own, uncontested, non-front region with no project already

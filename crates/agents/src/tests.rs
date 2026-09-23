@@ -2040,20 +2040,20 @@ fn heuristic_agent_relocates_to_the_highest_value_remaining_region() {
 
 // ---------------------------------------------------------------------
 // The growth motive (CLAUDE.md, 2026-09-23: "拡大再生産が進み、成長した国が
-// 強くなることがゲーム性の芯"). `crate::growth_target_good` and the new
+// 強くなることがゲーム性の芯"). `crate::apportion_growth_goods` and the new
 // growth tier `crate::build` gained the same day - see both functions' own
 // doc comments in `lib.rs` for the full design rationale.
 // ---------------------------------------------------------------------
 
-/// `growth_target_good` must pick by *proportional buffer* (`stock /
+/// `apportion_growth_goods` must pick by *proportional buffer* (`stock /
 /// needed`), not a fixed "always Energy/Steel first" order: with mvp's own
 /// starting stocks untouched except `Munitions` zeroed out entirely, and
 /// real Munitions demand still present (real units still field, so
 /// `munitions_daily_demand` is still positive), `Munitions`' buffer is
 /// `0.0 / munitions_daily_demand` = `0.0` - strictly below `Energy`'s/
 /// `Steel`'s/`Machinery`'s own buffers, none of which had their stock
-/// touched - so `Munitions` must win despite being checked *last* in
-/// `growth_target_good`'s fixed tie-break order.
+/// touched - so a single seat (`n == 1`) must go to `Munitions` despite it
+/// being the last good in `growth_buffer_days`' fixed array order.
 ///
 /// **Confirmed this can fail.** Temporarily changed the candidate list to
 /// drop `Munitions` (so it always compares only `Energy`/`Steel`/
@@ -2061,7 +2061,7 @@ fn heuristic_agent_relocates_to_the_highest_value_remaining_region() {
 /// and re-ran: it returned a different good instead, which this assertion
 /// correctly rejected. Restored before committing.
 #[test]
-fn growth_target_good_follows_the_worst_margin_not_a_fixed_order() {
+fn apportion_growth_goods_follows_the_worst_margin_not_a_fixed_order() {
     let mut world = scenario::build_world();
     let faction = FactionId(0);
 
@@ -2077,12 +2077,12 @@ fn growth_target_good_follows_the_worst_margin_not_a_fixed_order() {
         );
     }
 
-    let good = crate::growth_target_good(faction, &obs);
+    let goods = crate::apportion_growth_goods(faction, &obs, 1);
     assert_eq!(
-        good,
-        Good::Munitions,
+        goods,
+        vec![Good::Munitions],
         "with Munitions stock zeroed out and real demand for it, Munitions must have the smallest buffer \
-         despite being checked last"
+         (and so win the single seat) despite being checked last"
     );
 }
 
@@ -2143,10 +2143,76 @@ fn heuristic_agent_invests_a_real_surplus_into_growth_capacity() {
     for (region, _) in &capacity_orders {
         assert_eq!(world.region(*region).owner, faction, "every growth order must target one of this faction's own regions");
     }
-    let good = capacity_orders[0].1;
+    let expected_goods = crate::apportion_growth_goods(faction, &obs, capacity_orders.len());
+    let actual_goods: Vec<Good> = capacity_orders.iter().map(|(_, g)| *g).collect();
+    assert_eq!(
+        actual_goods, expected_goods,
+        "build()'s growth tier must hand each eligible region the good `apportion_growth_goods` assigns it, in \
+         the same order: {actions:?}"
+    );
+}
+
+/// `apportion_growth_goods` (`lib.rs`'s own doc, the 2026-09-23 third-pass
+/// fix for 022ddaa's own "行き過ぎている" overshoot report): when more than
+/// one good is genuinely scarce at once, a multi-seat call must fund more
+/// than one of them in the same `build()` call, not commit every seat to
+/// whichever single good happens to read worst this instant. Steel and
+/// Machinery are driven to an identical, real `0.0` stock here (both
+/// nonzero-`needed` at mvp's start, so both score `buffer_days == 0.0` and
+/// tie exactly under the `1 / buffer_days.max(APPORTION_FLOOR_DAYS)`
+/// weighting) while Energy/Munitions are driven to a stock large enough
+/// that their own weight is negligible by comparison, so a proportional
+/// split must hand seats to *both* Steel and Machinery, roughly evenly, and
+/// essentially none to Energy/Munitions - rather than every seat going to
+/// just one good (the old `growth_target_good` fold could only ever return
+/// a single good, so this split was structurally impossible before this
+/// change).
+///
+/// **Confirmed this can fail.** Reverted `apportion_growth_goods` to fold
+/// `growth_buffer_days` down to a single winner and repeat it `n` times
+/// (022ddaa's original tier-3 shape) and re-ran: every one of the 10 seats
+/// went to `Good::Steel` alone (the first of the tied pair in array order),
+/// `Good::Machinery` got none, which this test's assertions correctly
+/// rejected. Restored before committing.
+#[test]
+fn apportion_growth_goods_splits_across_multiple_equally_scarce_goods() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let f = world.faction_mut(faction);
+    f.stock[Good::Steel.index()] = 0.0;
+    f.stock[Good::Machinery.index()] = 0.0;
+    // Large enough that `1 / buffer_days` reads as effectively `0.0` next to
+    // Steel/Machinery's own `1 / APPORTION_FLOOR_DAYS`, not merely
+    // "nonzero" - the split assertions below need Energy/Munitions to be
+    // negligible, not just untouched.
+    f.stock[Good::Energy.index()] = 1.0e6;
+    f.stock[Good::Munitions.index()] = 1.0e6;
+
+    let obs = Observation { faction, world: &world };
+    for good in [Good::Energy, Good::Munitions] {
+        assert!(
+            obs.world.faction(faction).stock[good.index()] > 0.0,
+            "{good:?} stock must stay untouched (nonzero) so it can't tie Steel/Machinery's zeroed-out buffer"
+        );
+    }
+
+    let goods = crate::apportion_growth_goods(faction, &obs, 10);
+    assert_eq!(goods.len(), 10, "apportion_growth_goods must return exactly the requested seat count");
+
+    let steel = goods.iter().filter(|&&g| g == Good::Steel).count();
+    let machinery = goods.iter().filter(|&&g| g == Good::Machinery).count();
+    assert!(steel > 0, "Steel is tied for the worst buffer and must receive at least one seat: {goods:?}");
+    assert!(machinery > 0, "Machinery is tied for the worst buffer and must receive at least one seat: {goods:?}");
+    assert_eq!(
+        steel + machinery,
+        10,
+        "with Energy/Munitions both comfortably stocked, every seat should go to the tied Steel/Machinery pair: \
+         {goods:?}"
+    );
     assert!(
-        capacity_orders.iter().all(|(_, g)| *g == good),
-        "every order issued in the same `build()` call should invest in the same currently-scarcest good: {actions:?}"
+        steel.abs_diff(machinery) <= 1,
+        "an exact tie in scarcity must split its seats within one of each other, not lopsidedly: {goods:?}"
     );
 }
 
@@ -2274,4 +2340,180 @@ fn heuristic_agent_does_not_waste_construction_on_already_maxed_infrastructure()
         "every front region is already at the infrastructure cap and every interior region is already under \
          construction - build() must not spend real Machinery/Steel on a project that cannot change anything: {actions:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// The recovery path for a stalled `Region::construction`
+// (`docs/conventions.md` §6: "入ったら出られない状態を作らない") -
+// 022ddaa's own report named this defect and left it unfixed:
+// `construction::tick_construction`'s `funded_ratio` can read a hard `0.0`
+// forever once national Machinery/Steel stock is itself exhausted, and
+// nothing in `HeuristicAgent` had any way to issue `Action::CancelBuild`
+// (which already existed in `crates/sim`) to free the stuck region's build
+// slot. `crate::cancel_stalled_construction` and `HeuristicAgent::
+// construction_stall` close that gap - see both their own doc comments in
+// `lib.rs` for the full design rationale.
+// ---------------------------------------------------------------------
+
+/// A single observation of unchanged `invested` must never cancel anything
+/// on its own - only a sustained streak past
+/// `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` does (the next test). This
+/// is the "not one bad tick" half of the owner's direction: a tick where a
+/// competing `recruit()`/`naval_recruit()` order happens to drain the
+/// shared Machinery/Steel stock to zero, recovering the next tick, must not
+/// throw away whatever this project had already invested.
+///
+/// **Confirmed this can fail.** Temporarily changed
+/// `cancel_stalled_construction`'s comparison from `entry.ticks >
+/// CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` to `entry.ticks > 0` (cancel
+/// on the very first stalled tick) and re-ran: the second call's `actions`
+/// contained a `CancelBuild`, which this test's final assertion correctly
+/// rejected. Restored before committing.
+#[test]
+fn cancel_stalled_construction_does_not_cancel_a_single_bad_tick() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = {
+        let obs = Observation { faction, world: &world };
+        crate::interior_regions_available(faction, &obs)[0]
+    };
+    world.region_mut(region).construction = Some(archipelago_sim::construction::Construction {
+        project: archipelago_sim::construction::Project::Capacity(Good::Steel),
+        invested: 5.0,
+        required: 30.0,
+    });
+
+    let mut state = std::collections::HashMap::new();
+    let obs = Observation { faction, world: &world };
+
+    // The first call only ever registers a baseline - there is no prior
+    // observation yet to compare `invested` against, so it must not be
+    // treated as evidence of a stall.
+    let mut actions = Vec::new();
+    crate::cancel_stalled_construction(&mut state, &obs, &mut actions);
+    assert!(actions.is_empty(), "the first observation of a project must only register a baseline: {actions:?}");
+
+    // A second call with the exact same `invested` - one stalled tick - must
+    // still not cancel.
+    let mut actions = Vec::new();
+    crate::cancel_stalled_construction(&mut state, &obs, &mut actions);
+    assert!(actions.is_empty(), "a single stalled tick must not cancel a project: {actions:?}");
+    assert!(
+        world.region(region).construction.is_some(),
+        "the project itself must still be standing after a single stalled tick"
+    );
+}
+
+/// A project whose `invested` sits unchanged for
+/// `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` consecutive calls past the
+/// baseline must finally be cancelled - the "sustained, not transient" bar
+/// this mechanism exists to enforce.
+///
+/// **Confirmed this can fail.** Temporarily changed
+/// `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` to `u32::MAX` (never
+/// chronic) and re-ran: the final call's `actions` stayed empty, which this
+/// test's final assertion correctly rejected. Restored before committing.
+#[test]
+fn cancel_stalled_construction_cancels_after_a_chronic_stall() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = {
+        let obs = Observation { faction, world: &world };
+        crate::interior_regions_available(faction, &obs)[0]
+    };
+    world.region_mut(region).construction = Some(archipelago_sim::construction::Construction {
+        project: archipelago_sim::construction::Project::Capacity(Good::Steel),
+        invested: 5.0,
+        required: 30.0,
+    });
+
+    let mut state = std::collections::HashMap::new();
+    let obs = Observation { faction, world: &world };
+
+    // Baseline call.
+    let mut actions = Vec::new();
+    crate::cancel_stalled_construction(&mut state, &obs, &mut actions);
+    assert!(actions.is_empty());
+
+    // `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` more stalled calls in a
+    // row - still short of the bar (the comparison is strictly `>`), so none
+    // of these may cancel yet.
+    for tick in 0..crate::CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL {
+        let mut actions = Vec::new();
+        crate::cancel_stalled_construction(&mut state, &obs, &mut actions);
+        assert!(actions.is_empty(), "stalled call {tick} is still short of the chronic bar: {actions:?}");
+    }
+
+    // One call further finally crosses it.
+    let mut actions = Vec::new();
+    crate::cancel_stalled_construction(&mut state, &obs, &mut actions);
+    assert_eq!(
+        actions,
+        vec![Action::CancelBuild { region }],
+        "a project stalled well past the chronic bar must finally be cancelled: {actions:?}"
+    );
+}
+
+/// End-to-end proof that the recovery path actually recovers: a project
+/// starved to a complete standstill (`Faction::stock[Machinery]`/`[Steel]`
+/// both driven to `0.0`, so `funded_ratio` reads a hard `0.0` every tick) is
+/// tracked as stalled, cancelled once chronic, and - once the shared stock
+/// recovers - the freed region is claimed by a fresh `build()` order rather
+/// than sitting empty. This is the full "stall, cancel, slot reused" cycle
+/// the owner's direction asked to be proven, not merely asserted.
+#[test]
+fn a_cancelled_stall_frees_its_slot_for_a_fresh_build_order() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = {
+        let obs = Observation { faction, world: &world };
+        crate::interior_regions_available(faction, &obs)[0]
+    };
+
+    world.region_mut(region).construction = Some(archipelago_sim::construction::Construction {
+        project: archipelago_sim::construction::Project::Capacity(Good::Steel),
+        invested: 5.0,
+        required: 30.0,
+    });
+    // Drive the AI's own construction reserve gate open (well above
+    // `BUILD_STOCK_RESERVE_DAYS`) so `build()` itself doesn't refuse to act
+    // for an unrelated reason, but starve the *national* stock this
+    // region's own project draws on so `tick_construction`'s `funded_ratio`
+    // is genuinely, structurally `0.0` - the real condition this mechanism
+    // exists for, not a contrived one.
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 0.0;
+    world.faction_mut(faction).stock[Good::Steel.index()] = 0.0;
+
+    let mut state = std::collections::HashMap::new();
+
+    // Baseline call, then drive the stall past the chronic bar: 1 baseline
+    // call + `CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL` stalled calls
+    // that must not yet cancel + 1 further call that finally crosses the
+    // `>` bar (the exact count `cancel_stalled_construction_cancels_after_
+    // a_chronic_stall` above measures directly).
+    for _ in 0..crate::CHRONIC_CONSTRUCTION_STALL_TICKS_FOR_CANCEL + 2 {
+        let obs = Observation { faction, world: &world };
+        let mut actions = Vec::new();
+        crate::cancel_stalled_construction(&mut state, &obs, &mut actions);
+        for a in actions {
+            action::apply_action(&mut world, faction, a).expect("CancelBuild on this faction's own building region must succeed");
+        }
+    }
+
+    assert!(
+        world.region(region).construction.is_none(),
+        "the chronic stall must have been cancelled and the region's build slot freed"
+    );
+
+    // Recovery: a real surplus arrives, and a fresh `build()` call must
+    // claim the now-empty slot again rather than leaving it idle.
+    world.faction_mut(faction).stock[Good::Machinery.index()] = 1000.0;
+    world.faction_mut(faction).stock[Good::Steel.index()] = 1000.0;
+    let obs = Observation { faction, world: &world };
+    let mut actions = Vec::new();
+    crate::build(faction, &obs, &mut actions);
+    let reclaimed = actions.iter().any(|a| {
+        matches!(a, Action::Build { region: r, project: archipelago_sim::construction::Project::Capacity(_) } if *r == region)
+    });
+    assert!(reclaimed, "the freed slot must be reclaimed by a fresh build() order once real surplus returns: {actions:?}");
 }
