@@ -2037,3 +2037,241 @@ fn heuristic_agent_relocates_to_the_highest_value_remaining_region() {
         .unwrap_or_else(|| panic!("expected a RelocateCapital order: {actions:?}"));
     assert_eq!(relocated, boosted, "the AI must relocate to the region it just made by far the most valuable");
 }
+
+// ---------------------------------------------------------------------
+// The growth motive (CLAUDE.md, 2026-09-23: "拡大再生産が進み、成長した国が
+// 強くなることがゲーム性の芯"). `crate::growth_target_good` and the new
+// growth tier `crate::build` gained the same day - see both functions' own
+// doc comments in `lib.rs` for the full design rationale.
+// ---------------------------------------------------------------------
+
+/// `growth_target_good` must pick by *proportional buffer* (`stock /
+/// needed`), not a fixed "always Energy/Steel first" order: with mvp's own
+/// starting stocks untouched except `Munitions` zeroed out entirely, and
+/// real Munitions demand still present (real units still field, so
+/// `munitions_daily_demand` is still positive), `Munitions`' buffer is
+/// `0.0 / munitions_daily_demand` = `0.0` - strictly below `Energy`'s/
+/// `Steel`'s/`Machinery`'s own buffers, none of which had their stock
+/// touched - so `Munitions` must win despite being checked *last* in
+/// `growth_target_good`'s fixed tie-break order.
+///
+/// **Confirmed this can fail.** Temporarily changed the candidate list to
+/// drop `Munitions` (so it always compares only `Energy`/`Steel`/
+/// `Machinery`, the same three `bottleneck_good` alone used to know about)
+/// and re-ran: it returned a different good instead, which this assertion
+/// correctly rejected. Restored before committing.
+#[test]
+fn growth_target_good_follows_the_worst_margin_not_a_fixed_order() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    world.faction_mut(faction).stock[Good::Munitions.index()] = 0.0;
+
+    let obs = Observation { faction, world: &world };
+    let demand = crate::munitions_daily_demand(faction, &obs);
+    assert!(demand > 0.0, "faction 0 must field at least one unit at mvp's start for this test to mean anything");
+    for good in [Good::Energy, Good::Steel, Good::Machinery] {
+        assert!(
+            obs.world.faction(faction).stock[good.index()] > 0.0,
+            "{good:?} stock must stay untouched (nonzero) so it can't tie Munitions' zeroed-out buffer"
+        );
+    }
+
+    let good = crate::growth_target_good(faction, &obs);
+    assert_eq!(
+        good,
+        Good::Munitions,
+        "with Munitions stock zeroed out and real demand for it, Munitions must have the smallest buffer \
+         despite being checked last"
+    );
+}
+
+/// `build()`'s new tier 3 (`lib.rs`'s own "Build priorities" doc on `build`):
+/// once repair and the emergency bottleneck check both have nothing to do,
+/// a faction sitting on a genuine Machinery/Steel surplus (well above
+/// `BUILD_STOCK_RESERVE_DAYS`) must actually invest it into `Project::
+/// Capacity`, at *every* currently eligible safe interior region at once
+/// (`interior_regions_available`'s own doc: one order per `build()` call
+/// would throttle construction concurrency to decision cadence rather than
+/// to actual territory/stock, the opposite of a growth motive) - rather
+/// than either doing nothing (the pre-2026-09-23 behaviour whenever
+/// `bottleneck_good` returned `None` and no eligible front region existed)
+/// or only ever reaching for `Infrastructure`.
+///
+/// **Confirmed this can fail.** Reverted `build()` to its pre-growth-tier
+/// three-branch shape (repair / bottleneck-only capacity / front
+/// infrastructure) and re-ran with this same surplus stock: no
+/// `Project::Capacity` order was issued at all (`bottleneck_good` reads
+/// `None` at mvp's untouched starting capacities, exactly `docs/
+/// future-work.md`'s own measurement), and the fallback issued
+/// `Infrastructure` at the front region instead - not what this test
+/// checks for. Restored before committing.
+#[test]
+fn heuristic_agent_invests_a_real_surplus_into_growth_capacity() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let f = world.faction_mut(faction);
+    f.stock[Good::Machinery.index()] = 1000.0;
+    f.stock[Good::Steel.index()] = 1000.0;
+
+    let obs = Observation { faction, world: &world };
+    let eligible = crate::interior_regions_available(faction, &obs);
+    assert!(
+        !eligible.is_empty(),
+        "faction 0 must have at least one eligible interior region at mvp's start for this test to mean anything"
+    );
+
+    let mut actions = Vec::new();
+    crate::build(faction, &obs, &mut actions);
+
+    let capacity_orders: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Build { region, project: archipelago_sim::construction::Project::Capacity(good) } => {
+                Some((*region, *good))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        capacity_orders.len(),
+        eligible.len(),
+        "expected a growth Capacity order for every eligible interior region out of a genuine surplus with \
+         nothing urgent to spend it on: {actions:?}"
+    );
+    for (region, _) in &capacity_orders {
+        assert_eq!(world.region(*region).owner, faction, "every growth order must target one of this faction's own regions");
+    }
+    let good = capacity_orders[0].1;
+    assert!(
+        capacity_orders.iter().all(|(_, g)| *g == good),
+        "every order issued in the same `build()` call should invest in the same currently-scarcest good: {actions:?}"
+    );
+}
+
+/// `affordable_new_construction_projects` (`lib.rs`'s own doc: the
+/// `codex review` P1 fix for the previous test's unbounded batch) must cap
+/// how many *new* growth orders `build`'s tier 3 claims at what today's
+/// real spare Machinery/Steel can fund, not at however many eligible
+/// interior regions happen to exist - a faction with a small surplus above
+/// `BUILD_STOCK_RESERVE_DAYS` but more idle regions than that surplus can
+/// fund must not lock the rest into unfunded, stalled `Project::Capacity`
+/// slots (`interior_regions_available`'s own doc has the full "one-way
+/// accumulator, just moved from one region to many" account of why that
+/// would be a defect, not a feature).
+///
+/// mvp's faction 0 has exactly 3 eligible interior regions at scenario
+/// start (`hokkaido`/`kita_tohoku`/`minami_tohoku` - `kanto`, its 4th
+/// region, borders `chuo_domei` and so counts as front). Sizing the stock
+/// to fund exactly 2 full-rate projects (`CONSTRUCTION_RATE *
+/// CONSTRUCTION_MACHINERY_PER_POINT` = `1.0` Machinery/project/day, so
+/// `BUILD_STOCK_RESERVE_DAYS * INFANTRY_INPUT_MACHINERY + 2.0` funds
+/// exactly 2 - Steel is set far more generously so Machinery is the binding
+/// term, the same "smallest term wins" shape `growth_target_good` already
+/// uses elsewhere in this file) drives the case where the cap must bind
+/// *below* the number of eligible regions - if `build()` still claimed all
+/// 3, the third would sit at `invested: 0.0` with nothing left to fund it.
+///
+/// **Confirmed this can fail.** Temporarily reverted `build`'s tier 3 to
+/// claim every `interior_regions_available` region unconditionally (this
+/// test's own predecessor, before the `codex review` fix) and re-ran: it
+/// issued 3 `Project::Capacity` orders against this same 2-project stock,
+/// which this assertion correctly rejected. Restored before committing.
+#[test]
+fn affordable_new_construction_projects_is_bounded_by_real_surplus_not_region_count() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let f = world.faction_mut(faction);
+    f.stock[Good::Machinery.index()] = 15.0 * 0.5 + 2.0; // reserve + exactly 2 projects' worth
+    f.stock[Good::Steel.index()] = 15.0 * 0.3 + 10.0; // reserve + 5 projects' worth (not binding)
+
+    let obs = Observation { faction, world: &world };
+    let eligible = crate::interior_regions_available(faction, &obs);
+    assert_eq!(
+        eligible.len(),
+        3,
+        "mvp's faction 0 must have exactly 3 eligible interior regions at scenario start for this test to \
+         actually exercise the affordability cap below the region count: {eligible:?}"
+    );
+
+    let n = crate::affordable_new_construction_projects(faction, &obs);
+    assert_eq!(
+        n, 2,
+        "a stock funding exactly 2 full-rate projects' worth of spare Machinery (the binding term here, Steel \
+         being deliberately more generous) must cap the affordable count at 2, strictly below the 3 eligible \
+         regions"
+    );
+
+    let mut actions = Vec::new();
+    crate::build(faction, &obs, &mut actions);
+    let capacity_orders = actions
+        .iter()
+        .filter(|a| matches!(a, Action::Build { project: archipelago_sim::construction::Project::Capacity(_), .. }))
+        .count();
+    assert_eq!(
+        capacity_orders, 2,
+        "build() must claim only the 2 regions the real surplus can fund, not all 3 eligible ones: {actions:?}"
+    );
+}
+
+/// `build()`'s front-`Infrastructure` fallback (tier 4) must not re-issue
+/// `Project::Infrastructure` at a region whose `infrastructure` has already
+/// hit `construction::apply_completion`'s own `1.0` cap - doing so spends a
+/// full project's worth of Machinery/Steel for zero effect
+/// (`INFRA_STEP`'s `.min(1.0)` silently absorbs it), a one-way waste with no
+/// recovery (`docs/conventions.md` §6's accumulator warning - see this
+/// test's own tier-4 doc for the full account).
+///
+/// Every one of faction 0's non-front regions is put under a dummy
+/// in-progress project first, so tier 3 (growth) has nowhere left to go and
+/// falls through to tier 4 - the only way to actually exercise the front
+/// fallback this test is about.
+///
+/// **Confirmed this can fail.** Temporarily dropped the
+/// `region.infrastructure < 1.0` guard from `build`'s tier-4 filter and
+/// re-ran: it issued `Action::Build { region: kanto, project:
+/// Infrastructure }` against the maxed-out front region, which this test's
+/// final assertion correctly rejected. Restored before committing.
+#[test]
+fn heuristic_agent_does_not_waste_construction_on_already_maxed_infrastructure() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let front: std::collections::BTreeSet<RegionId> = {
+        let obs = Observation { faction, world: &world };
+        obs.front_regions().into_iter().collect()
+    };
+    let own_regions = world.regions_of(faction);
+    assert!(!front.is_empty(), "faction 0 must have at least one front region at mvp's start for this test to mean anything");
+
+    for &region in &own_regions {
+        if front.contains(&region) {
+            world.region_mut(region).infrastructure = 1.0;
+        } else {
+            // Take every interior region out of contention so tier 3
+            // (growth) can't claim any of them, forcing `build()` down to
+            // tier 4 - the fallback this test actually exercises.
+            world.region_mut(region).construction = Some(archipelago_sim::construction::Construction {
+                project: archipelago_sim::construction::Project::Repair,
+                invested: 0.0,
+                required: 1e6,
+            });
+        }
+    }
+
+    let f = world.faction_mut(faction);
+    f.stock[Good::Machinery.index()] = 1000.0;
+    f.stock[Good::Steel.index()] = 1000.0;
+
+    let obs = Observation { faction, world: &world };
+    let mut actions = Vec::new();
+    crate::build(faction, &obs, &mut actions);
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Build { .. })),
+        "every front region is already at the infrastructure cap and every interior region is already under \
+         construction - build() must not spend real Machinery/Steel on a project that cannot change anything: {actions:?}"
+    );
+}

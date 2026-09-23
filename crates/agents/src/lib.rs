@@ -10,10 +10,12 @@ use archipelago_sim::action::Action;
 use archipelago_sim::agent::Agent;
 use archipelago_sim::balance::{
     AIR_OPERATING_RADIUS_KM, AIR_UNIT_MACHINERY_COST, INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL,
-    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT,
-    FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_PER_PORT, MACHINERY_INPUT_STEEL,
-    MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD, REGIME_CHANGE_THRESHOLD,
-    STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT, UNIT_MANPOWER,
+    CIVILIAN_ENERGY_DEMAND_PER_POP, CIVILIAN_FOOD_DEMAND_PER_POP, CIVILIAN_MACHINERY_DEMAND_PER_POP,
+    CIVILIAN_RATION_MAX, COMBAT_SUPPLY_MULT, CONSTRUCTION_MACHINERY_PER_POINT, CONSTRUCTION_RATE,
+    CONSTRUCTION_STEEL_PER_POINT, FOCUS_MARITIME_IMPORT_CAPACITY_MULT, IMPORT_PER_PORT, MACHINERY_INPUT_ENERGY,
+    MACHINERY_INPUT_STEEL, MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL, MUTINY_THRESHOLD, PROTEST_THRESHOLD,
+    REGIME_CHANGE_THRESHOLD, STEEL_INPUT_ENERGY, STRIKE_THRESHOLD, SUPPLY_NEED_PER_MANPOWER, UNIT_EQUIPMENT,
+    UNIT_MANPOWER,
 };
 use archipelago_sim::construction::Project;
 use archipelago_sim::diplomacy::{Stance, Treaty, TreatyTerm};
@@ -2825,17 +2827,6 @@ fn zone_path_next(world: &World, from: SeaZoneId, to: SeaZoneId) -> Option<SeaZo
     None
 }
 
-/// Build priorities (docs/phase2-spec.md Stage 2B):
-/// 1. Repair an own, uncontested, sufficiently devastated region.
-/// 2. Otherwise, add `Capacity` for whichever good is the production
-///    chain's structural bottleneck, at a safe, high-infrastructure region.
-/// 3. Otherwise, raise `Infrastructure` at a front region.
-///
-/// Gated behind `BUILD_STOCK_RESERVE_DAYS`: while Machinery/Steel stock is
-/// below the war effort's own short-term reserve, the agent does not start
-/// or continue directing new resources into construction (an already
-/// in-progress project run by `construction::tick_construction` still
-/// slows down instead of stalling - this gate only stops *new* orders).
 /// docs/capital-spec.md §4 ("AI"): the heuristic half of Stage C. Without
 /// this, an AI faction that loses its capital sits under
 /// `balance::GROUP_CAPITAL_LOSS_*`'s political shock forever unless it
@@ -2935,6 +2926,58 @@ fn best_capital_relocation_target(faction: FactionId, obs: &Observation) -> Opti
     own.into_iter().find(|&r| !world.has_enemy_units(r, faction))
 }
 
+/// Build priorities (docs/phase2-spec.md Stage 2B, extended 2026-09-23 for
+/// the growth motive - CLAUDE.md's "拡大再生産が進み、成長した国が強くなる
+/// ことがゲーム性の芯"):
+/// 1. Repair an own, uncontested, sufficiently devastated region.
+/// 2. Otherwise, add `Capacity` for whichever good is an actual, current
+///    structural bottleneck (`bottleneck_good`) - an emergency outranks
+///    proactive investment.
+/// 3. Otherwise, add `Capacity` for whichever good the growth policy
+///    (`growth_target_good`) currently favours, at as many currently safe,
+///    non-front interior regions with no project already running
+///    (`interior_regions_available`) as today's real spare Machinery/Steel
+///    can actually fund (`affordable_new_construction_projects`, at least
+///    `1` - see both functions' own docs for why this is no longer just
+///    the single best region `safest_interior_region` alone would pick, but
+///    also not literally every eligible one unconditionally) - proactive
+///    investment of a real surplus, not a response to any shortage. This is
+///    the tier that didn't exist before 2026-09-23: without it,
+///    `bottleneck_good` was the *only* path to `Project::Capacity`, and it
+///    rarely fires (see its own doc) - measured on a full pre-2026-09-23
+///    `japan_hex` run (this change's own report has the reproduced
+///    figures), `Project::Capacity` was ~4-6% of the Machinery this AI
+///    spent on construction, next to ~72-76% on tier 4 below.
+/// 4. Otherwise, raise `Infrastructure` at a front region whose
+///    `infrastructure` hasn't already hit its `1.0` cap - guarded on that
+///    cap since `construction::apply_completion`'s `Project::Infrastructure`
+///    arm is `(infrastructure + INFRA_STEP).min(1.0)`: without this check,
+///    an already-maxed front region still soaks up a full construction
+///    project's Machinery/Steel for zero effect on `infrastructure`, real
+///    resources spent that this AI had no way to get back
+///    (docs/conventions.md §6 "一方通行のアキュムレータを作らない" - the
+///    accumulator here is the *maxed-out* region silently absorbing further
+///    spend, not `infrastructure` itself, which is correctly bounded).
+///    This is now reachable mainly once every own region is already
+///    mid-construction (tier 3 exhausted every safe interior slot) -
+///    growth deliberately outranks marginal front-infrastructure top-up,
+///    on the same evidence tier 3's own doc cites (a direct x3 capacity
+///    multiplier tripled land units and cut the recruit `supply_gate` share
+///    from ~48% to 21%; `Infrastructure` only ever raises a per-region
+///    efficiency multiplier that's already clamped into `0.2..=1.0`).
+///
+/// Every tier is gated behind `BUILD_STOCK_RESERVE_DAYS`: while Machinery/
+/// Steel stock is below the war effort's own short-term reserve, the agent
+/// does not start or continue directing new resources into construction of
+/// *any* kind, tier 3 included (an already in-progress project run by
+/// `construction::tick_construction` still slows down instead of stalling -
+/// this gate only stops *new* orders). Tier 3 deliberately reuses this same
+/// gate rather than adding a stricter one of its own: `docs/future-work.md`
+/// measured this exact gate blocking 95.3-95.8% of `build()` calls
+/// outright, so a second, higher bar on top of it would leave growth
+/// competing for a sliver of an already-rare window - the real "is this
+/// actually spare" question is already answered by this reserve surviving
+/// intact, the same way it already gates tiers 1/2/4.
 fn build(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
     let f = obs.world.faction(faction);
     let machinery_days = f.stock[Good::Machinery.index()] / INFANTRY_INPUT_MACHINERY;
@@ -2955,10 +2998,22 @@ fn build(faction: FactionId, obs: &Observation, actions: &mut Vec<Action>) {
         }
     }
 
+    let interior = interior_regions_available(faction, obs);
+    if !interior.is_empty() {
+        let good = growth_target_good(faction, obs);
+        let n = affordable_new_construction_projects(faction, obs).max(1).min(interior.len());
+        for region in interior.into_iter().take(n) {
+            actions.push(Action::Build { region, project: Project::Capacity(good) });
+        }
+        return;
+    }
+
     let mut front = obs.front_regions();
     front.sort_by_key(|r| r.0);
     let region = front.into_iter().find(|&r| {
-        obs.world.region(r).construction.is_none() && !obs.world.has_enemy_units(r, faction)
+        obs.world.region(r).infrastructure < 1.0
+            && obs.world.region(r).construction.is_none()
+            && !obs.world.has_enemy_units(r, faction)
     });
     if let Some(region) = region {
         actions.push(Action::Build { region, project: Project::Infrastructure });
@@ -3146,51 +3201,276 @@ fn air_strike_ai(faction: FactionId, obs: &Observation, actions: &mut Vec<Action
     }
 }
 
+/// National, devastation-adjusted capacity for the four goods both
+/// `bottleneck_good` and `growth_target_good` (below) read to judge the
+/// `Energy -> Steel -> Machinery/Munitions -> Infantry` production chain's
+/// structural balance - summed over every region this faction currently
+/// owns. Pulled out of what used to be `bottleneck_good`'s own loop body so
+/// growth-motive scoring (`growth_target_good`) doesn't duplicate it; the
+/// only change from that original loop is that `energy`/`population` are
+/// now summed too, since a chain-wide growth policy has to weigh `Energy`
+/// (the input `Steel`/`Machinery`/`Munitions` all draw on) on the same
+/// footing as everything downstream of it, not just the two goods the old
+/// emergency check happened to need - and `Energy`'s own downstream draw
+/// isn't only industrial (`growth_target_good`'s own doc on why
+/// `population` is here).
+struct ChainCapacity {
+    energy: f32,
+    steel: f32,
+    machinery: f32,
+    munitions: f32,
+    /// `Good::Infantry`'s own capacity - the renamed `Arms` slot
+    /// (`good::Good`'s own doc). Named `infantry` here, not `arms`, to
+    /// match the good it actually reads.
+    infantry: f32,
+    /// Summed `Region::population`, not a capacity at all - carried here
+    /// only so `growth_target_good` can size civilian `Energy` demand
+    /// (`CIVILIAN_ENERGY_DEMAND_PER_POP * population`,
+    /// `economy::tick_economy`'s own step 2.5) without a second pass over
+    /// `obs.own_regions()`.
+    population: f32,
+}
+
+fn national_chain_capacity(obs: &Observation) -> ChainCapacity {
+    let mut c = ChainCapacity { energy: 0.0, steel: 0.0, machinery: 0.0, munitions: 0.0, infantry: 0.0, population: 0.0 };
+    for r in obs.own_regions() {
+        let region = obs.world.region(r);
+        c.energy += region.effective_capacity(Good::Energy);
+        c.steel += region.effective_capacity(Good::Steel);
+        c.machinery += region.effective_capacity(Good::Machinery);
+        c.munitions += region.effective_capacity(Good::Munitions);
+        c.infantry += region.effective_capacity(Good::Infantry);
+        c.population += region.population;
+    }
+    c
+}
+
 /// The good whose *national* effective capacity structurally can't fund
 /// what downstream production needs from it - `Steel` first, since both
 /// `Machinery` and `Munitions` (and `Arms`, via `Steel`) draw on it, then
 /// `Machinery` for `Arms` specifically. `None` when nothing owned is
 /// structurally starved this way.
+///
+/// **This is an emergency check, not a growth policy.** It only ever fires
+/// once a good's capacity has already fallen *below* what the chain needs
+/// from it today - by the time that happens the AI is already behind. It
+/// was, until 2026-09-23, the *only* thing that could ever point `build()`
+/// at `Project::Capacity` at all, which is exactly why it almost never
+/// fired: measured on `japan_hex` at scenario start, `machinery_needed`
+/// (`arms_cap * INFANTRY_INPUT_MACHINERY` = 7.20 * 0.5 = 3.60) sat at 30% of
+/// `machinery_cap` (12.00) - satisfied 3.3x over, and nothing in this
+/// function ever asks "could I be doing more than surviving". See
+/// `growth_target_good`, below, for the policy that answers that question
+/// instead - `build()` now tries this emergency check first (an actual
+/// shortfall still outranks proactive investment) and falls through to the
+/// growth policy only once nothing here is actually breaking.
 fn bottleneck_good(obs: &Observation) -> Option<Good> {
-    let mut steel_cap = 0.0f32;
-    let mut machinery_cap = 0.0f32;
-    let mut munitions_cap = 0.0f32;
-    let mut arms_cap = 0.0f32;
-    for r in obs.own_regions() {
-        let region = obs.world.region(r);
-        steel_cap += region.effective_capacity(Good::Steel);
-        machinery_cap += region.effective_capacity(Good::Machinery);
-        munitions_cap += region.effective_capacity(Good::Munitions);
-        arms_cap += region.effective_capacity(Good::Infantry);
-    }
+    let c = national_chain_capacity(obs);
 
-    let steel_needed = machinery_cap * MACHINERY_INPUT_STEEL
-        + munitions_cap * MUNITIONS_INPUT_STEEL
-        + arms_cap * INFANTRY_INPUT_STEEL;
-    if steel_cap < steel_needed {
+    let steel_needed =
+        c.machinery * MACHINERY_INPUT_STEEL + c.munitions * MUNITIONS_INPUT_STEEL + c.infantry * INFANTRY_INPUT_STEEL;
+    if c.steel < steel_needed {
         return Some(Good::Steel);
     }
 
-    let machinery_needed = arms_cap * INFANTRY_INPUT_MACHINERY;
-    if machinery_cap < machinery_needed {
+    let machinery_needed = c.infantry * INFANTRY_INPUT_MACHINERY;
+    if c.machinery < machinery_needed {
         return Some(Good::Machinery);
     }
 
     None
 }
 
-/// The safest place to expand capacity: an own, uncontested, non-front
-/// region with no project running, preferring the highest infrastructure so
-/// the new capacity is actually usable at good efficiency; falls back to
-/// any safe own region without a project if every own region is on the front.
-fn safest_high_infra_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
-    let front: BTreeSet<RegionId> = obs.front_regions().into_iter().collect();
-    let mut own = obs.own_regions();
-    own.sort_by_key(|r| r.0);
+/// This faction's own regions currently mid-construction, times the
+/// nominal (unthrottled) Machinery/Steel draw that implies -
+/// `(machinery_per_day, steel_per_day)`. `construction::tick_construction`
+/// draws every `Project` variant from the same national stock at the same
+/// `CONSTRUCTION_RATE` points/day, costed at `CONSTRUCTION_MACHINERY_PER_
+/// POINT`/`CONSTRUCTION_STEEL_PER_POINT` regardless of which project a
+/// given region is running (`apply_completion`'s own match only branches on
+/// project *kind* for the one-time completion effect, never on cost) - so
+/// counting active regions and multiplying by that shared rate is exact,
+/// not an estimate, for exactly as long as stock actually funds the full
+/// rate (this deliberately ignores `CAPITAL_FLIGHT_CONSTRUCTION_MULT`/
+/// `FOCUS_TECHNOCRACY_CONSTRUCTION_RATE_MULT`'s own further scaling, the
+/// same way every other `_needed` term in `growth_target_good` below is a
+/// full-potential figure rather than one already throttled by whatever is
+/// currently limiting it).
+///
+/// This is `growth_target_good`'s fix for the omission CLAUDE.md's growth-
+/// motive review named directly: construction is Machinery's single
+/// largest real consumer (measured: 53% of all Machinery this AI spent on
+/// construction went through `Project::Capacity` alone), and the demand
+/// formula this function used before named every consumer *but* this one.
+fn active_construction_draw(obs: &Observation) -> (f32, f32) {
+    let active = obs
+        .own_regions()
+        .into_iter()
+        .filter(|&r| obs.world.region(r).construction.is_some())
+        .count() as f32;
+    (active * CONSTRUCTION_RATE * CONSTRUCTION_MACHINERY_PER_POINT, active * CONSTRUCTION_RATE * CONSTRUCTION_STEEL_PER_POINT)
+}
 
-    let interior_best = own
-        .iter()
-        .copied()
+/// The growth motive (CLAUDE.md, 2026-09-23: "拡大再生産が進み、成長した国が
+/// 強くなることがゲーム性の芯" - owner's correction of the earlier "維持が
+/// 主題" framing). `bottleneck_good` only ever answers "is something about
+/// to break"; nothing before this answered "given a real surplus and
+/// nothing currently on fire, where should it go".
+///
+/// **Rewritten 2026-09-23, second pass.** The first version scored each
+/// good by `capacity / needed` - a ratio of two numbers neither of which is
+/// `Faction::stock`. That is the defect the owner's second review measured
+/// directly: Machinery stock sat pinned at ~0 every checkpoint of a 1440-
+/// day run while Steel piled up to 8796 idle, and the policy kept growing
+/// Steel capacity regardless, because *nothing in the old formula ever read
+/// stock at all* - a good already sitting on a mountain of unused inventory
+/// looked exactly as "needy" as one that produces and instantly loses every
+/// unit to its own consumers, as long as their capacity-vs-formula ratios
+/// came out similar. `bottleneck_good` has the same excuse it always had
+/// (it's an emergency check on whether capacity can fund the chain at all,
+/// a different question) - a *growth* policy has no excuse to ignore the
+/// literal pile of evidence sitting in `Faction::stock`.
+///
+/// **Never returns `None` - unlike `bottleneck_good`, this always has an
+/// opinion.** It scores each of `Energy`/`Steel`/`Machinery`/`Munitions` by
+/// `buffer_days = stock / needed` - how many days the good's own *national
+/// stockpile* would last at today's real structural draw - and picks the
+/// smallest. This is the same "buffer days" shape `munitions_buffer_days`
+/// already established in this file for exactly this purpose (is a stock
+/// large or small *relative to what draws on it*), generalized from one
+/// good to four instead of invented fresh. Unlike a plain capacity ratio,
+/// this reads `stock` directly: a good pinned near `0.0` scores near `0.0`
+/// no matter how large its `needed` denominator is, and a good sitting on
+/// thousands of idle units scores a large `buffer_days` no matter how large
+/// its `needed` looks either - which is exactly what CLAUDE.md's own §6
+/// asks scarcity allocation to track ("必ず比率で按分する"), just applied to
+/// the stock that is actually scarce or abundant rather than to a capacity
+/// figure that never told us which stock was piling up.
+///
+/// **Why these four goods, not all nine `good::ALL_GOODS`, or the specific
+/// `Infantry`/`Armour`/`Artillery`/`Naval`/`Aircraft` equipment goods
+/// `Region::industry_total` also sums.** Each of these four has an
+/// existing, principled "how much does the chain actually need from this"
+/// formula already in this codebase: `Energy`/`Steel`/`Machinery` from the
+/// Stage 2A recipe constants (`economy::tick_economy`'s own chain) plus
+/// `active_construction_draw` (above) for `Steel`/`Machinery` specifically,
+/// and `Munitions` from `munitions_daily_demand` (this file's own function,
+/// reading the actual standing army's draw). The five equipment goods have
+/// no comparable *flow* formula - `Faction::stock[good]` for one of them is
+/// drawn down in lumps by `action::apply_recruit`'s `UNIT_EQUIPMENT` cost,
+/// at however fast the AI happens to be recruiting that tick, and nothing
+/// in `Faction` persists a recent recruiting rate to divide by - so even
+/// this function's `stock / needed` shape has no `needed` to read for them
+/// without inventing one, which would be exactly the "pick a constant, tune
+/// it until the outcome looks right" mistake CLAUDE.md's own "繰り返し踏ん
+/// だ欠陥" record already warns against.
+///
+/// **What this leaves broken.** `arms_cap` (`Good::Infantry`'s own
+/// capacity) is still never grown by this function, so it stays exactly
+/// where the scenario starts it - see this change's own report for the
+/// measured consequence: `unit_cap` keeps rising as `industry_total`
+/// compounds, but the Infantry-equipment capacity that actually funds
+/// `recruit()`'s `f.stock[equipment_good] >= UNIT_EQUIPMENT *
+/// RECRUIT_STOCK_MARGIN` gate does not, so equipment capacity - not
+/// `unit_cap` - eventually becomes the real ceiling on army size. Fixing
+/// this without inventing a tuned constant needs `crates/sim` to start
+/// persisting a real per-good recruiting-rate flow (the equipment
+/// equivalent of `munitions_daily_demand`'s standing-army read) - a
+/// `crates/sim` migration, out of scope for this agents-only change.
+///
+/// **The Steel-starvation shape this still avoids.** A policy that only
+/// ever grew `Machinery` would raise `machinery_cap`, which raises
+/// `steel_needed` (`machinery_cap * MACHINERY_INPUT_STEEL`) without ever
+/// raising `steel_cap` to match, so `Steel` would eventually bind
+/// (`machinery_output_ratio` measured falling 1.000 -> 0.55-0.70 under a x6
+/// Machinery-only multiplier - this change's own report has the
+/// measurement) and growth would choke on its own input. Scoring every
+/// good by the same `buffer_days` shape closes this loop instead of
+/// narrowing it: growing `Machinery` mechanically raises `Steel`'s
+/// `needed` (both through `MACHINERY_INPUT_STEEL` and through
+/// `active_construction_draw` once more `Project::Capacity` orders are
+/// funded) and draws down `Steel`'s stock, so `Steel`'s own `buffer_days`
+/// falls and investment shifts back upstream on its own, in proportion -
+/// the same self-correcting shape `industry_priority`'s existing Steel/
+/// Machinery/Munitions split already uses for the *flow* side of this
+/// chain (`economy::tick_economy` step 3).
+///
+/// Ties broken `Energy` < `Steel` < `Machinery` < `Munitions` (this
+/// function's own check order) - the same "check upstream first" reading
+/// `bottleneck_good` already gives its own two checks, for the same reason:
+/// an upstream shortfall blocks everything downstream of it, so a tie
+/// should resolve toward the good more things depend on.
+///
+/// **`Energy`'s own `needed` includes civilian demand; `Machinery`'s now
+/// does too.** `economy::tick_economy`'s step 2.5 draws `population *
+/// CIVILIAN_ENERGY_DEMAND_PER_POP` out of the `Energy` stock before
+/// `Steel`/`Machinery`/`Munitions` ever get their own budget from it (step
+/// 3); step 4.5 draws `population * CIVILIAN_MACHINERY_DEMAND_PER_POP` out
+/// of `Machinery` before `Infantry` equipment gets what's left (step 5).
+/// Both are real, unconditional national draws on the same shared stock
+/// this function is scoring, so both belong in `needed` - the first
+/// version of this function included the `Energy` one but not the
+/// `Machinery` one (reasoning that it "competes with Infantry equipment,
+/// not with this margin's own machinery_needed" - true of *where* the draw
+/// happens in `tick_economy`'s step order, but irrelevant to how much
+/// national Machinery stock it removes over a day, which is all a demand
+/// figure needs to track). `Steel` has no such gap: nothing civilian draws
+/// on it.
+fn growth_target_good(faction: FactionId, obs: &Observation) -> Good {
+    let c = national_chain_capacity(obs);
+    let f = obs.world.faction(faction);
+    let (constr_machinery, constr_steel) = active_construction_draw(obs);
+
+    let energy_needed = c.steel * STEEL_INPUT_ENERGY
+        + c.machinery * MACHINERY_INPUT_ENERGY
+        + c.munitions * MUNITIONS_INPUT_ENERGY
+        + c.population * CIVILIAN_ENERGY_DEMAND_PER_POP;
+    let steel_needed = c.machinery * MACHINERY_INPUT_STEEL
+        + c.munitions * MUNITIONS_INPUT_STEEL
+        + c.infantry * INFANTRY_INPUT_STEEL
+        + constr_steel;
+    let machinery_needed =
+        c.infantry * INFANTRY_INPUT_MACHINERY + c.population * CIVILIAN_MACHINERY_DEMAND_PER_POP + constr_machinery;
+    let munitions_needed = munitions_daily_demand(faction, obs);
+
+    // A good with nothing drawing on it yet (`needed <= 0.0`) trivially has
+    // an unlimited buffer - `f32::INFINITY`, not `0.0` or a divide
+    // producing `NaN`, so it never wins a "smallest buffer" comparison by
+    // accident (`docs/conventions.md`'s determinism rule: no `NaN` ever
+    // reaches a comparison this function's own tie-break logic depends on).
+    let buffer_days = |stock: f32, needed: f32| if needed > 0.0 { stock / needed } else { f32::INFINITY };
+
+    let candidates = [
+        (Good::Energy, buffer_days(f.stock[Good::Energy.index()], energy_needed)),
+        (Good::Steel, buffer_days(f.stock[Good::Steel.index()], steel_needed)),
+        (Good::Machinery, buffer_days(f.stock[Good::Machinery.index()], machinery_needed)),
+        (Good::Munitions, buffer_days(f.stock[Good::Munitions.index()], munitions_needed)),
+    ];
+
+    candidates
+        .into_iter()
+        .fold((Good::Energy, f32::INFINITY), |best, (good, m)| if m < best.1 { (good, m) } else { best })
+        .0
+}
+
+/// The safest own, uncontested, non-front region with no project already
+/// running, preferring the highest infrastructure so whatever gets built
+/// there is actually usable at good efficiency - `None` if every own region
+/// is on the front, under construction, or contested. Factored out of
+/// `safest_high_infra_region` (below) so `growth_target_good`'s own region
+/// choice (`build`'s tier 3) can use *only* this half: unlike an emergency
+/// bottleneck fix, proactive growth investment isn't urgent enough to
+/// justify claiming the one remaining front region tier 4
+/// (`Infrastructure`) would otherwise still have to work with - see
+/// `build`'s own tier-ordering doc for the full account of why this
+/// distinction exists (before it did, this function's own front-region
+/// fallback let growth silently starve tier 4 of every region it would
+/// ever have reached, since bottleneck being `None` is the same condition
+/// that unlocks growth).
+fn safest_interior_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    let front: BTreeSet<RegionId> = obs.front_regions().into_iter().collect();
+    obs.own_regions()
+        .into_iter()
         .filter(|r| {
             !front.contains(r)
                 && obs.world.region(*r).construction.is_none()
@@ -3203,11 +3483,127 @@ fn safest_high_infra_region(faction: FactionId, obs: &Observation) -> Option<Reg
                 _ => Some((r, infra)),
             }
         })
-        .map(|(r, _)| r);
-    if interior_best.is_some() {
-        return interior_best;
+        .map(|(r, _)| r)
+}
+
+/// Every own, uncontested, non-front region with no project already
+/// running, in a fixed deterministic order (`RegionId` ascending) - the
+/// plural counterpart of `safest_interior_region` just above, used by
+/// `build`'s tier 3 to invest a real surplus into *all* of them in one call
+/// rather than only the single best one.
+///
+/// **Added 2026-09-23, second pass.** `safest_interior_region` alone (one
+/// new `Action::Build` per `build()` call) combined with `HeuristicAgent`'s
+/// own decision cadence (`decide_for_llm` only actually runs `build()` once
+/// every `period` days per faction - `with_peace_disposition`'s own
+/// `PERIOD = 4`) throttled new construction *orders* to one every ~4 days,
+/// regardless of how many eligible regions actually sat idle. Since a
+/// `Project::Capacity` funded at the full `CONSTRUCTION_RATE` takes
+/// `CONSTRUCTION_REQUIRED_CAPACITY / CONSTRUCTION_RATE` = 30 days to
+/// complete, a one-order-per-call agent settles into a Little's-Law steady
+/// state of only `30 / 4` ≈ 7-8 regions under construction at once, no
+/// matter how much larger the empire (or its Machinery/Steel stock) grows
+/// past that point - measured directly: `japan_hex` seed 1's largest
+/// faction plateaued at exactly 8 concurrent `Project::Capacity` builds
+/// from day ~720 onward even as its own territory and stockpiles kept
+/// growing for another 2000+ days, and `industry_total`'s own per-360-day
+/// increment flattened to the same ~90 the whole time - a linear ceiling
+/// set by decision cadence, not by anything resembling real scarcity (this
+/// change's own report has the full before/after measurement). Offering
+/// every eligible region as a *candidate* removes that artificial cap:
+/// concurrency can now scale with how much safe, idle territory the empire
+/// actually has - the real resource `docs/conventions.md` §6 says scarcity
+/// should be measured against - rather than with how often this AI happens
+/// to be polled. `build`'s own tier 3 still caps how many of these it
+/// actually claims each call at `affordable_new_construction_projects`
+/// (below) - see that function's own doc for why offering every candidate
+/// here and bounding the claim there are two different concerns.
+fn interior_regions_available(faction: FactionId, obs: &Observation) -> Vec<RegionId> {
+    let front: BTreeSet<RegionId> = obs.front_regions().into_iter().collect();
+    let mut regions: Vec<RegionId> = obs
+        .own_regions()
+        .into_iter()
+        .filter(|r| {
+            !front.contains(r)
+                && obs.world.region(*r).construction.is_none()
+                && !obs.world.has_enemy_units(*r, faction)
+        })
+        .collect();
+    regions.sort_by_key(|r| r.0);
+    regions
+}
+
+/// How many *new* `Project::Capacity` orders this faction's current spare
+/// Machinery/Steel stock can actually fund a real day's `CONSTRUCTION_RATE`
+/// of progress on, on top of whatever `active_construction_draw` (above)
+/// already commits to constructions already running - the cap `build`'s
+/// tier 3 applies to `interior_regions_available`'s candidate list.
+///
+/// **Why this exists: `codex review` (P1).** Offering *every* eligible
+/// interior region as a candidate (`interior_regions_available`'s own doc)
+/// without bounding how many actually get claimed reproduces exactly the
+/// one-way-accumulator shape `docs/conventions.md` §6 warns against, just
+/// moved from a single region to many at once: `Action::Build` sets
+/// `Region::construction = Some(..)` unconditionally at order time (no
+/// funding check - `action::apply_build`'s own doc), so claiming, say, 40
+/// regions in one call when the national stock can only fund a handful of
+/// full `CONSTRUCTION_RATE`s per day leaves the rest sitting at
+/// `invested: 0.0`, their build slot occupied and unusable by `repair_
+/// target`/`bottleneck_good` for as long as the shared stock stays this
+/// thin - `tick_construction`'s own fixed region-index order (this file's
+/// own "却下した codex review の指摘" precedent) means the same
+/// low-indexed regions would win that funding every single day, while every
+/// later-indexed region just claimed sits stalled, contributing nothing and
+/// blocking that slot from a repair or an emergency bottleneck fix that
+/// actually could use it today.
+///
+/// The bound: `spare = stock - BUILD_STOCK_RESERVE_DAYS's own reserve
+/// (in absolute Machinery/Steel, the same conversion `build`'s own top-of-
+/// function gate already uses) - active_construction_draw (what's already
+/// committed)`, divided by one project's own daily draw
+/// (`CONSTRUCTION_RATE * CONSTRUCTION_MACHINERY_PER_POINT`/
+/// `CONSTRUCTION_STEEL_PER_POINT`) and floored - literally "how many more
+/// full-rate projects could today's real surplus, after the existing
+/// commitment, actually feed" - not a tuned constant, every term is either
+/// an existing `balance.rs` recipe constant or this file's own reserve
+/// threshold. `build`'s own call site still floors this at `1`: passing the
+/// top-of-function reserve gate at all already means there is *some*
+/// surplus, and a single new order was always the pre-2026-09-23 behaviour
+/// in that case - this only bounds how many *additional* regions beyond
+/// that one get claimed the same call.
+fn affordable_new_construction_projects(faction: FactionId, obs: &Observation) -> usize {
+    let f = obs.world.faction(faction);
+    let (existing_machinery_draw, existing_steel_draw) = active_construction_draw(obs);
+
+    let spare_machinery = (f.stock[Good::Machinery.index()]
+        - BUILD_STOCK_RESERVE_DAYS * INFANTRY_INPUT_MACHINERY
+        - existing_machinery_draw)
+        .max(0.0);
+    let spare_steel = (f.stock[Good::Steel.index()]
+        - BUILD_STOCK_RESERVE_DAYS * INFANTRY_INPUT_STEEL
+        - existing_steel_draw)
+        .max(0.0);
+
+    let machinery_per_project = CONSTRUCTION_RATE * CONSTRUCTION_MACHINERY_PER_POINT;
+    let steel_per_project = CONSTRUCTION_RATE * CONSTRUCTION_STEEL_PER_POINT;
+
+    (spare_machinery / machinery_per_project).min(spare_steel / steel_per_project).floor().max(0.0) as usize
+}
+
+/// The safest place to expand capacity for an *emergency* structural
+/// shortage (`bottleneck_good`): `safest_interior_region`, falling back to
+/// any safe own region without a project (front included) if every own
+/// region is on the front - an actual shortfall justifies reaching for
+/// whatever region is available, unlike `growth_target_good`'s own,
+/// interior-only choice (`safest_interior_region`'s own doc has the full
+/// account of why the two now differ).
+fn safest_high_infra_region(faction: FactionId, obs: &Observation) -> Option<RegionId> {
+    if let Some(region) = safest_interior_region(faction, obs) {
+        return Some(region);
     }
 
+    let mut own = obs.own_regions();
+    own.sort_by_key(|r| r.0);
     own.into_iter().find(|&r| {
         obs.world.region(r).construction.is_none() && !obs.world.has_enemy_units(r, faction)
     })
