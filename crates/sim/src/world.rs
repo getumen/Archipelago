@@ -843,6 +843,64 @@ pub struct Faction {
     /// Stage 12A ships no reader of this field at all outside this crate's
     /// own tests - see `research`'s own module doc.
     pub research_progress: [f32; RESEARCH_AXIS_COUNT],
+    /// Today's national draw on each equipment good by `action::apply_recruit`'s
+    /// `equipment_cost` and `apply_reinforce`'s `fill_equipment` - a same-tick
+    /// accumulator, not a demand figure in its own right. `[f32; GOOD_COUNT]`
+    /// so it lines up index-for-index with `stock`/`shortage_by_good` (the
+    /// same "every per-commodity array is `GOOD_COUNT`-shaped even though
+    /// only some indices ever move" convention those two already establish);
+    /// only `good::EQUIPMENT_GOODS`'s five indices are ever written.
+    ///
+    /// `Simulation::apply` (called for every faction before `Simulation::step`
+    /// runs for the day, `sim.rs`'s own doc has the fixed order) is where
+    /// `apply_recruit`/`apply_reinforce` add to this; `economy::tick_economy`
+    /// - the first system `step` runs - reads it into `equipment_demand_ema`
+    /// below and zeroes it right after, once per day, so tomorrow's actions
+    /// start from `0.0` (docs/conventions.md §6: a spent-down-then-refilled
+    /// budget, not a one-way accumulator).
+    pub equipment_drawn_today: [f32; GOOD_COUNT],
+    /// Smoothed daily equipment demand per good - the equipment analogue of
+    /// what `economy::tick_economy`'s own `national_munitions_demand` reads
+    /// fresh every tick for `Good::Munitions`. Munitions' upkeep is a live
+    /// structural formula (`logistics::unit_supply_demand`: proportional to
+    /// today's standing manpower, recomputable from current unit state
+    /// alone, no history needed); equipment has no such formula; it is
+    /// drawn in lump-sum bursts by `action::apply_recruit`/`apply_reinforce`
+    /// at whatever rate a player or AI happens to be recruiting that tick
+    /// (`economy.rs`'s own module doc used to record this as an
+    /// unaddressed gap before this field existed). The only honest way to
+    /// know "how much does this good actually get drawn per day" is to
+    /// observe the real draw and persist a smoothed running estimate of it.
+    ///
+    /// Updated once a day by `economy::tick_economy`, mirroring the exact
+    /// exponential-smoothing shape `logistics::distribute_supply` already
+    /// uses for `Unit::supply`/`Unit::arms_delivery` (`balance::
+    /// SUPPLY_SMOOTHING`, the same constant, reused rather than tuning a
+    /// second one): `ema += (equipment_drawn_today - ema) * SUPPLY_SMOOTHING`.
+    /// This is the established idiom in this codebase for "track a recent
+    /// rate from a noisy daily signal without an unbounded accumulator or an
+    /// iterative solve" - a single, order-independent update per good per
+    /// day, not a convergence loop. `0.0` at scenario start (no recruiting
+    /// has happened yet) and only ever nonzero once something has actually
+    /// been recruited/reinforced with that good, so a faction that never
+    /// spends a given equipment good reads `0.0` demand for it - the same
+    /// "an absent draw is not inflated to look like a real one" property
+    /// `production_throttle_mult`'s own zero-`needed` floor already gives
+    /// the other four throttled goods (see that function's doc).
+    ///
+    /// Read by `economy::tick_economy`'s inventory throttle
+    /// (`production_throttle_mult`) for the five `good::EQUIPMENT_GOODS`
+    /// exactly the way `national_munitions_demand` feeds Munitions' own
+    /// throttle, and by `crates/agents`' `growth_buffer_days` as `needed` for
+    /// the same five goods - closing the gap that function's own doc used to
+    /// name ("no comparable flow-demand figure anywhere in this codebase").
+    /// Deliberately not exposed through `Observation::encode()` - no
+    /// per-unit field and no Munitions-demand figure is exposed there either
+    /// (an RL consumer already has `stock`/`unit_count` to work from), and
+    /// `crates/agents`' own heuristic reads `Faction` directly through
+    /// `Observation::world`, not the flat encoding, the same way it already
+    /// reads `stock`/`munitions_daily_demand`-shaped state.
+    pub equipment_demand_ema: [f32; GOOD_COUNT],
     pub alive: bool,
 }
 

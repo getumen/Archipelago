@@ -28,10 +28,12 @@
 //!    Steel/Energy a throttled-down good would have drawn on is not
 //!    redirected anywhere *this* tick (step 4's own doc: no
 //!    redistribution mid-tick) - it simply stays unspent in stock, which
-//!    raises every good's own budget share of it starting next tick. Five
-//!    goods only: `Infantry`/`Armour`/`Artillery`/`Naval`/`Aircraft` have no
-//!    comparable demand figure anywhere in this codebase and are not grown
-//!    by investment either - see the throttle's own call site for why.
+//!    raises every good's own budget share of it starting next tick.
+//!    `Infantry`/`Armour`/`Artillery`/`Naval`/`Aircraft` get the identical
+//!    treatment too, reading `Faction::equipment_demand_ema` as `needed` -
+//!    see that field's own doc for the honest-measured-flow this reads
+//!    instead of a recipe-derived figure, and the throttle's own call site
+//!    for exactly where in this order each is resolved.
 //!    Resolved in a fixed, dependency-respecting order - `Food`/`Machinery`/
 //!    `Munitions` first (their own `needed` references nothing else in this
 //!    group), then `Steel` (reads `Machinery`'s/`Munitions`' just-throttled
@@ -66,6 +68,10 @@
 //!    recruits to draw all four, but their *production* stays exactly the
 //!    no-input shape Stage 11A gave Armour/Artillery, so none of them
 //!    contends with `Infantry` for the shared Machinery/Steel budget above.
+//!    Each still gets its own step 1.5 inventory throttle first (against
+//!    `Faction::equipment_demand_ema`, same as `Infantry`) - "no recipe"
+//!    means no Steel/Machinery input to contend over, not "no inventory
+//!    feedback at all."
 
 use crate::balance::{
     INFANTRY_INPUT_MACHINERY, INFANTRY_INPUT_STEEL, CAPITAL_FLIGHT_CONSTRUCTION_MULT, CAPITAL_FLIGHT_MACHINERY_MULT,
@@ -75,10 +81,11 @@ use crate::balance::{
     FOOD_EFFICIENCY_FLOOR, INDUSTRIAL_STABILITY_FLOOR, MACHINERY_INPUT_ENERGY, MACHINERY_INPUT_STEEL,
     MANPOWER_DEMOBILIZATION_RATE, MUNITIONS_INPUT_ENERGY, MUNITIONS_INPUT_STEEL,
     PRODUCTION_RESERVE_TARGET_DAYS, REGIME_CHANGE_OUTPUT_MULT, STEEL_INPUT_ENERGY, STRIKE_OUTPUT_MULT,
+    SUPPLY_SMOOTHING,
 };
 use crate::construction;
 use crate::focus::{self, NationalFocus};
-use crate::good::{Good, ALL_GOODS, GOOD_COUNT};
+use crate::good::{Good, ALL_GOODS, EQUIPMENT_GOODS, GOOD_COUNT};
 use crate::logistics;
 use crate::research::{self, ResearchAxis};
 use crate::world::{Station, World};
@@ -392,6 +399,24 @@ pub fn tick_economy(world: &mut World) {
         }
         let f = faction.id.index();
 
+        // `Faction::equipment_demand_ema`'s own doc: fold today's already-
+        // applied `action::apply_recruit`/`apply_reinforce` draw (accumulated
+        // in `equipment_drawn_today` during this same day's `Simulation::
+        // apply` calls, all of which ran before `step`/this function -
+        // `sim.rs`'s own fixed tick order) into the smoothed per-good
+        // estimate the throttle below reads as `needed`, then reset the
+        // accumulator so tomorrow's actions start from `0.0`. Independent of
+        // `pot`/`potential` entirely, so it can run before either is
+        // touched - order relative to the rest of this loop only matters in
+        // that it must happen before Step 1.5 reads `equipment_demand_ema`
+        // a few lines below.
+        for good in EQUIPMENT_GOODS {
+            let i = good.index();
+            faction.equipment_demand_ema[i] +=
+                (faction.equipment_drawn_today[i] - faction.equipment_demand_ema[i]) * SUPPLY_SMOOTHING;
+            faction.equipment_drawn_today[i] = 0.0;
+        }
+
         let stability_mult = stability_output_mult(faction.stability);
         // docs/phase8-spec.md Fix 2's follow-up (the "shortage → unrest →
         // lower efficiency → worse shortage" loop for every commodity but
@@ -520,19 +545,13 @@ pub fn tick_economy(world: &mut World) {
         // construction throttled by civilian/recipe demand alone, stalling
         // in-progress projects until the stockpile fell below a reserve
         // target that has nothing to do with what construction is actually
-        // drawing. `Infantry`/`Armour`/`Artillery`/`Naval`/
-        // `Aircraft` are deliberately left out: none of them has a
-        // comparable flow-demand figure anywhere in this codebase (their
-        // stock is only ever drawn down in lumps by `action::apply_recruit`/
-        // `apply_reinforce`, at whatever rate a player or AI happens to be
-        // recruiting - `crates/agents`' own `growth_buffer_days` doc records
-        // the same gap), and inventing one here would be exactly the
-        // "pick a number, tune it until the outcome looks right" mistake
-        // CLAUDE.md's own "繰り返し踏んだ欠陥" record warns against. Their
-        // capacity is also never grown by investment (`crates/agents`'
-        // `apportion_growth_goods` only ever targets Energy/Steel/Machinery/
-        // Munitions), so they are not the compounding-capacity defect this
-        // change exists to close in the first place.
+        // drawing. `Infantry`/`Armour`/`Artillery`/`Naval`/`Aircraft` get the
+        // same treatment below, reading `Faction::equipment_demand_ema` as
+        // `needed` instead of a recipe-derived figure - see that field's own
+        // doc in `world.rs` for why a real, observed, smoothed daily draw
+        // (not an invented constant) is the honest basis for these five,
+        // unlike the recipe-derived `needed` every other good in this group
+        // has.
         //
         // **Order is load-bearing here - a second codex review (P1) caught
         // that the first version read every good's downstream `pot` fully
@@ -613,6 +632,27 @@ pub fn tick_economy(world: &mut World) {
             food_need_rationed,
             pot[Good::Food.index()],
         );
+
+        // The five equipment goods' own inventory throttle, `needed` read
+        // from `Faction::equipment_demand_ema` (that field's own doc has the
+        // full account of why an observed daily draw, not a recipe figure,
+        // is `needed` here). `Infantry` has to be resolved in this same
+        // first batch, before `machinery_needed_by_chain`/`steel_needed_by_
+        // chain` below read `pot[Infantry]` as their own downstream
+        // appetite - the identical "throttle before anything reads your
+        // post-throttle `pot` as its own demand" ordering this file's module
+        // doc already establishes for `Machinery`/`Munitions` ahead of
+        // `Steel`. `Armour`/`Artillery`/`Naval`/`Aircraft` have no such
+        // downstream reader (Step 5.5/Stage 11B: no recipe, nothing else in
+        // this chain ever reads their `pot`), so resolving them in the same
+        // fixed-order loop here rather than at their own Step 5.5 site below
+        // changes nothing about what they compute - only keeps all five
+        // equipment throttles in one place instead of splitting `Infantry`
+        // out for an ordering reason the other four don't share.
+        for good in EQUIPMENT_GOODS {
+            let i = good.index();
+            pot[i] *= production_throttle_mult(faction.stock[i], faction.equipment_demand_ema[i], pot[i]);
+        }
 
         let machinery_needed_by_chain =
             machinery_need_rationed + pot[Good::Infantry.index()] * INFANTRY_INPUT_MACHINERY + constr_machinery;

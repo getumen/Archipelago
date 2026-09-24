@@ -2216,6 +2216,50 @@ fn apportion_growth_goods_splits_across_multiple_equally_scarce_goods() {
     );
 }
 
+/// `growth_buffer_days`'s 2026-09-24 extension to the five equipment goods
+/// (`lib.rs`'s own doc on `apportion_growth_goods`): once a good has a real
+/// `Faction::equipment_demand_ema` (`crates/sim`'s honest-measured-flow, not
+/// an invented constant) and a stock that can't cover it for long, it must
+/// be able to win growth seats exactly the way Energy/Steel/Machinery/
+/// Munitions already could - the growth policy must not still special-case
+/// "only these four goods" once the equipment demand figure exists.
+///
+/// **Confirmed this can fail.** Replaced `growth_buffer_days`'s
+/// `Good::Armour` entry with `buffer_days(f.stock[Good::Armour.index()],
+/// 0.0)` - i.e. as if `equipment_demand_ema` read zero regardless of the
+/// real value set below - and re-ran: `apportion_growth_goods` handed every
+/// seat to `[Energy, Energy, Steel, Machinery, Munitions]` instead, since a
+/// `needed <= 0.0` reads as `buffer_days == f32::INFINITY` (weight `0.0`),
+/// exactly the pre-2026-09-24 behaviour this change closes. Restored before
+/// committing.
+#[test]
+fn apportion_growth_goods_can_win_seats_for_an_equipment_good() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+
+    let f = world.faction_mut(faction);
+    // Armour is chronically scarce relative to a real, heavy recruiting
+    // draw (`Faction::equipment_demand_ema`'s own doc: the honest basis this
+    // change requires, not an invented constant) - `buffer_days` = 1.0/10.0.
+    f.stock[Good::Armour.index()] = 1.0;
+    f.equipment_demand_ema[Good::Armour.index()] = 10.0;
+    // Every other good this function scores is comfortably stocked, so its
+    // own `buffer_days` reads far larger than Armour's - Armour's tiny
+    // buffer should dominate the largest-remainder split entirely.
+    for good in [Good::Energy, Good::Steel, Good::Machinery, Good::Munitions] {
+        f.stock[good.index()] = 1.0e6;
+    }
+
+    let obs = Observation { faction, world: &world };
+    let goods = crate::apportion_growth_goods(faction, &obs, 5);
+    assert_eq!(goods.len(), 5, "apportion_growth_goods must return exactly the requested seat count");
+    assert!(
+        goods.iter().all(|&g| g == Good::Armour),
+        "Armour's own buffer_days (1.0 stock / 10.0 real demand) is far smaller than every other good's \
+         comfortably-stocked buffer - it should win every seat: {goods:?}"
+    );
+}
+
 /// `affordable_new_construction_projects` (`lib.rs`'s own doc: the
 /// `codex review` P1 fix for the previous test's unbounded batch) must cap
 /// how many *new* growth orders `build`'s tier 3 claims at what today's

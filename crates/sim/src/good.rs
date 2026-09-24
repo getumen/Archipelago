@@ -85,6 +85,16 @@ pub const ALL_GOODS: [Good; GOOD_COUNT] = [
     Good::Aircraft,
 ];
 
+/// The five equipment goods `military::Branch::equipment_good`/
+/// `action::apply_recruit`'s `Domain::Sea`/`Domain::Air` arms draw on - this
+/// module's own doc has the Stage 11 account of why they're one family,
+/// distinct from `Food`/`Energy`/`Steel`/`Machinery`/`Munitions`. Centralized
+/// here so `economy::tick_economy`'s inventory throttle and `crates/agents`'
+/// growth policy (`apportion_growth_goods`) both walk the exact same five
+/// goods in the exact same order, rather than each hand-rolling its own list
+/// that could silently drift from the other's.
+pub const EQUIPMENT_GOODS: [Good; 5] = [Good::Infantry, Good::Armour, Good::Artillery, Good::Naval, Good::Aircraft];
+
 impl Good {
     pub const fn index(self) -> usize {
         match self {

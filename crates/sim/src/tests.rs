@@ -1233,6 +1233,90 @@ fn zero_demand_does_not_pin_production_and_recovers_when_demand_returns() {
     );
 }
 
+/// `Faction::equipment_demand_ema`'s own doc: the five equipment goods
+/// (`good::EQUIPMENT_GOODS`) must get the identical inventory-throttle
+/// treatment `zero_demand_does_not_pin_production_and_recovers_when_demand_
+/// returns` above already proves for Munitions - but unlike Munitions'
+/// demand (a live formula, fresh every tick from current unit manpower),
+/// equipment demand is a *smoothed history* of `Faction::equipment_drawn_
+/// today`, so proving this needs several ticks in a row, not one.
+///
+/// **Confirmed this can fail two different ways.** (1) Commented out the
+/// `EQUIPMENT_GOODS` throttle loop in `economy::tick_economy`'s Step 1.5:
+/// `no_draw` and `with_recruiting` came out identical (both full,
+/// un-throttled potential regardless of drawn history) - the
+/// `with_recruiting > no_draw` assertion below caught it. (2) Commented out
+/// the `equipment_demand_ema` fold-and-reset loop (leaving
+/// `equipment_drawn_today` accumulating unread): `ema_with_recruiting`
+/// stayed at `0.0` instead of converging toward the injected draw rate - the
+/// `ema_with_recruiting > 30.0` assertion caught that one. Both restored
+/// before committing.
+#[test]
+fn equipment_demand_ema_tracks_real_draw_and_relieves_the_idle_stock_throttle() {
+    fn run_days(days: u32, drawn_per_day: f32) -> (f32, f32) {
+        let mut world = scenario::build_world();
+        let faction = FactionId(0);
+        world.units.retain(|u| u.owner != faction);
+        for region in world.regions.iter_mut() {
+            if region.owner == faction {
+                region.capacity = [0.0; GOOD_COUNT];
+                region.capacity[Good::Armour.index()] = 100.0;
+                region.infrastructure = 1.0;
+                region.unrest = 0.0;
+                region.population = 1.0;
+            }
+        }
+        {
+            let f = world.faction_mut(faction);
+            f.stock = [0.0; GOOD_COUNT];
+            // Far beyond any reserve horizon at 100.0/day potential, so a
+            // fully-throttled run still reads a clearly nonzero, clearly
+            // suppressed output - the same margin the Munitions version of
+            // this test uses.
+            f.stock[Good::Armour.index()] = 100_000.0;
+            f.stability = 100.0;
+            f.equipment_drawn_today = [0.0; GOOD_COUNT];
+            f.equipment_demand_ema = [0.0; GOOD_COUNT];
+        }
+
+        let mut produced_last_day = 0.0;
+        for _ in 0..days {
+            // Stand-in for what `action::apply_recruit`/`apply_reinforce`
+            // would have already added to this same accumulator earlier
+            // today, before `Simulation::step` (and this function) run -
+            // `sim.rs`'s own fixed tick order.
+            world.faction_mut(faction).equipment_drawn_today[Good::Armour.index()] = drawn_per_day;
+            let before = world.faction(faction).stock[Good::Armour.index()];
+            economy::tick_economy(&mut world);
+            produced_last_day = world.faction(faction).stock[Good::Armour.index()] - before;
+        }
+        (produced_last_day, world.faction(faction).equipment_demand_ema[Good::Armour.index()])
+    }
+
+    let (no_draw, ema_no_draw) = run_days(30, 0.0);
+    let (with_recruiting, ema_with_recruiting) = run_days(30, 50.0);
+
+    assert!(
+        ema_no_draw < 0.01,
+        "with nothing ever recorded in equipment_drawn_today, the EMA must stay ~0, not drift up on its own: \
+         {ema_no_draw}"
+    );
+    assert!(
+        ema_with_recruiting > 30.0,
+        "30 days of a steady 50.0/day recorded draw must converge the EMA well above zero (SUPPLY_SMOOTHING's own \
+         exponential-approach math reaches ~50 within a handful of days): {ema_with_recruiting}"
+    );
+    assert!(
+        no_draw > 0.0,
+        "no hard cutoff: even fully throttled against a huge idle stock, output must stay strictly positive: {no_draw}"
+    );
+    assert!(
+        with_recruiting > no_draw,
+        "real, smoothed recruiting demand against the exact same huge idle stock must relieve the throttle, \
+         producing strictly more than the no-draw case: no_draw={no_draw}, with_recruiting={with_recruiting}"
+    );
+}
+
 /// The point of throttling, per the task's own framing: not a tidier stock
 /// number, but that "the Steel and Energy it would have consumed stay
 /// available for goods that are actually short." Two otherwise-identical
@@ -10796,6 +10880,66 @@ fn recruit_air_unit_costs_machinery_and_arms_and_bases_it_at_the_airfield() {
         world.faction(faction).stock[Good::Machinery.index()],
         machinery_before - AIR_UNIT_MACHINERY_COST,
         "an air unit must additionally cost Good::Machinery - docs/phase10-spec.md \"4. 生産\""
+    );
+}
+
+/// `Faction::equipment_demand_ema`'s own doc: `apply_recruit`/`apply_reinforce`
+/// must record their real equipment draw into `Faction::equipment_drawn_
+/// today`, the accumulator `economy::tick_economy` later folds into the
+/// smoothed EMA - this is the honest-measured-flow this whole mechanism is
+/// built on, so if either call site stopped recording it, the equipment
+/// growth policy and throttle would both silently go back to reading zero
+/// demand forever.
+///
+/// **Confirmed this can fail.** Commented out the
+/// `equipment_drawn_today[...] += equipment_cost` line in `apply_recruit`
+/// and re-ran: the `recruit_records_its_equipment_draw` assertion below
+/// failed (`drawn` stayed `0.0` instead of `UNIT_EQUIPMENT`). Restored
+/// before committing.
+#[test]
+fn recruit_and_reinforce_record_their_equipment_draw() {
+    let mut world = scenario::build_world();
+    let faction = FactionId(0);
+    let region = world.regions_of(faction)[0];
+
+    world.faction_mut(faction).manpower = 1000.0;
+    world.faction_mut(faction).stock[Good::Armour.index()] = 1000.0;
+    world.faction_mut(faction).equipment_drawn_today = [0.0; GOOD_COUNT];
+
+    let result = action::apply_action(
+        &mut world,
+        faction,
+        Action::RecruitUnit { region, domain: Domain::Land, branch: military::Branch::Armour },
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        world.faction(faction).equipment_drawn_today[Good::Armour.index()],
+        UNIT_EQUIPMENT,
+        "apply_recruit must record its own real equipment cost into equipment_drawn_today, not leave it at zero"
+    );
+
+    // Damage the fresh unit so `apply_reinforce` has a real gap to fill,
+    // stamping a real `arms_budget`/`arms_delivery_station` by hand the same
+    // way `arms_delivery_limits_reinforcement` does - so this call spends a
+    // real, already-granted budget instead of triggering a fresh network
+    // recompute this test has no need to also exercise.
+    let unit_id = world.units.last().expect("just recruited").id;
+    {
+        let unit = world.unit_mut(unit_id);
+        unit.equipment = UNIT_EQUIPMENT - 5.0;
+        unit.arms_budget = 5.0;
+        unit.arms_delivery_station = unit.station;
+    }
+    world.faction_mut(faction).stock[Good::Armour.index()] = 1000.0;
+
+    let before = world.faction(faction).equipment_drawn_today[Good::Armour.index()];
+    let result = action::apply_action(&mut world, faction, Action::ReinforceUnit { unit: unit_id });
+    assert_eq!(result, Ok(()));
+    let after = world.faction(faction).equipment_drawn_today[Good::Armour.index()];
+    assert!(
+        after > before,
+        "apply_reinforce must add its own real equipment delivery on top of apply_recruit's, not leave the \
+         accumulator untouched: before={before}, after={after}"
     );
 }
 

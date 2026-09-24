@@ -3502,51 +3502,51 @@ fn active_construction_draw(obs: &Observation) -> (f32, f32) {
 /// literal pile of evidence sitting in `Faction::stock`.
 ///
 /// **Never returns `None` - unlike `bottleneck_good`, this always has an
-/// opinion.** It scores each of `Energy`/`Steel`/`Machinery`/`Munitions` by
-/// `buffer_days = stock / needed` - how many days the good's own *national
-/// stockpile* would last at today's real structural draw - and picks the
-/// smallest. This is the same "buffer days" shape `munitions_buffer_days`
-/// already established in this file for exactly this purpose (is a stock
-/// large or small *relative to what draws on it*), generalized from one
-/// good to four instead of invented fresh. Unlike a plain capacity ratio,
-/// this reads `stock` directly: a good pinned near `0.0` scores near `0.0`
-/// no matter how large its `needed` denominator is, and a good sitting on
-/// thousands of idle units scores a large `buffer_days` no matter how large
-/// its `needed` looks either - which is exactly what CLAUDE.md's own §6
-/// asks scarcity allocation to track ("必ず比率で按分する"), just applied to
-/// the stock that is actually scarce or abundant rather than to a capacity
-/// figure that never told us which stock was piling up.
+/// opinion.** It scores each of `Energy`/`Steel`/`Machinery`/`Munitions`
+/// (recipe-derived `needed`) and the five equipment goods `Infantry`/
+/// `Armour`/`Artillery`/`Naval`/`Aircraft` (`Faction::equipment_demand_ema`-
+/// derived `needed` - see that field's own doc) by `buffer_days = stock /
+/// needed` - how many days the good's own *national stockpile* would last at
+/// today's real draw - and picks the smallest. This is the same "buffer
+/// days" shape `munitions_buffer_days` already established in this file for
+/// exactly this purpose (is a stock large or small *relative to what draws
+/// on it*), generalized from one good to nine instead of invented fresh.
+/// Unlike a plain capacity ratio, this reads `stock` directly: a good pinned
+/// near `0.0` scores near `0.0` no matter how large its `needed` denominator
+/// is, and a good sitting on thousands of idle units scores a large
+/// `buffer_days` no matter how large its `needed` looks either - which is
+/// exactly what CLAUDE.md's own §6 asks scarcity allocation to track
+/// ("必ず比率で按分する"), just applied to the stock that is actually scarce
+/// or abundant rather than to a capacity figure that never told us which
+/// stock was piling up.
 ///
-/// **Why these four goods, not all nine `good::ALL_GOODS`, or the specific
-/// `Infantry`/`Armour`/`Artillery`/`Naval`/`Aircraft` equipment goods
-/// `Region::industry_total` also sums.** Each of these four has an
-/// existing, principled "how much does the chain actually need from this"
-/// formula already in this codebase: `Energy`/`Steel`/`Machinery` from the
+/// **Why all nine `good::ALL_GOODS` except `Food`, and not `Food` too.**
+/// Every other good has an existing, principled "how much does the chain
+/// actually need from this" formula: `Energy`/`Steel`/`Machinery` from the
 /// Stage 2A recipe constants (`economy::tick_economy`'s own chain) plus
-/// `active_construction_draw` (above) for `Steel`/`Machinery` specifically,
-/// and `Munitions` from `munitions_daily_demand` (this file's own function,
-/// reading the actual standing army's draw). The five equipment goods have
-/// no comparable *flow* formula - `Faction::stock[good]` for one of them is
-/// drawn down in lumps by `action::apply_recruit`'s `UNIT_EQUIPMENT` cost,
-/// at however fast the AI happens to be recruiting that tick, and nothing
-/// in `Faction` persists a recent recruiting rate to divide by - so even
-/// this function's `stock / needed` shape has no `needed` to read for them
-/// without inventing one, which would be exactly the "pick a constant, tune
-/// it until the outcome looks right" mistake CLAUDE.md's own "繰り返し踏ん
-/// だ欠陥" record already warns against.
+/// `active_construction_draw` (above) for `Steel`/`Machinery` specifically;
+/// `Munitions` from `munitions_daily_demand` (this file's own function,
+/// reading the actual standing army's draw); the five equipment goods from
+/// `Faction::equipment_demand_ema`, `crates/sim`'s own observed-and-smoothed
+/// daily draw by `action::apply_recruit`/`apply_reinforce` (that field's own
+/// doc has the full account of why an observed flow, not a recipe, is the
+/// honest `needed` for these five - a prior version of this function scored
+/// only the first four, precisely because this persisted state did not yet
+/// exist anywhere in `crates/sim`). `Food` alone has no `needed` formula this
+/// function reads and is not included - civilian Food demand is served by
+/// `economy::tick_economy`'s own step 2/2.5 with no chain of its own to grow
+/// investment against the way the other nine goods have, and extending
+/// growth investment to `Food` was not asked for by this change.
 ///
-/// **What this leaves broken.** `arms_cap` (`Good::Infantry`'s own
-/// capacity) is still never grown by this function, so it stays exactly
-/// where the scenario starts it - see this change's own report for the
-/// measured consequence: `unit_cap` keeps rising as `industry_total`
-/// compounds, but the Infantry-equipment capacity that actually funds
+/// **This closes the gap this function's own doc used to name as broken.**
+/// Before `equipment_demand_ema` existed, `Good::Infantry`'s own capacity
+/// (`arms_cap`) was never grown by this function, so it stayed exactly where
+/// the scenario started it: `unit_cap` kept rising as `industry_total`
+/// compounded, but the Infantry-equipment capacity that actually funds
 /// `recruit()`'s `f.stock[equipment_good] >= UNIT_EQUIPMENT *
-/// RECRUIT_STOCK_MARGIN` gate does not, so equipment capacity - not
-/// `unit_cap` - eventually becomes the real ceiling on army size. Fixing
-/// this without inventing a tuned constant needs `crates/sim` to start
-/// persisting a real per-good recruiting-rate flow (the equipment
-/// equivalent of `munitions_daily_demand`'s standing-army read) - a
-/// `crates/sim` migration, out of scope for this agents-only change.
+/// RECRUIT_STOCK_MARGIN` gate did not, so equipment capacity - not
+/// `unit_cap` - became the real ceiling on army size. See this change's own
+/// report for the measured before/after.
 ///
 /// **The Steel-starvation shape this still avoids.** A policy that only
 /// ever grew `Machinery` would raise `machinery_cap`, which raises
@@ -3565,11 +3565,14 @@ fn active_construction_draw(obs: &Observation) -> (f32, f32) {
 /// Machinery/Munitions split already uses for the *flow* side of this
 /// chain (`economy::tick_economy` step 3).
 ///
-/// Ties broken `Energy` < `Steel` < `Machinery` < `Munitions` (this
-/// function's own check order) - the same "check upstream first" reading
-/// `bottleneck_good` already gives its own two checks, for the same reason:
-/// an upstream shortfall blocks everything downstream of it, so a tie
-/// should resolve toward the good more things depend on.
+/// Ties broken `Energy` < `Steel` < `Machinery` < `Munitions` < `Infantry` <
+/// `Armour` < `Artillery` < `Naval` < `Aircraft` (this function's own return-
+/// array order, `Good::index()` order for everything but `Food`) - the same
+/// "check upstream first" reading `bottleneck_good` already gives its own
+/// two checks, for the same reason: an upstream shortfall blocks everything
+/// downstream of it, so a tie should resolve toward the good more things
+/// depend on; the five equipment goods have no such dependency between them,
+/// so their relative order is arbitrary but still fixed and deterministic.
 ///
 /// **`Energy`'s own `needed` includes civilian demand; `Machinery`'s now
 /// does too.** `economy::tick_economy`'s step 2.5 draws `population *
@@ -3586,7 +3589,7 @@ fn active_construction_draw(obs: &Observation) -> (f32, f32) {
 /// national Machinery stock it removes over a day, which is all a demand
 /// figure needs to track). `Steel` has no such gap: nothing civilian draws
 /// on it.
-fn growth_buffer_days(faction: FactionId, obs: &Observation) -> [(Good, f32); 4] {
+fn growth_buffer_days(faction: FactionId, obs: &Observation) -> [(Good, f32); 9] {
     let c = national_chain_capacity(obs);
     let f = obs.world.faction(faction);
     let (constr_machinery, constr_steel) = active_construction_draw(obs);
@@ -3610,11 +3613,32 @@ fn growth_buffer_days(faction: FactionId, obs: &Observation) -> [(Good, f32); 4]
     // reaches a comparison this function's own tie-break logic depends on).
     let buffer_days = |stock: f32, needed: f32| if needed > 0.0 { stock / needed } else { f32::INFINITY };
 
+    // The five equipment goods' own `needed` is `Faction::equipment_demand_
+    // ema` - `crates/sim`'s observed-and-smoothed daily draw by
+    // `action::apply_recruit`/`apply_reinforce` (that field's own doc) -
+    // read directly off `Faction`, the same way `f.stock` is, rather than
+    // through any `Observation::encode()` figure (that method exposes
+    // neither this nor `munitions_daily_demand`'s own equivalent; see
+    // `equipment_demand_ema`'s doc for why).
     [
         (Good::Energy, buffer_days(f.stock[Good::Energy.index()], energy_needed)),
         (Good::Steel, buffer_days(f.stock[Good::Steel.index()], steel_needed)),
         (Good::Machinery, buffer_days(f.stock[Good::Machinery.index()], machinery_needed)),
         (Good::Munitions, buffer_days(f.stock[Good::Munitions.index()], munitions_needed)),
+        (
+            Good::Infantry,
+            buffer_days(f.stock[Good::Infantry.index()], f.equipment_demand_ema[Good::Infantry.index()]),
+        ),
+        (Good::Armour, buffer_days(f.stock[Good::Armour.index()], f.equipment_demand_ema[Good::Armour.index()])),
+        (
+            Good::Artillery,
+            buffer_days(f.stock[Good::Artillery.index()], f.equipment_demand_ema[Good::Artillery.index()]),
+        ),
+        (Good::Naval, buffer_days(f.stock[Good::Naval.index()], f.equipment_demand_ema[Good::Naval.index()])),
+        (
+            Good::Aircraft,
+            buffer_days(f.stock[Good::Aircraft.index()], f.equipment_demand_ema[Good::Aircraft.index()]),
+        ),
     ]
 }
 
@@ -3637,8 +3661,11 @@ fn growth_buffer_days(faction: FactionId, obs: &Observation) -> [(Good, f32); 4]
 /// two goods, not the proportional allocation `docs/conventions.md` §6
 /// requires ("必ず比率で按分する").
 ///
-/// This splits each call's own `n` seats across all four goods
-/// `growth_buffer_days` scores, weighted by scarcity
+/// This splits each call's own `n` seats across all nine goods
+/// `growth_buffer_days` scores (extended 2026-09-24 from four to include the
+/// five equipment goods, once `crates/sim`'s `Faction::equipment_demand_ema`
+/// gave them a real `needed` to score - see `growth_buffer_days`'s own doc),
+/// weighted by scarcity
 /// (`1 / buffer_days.max(APPORTION_FLOOR_DAYS)`) instead of committing the
 /// whole batch to a single winner - several goods now get funded the same
 /// tick whenever several are genuinely short, and a good that has just been
@@ -3652,19 +3679,20 @@ fn growth_buffer_days(faction: FactionId, obs: &Observation) -> [(Good, f32); 4]
 /// Seats are handed out by largest remainder (Hamilton's method): each
 /// good's exact share `n * weight / total_weight` is floored, and leftover
 /// seats go to the goods with the largest fractional remainder, ties broken
-/// by array order (`Energy < Steel < Machinery < Munitions`, the same fixed
-/// order `growth_buffer_days`/`bottleneck_good` already use for their own
-/// ties) - a deterministic tie-break applied only to an already-computed,
-/// live ratio, never a substitute for one. If every good reads
-/// `buffer_days == f32::INFINITY` (nothing anywhere currently draws on any
-/// of the four - only reachable if `build()`'s own reserve/repair/
-/// bottleneck gates above all passed while national demand is otherwise
-/// zero), weights fall back to an even four-way split rather than dividing
-/// by a zero total - itself a balanced answer, not a fixed priority, since
-/// no good is preferred over any other in that case.
+/// by array order (`Energy < Steel < Machinery < Munitions < Infantry <
+/// Armour < Artillery < Naval < Aircraft`, the same fixed order
+/// `growth_buffer_days` returns) - a deterministic tie-break applied only to
+/// an already-computed, live ratio, never a substitute for one. If every
+/// good reads `buffer_days == f32::INFINITY` (nothing anywhere currently
+/// draws on any of the nine - only reachable if `build()`'s own reserve/
+/// repair/bottleneck gates above all passed while national demand is
+/// otherwise zero), weights fall back to an even nine-way split rather than
+/// dividing by a zero total - itself a balanced answer, not a fixed
+/// priority, since no good is preferred over any other in that case.
 ///
 /// Returns `n` goods in a fixed per-good block order (`Energy` seats first,
-/// then `Steel`, `Machinery`, `Munitions`) - `build()` zips this 1:1 against
+/// then `Steel`, `Machinery`, `Munitions`, `Infantry`, `Armour`, `Artillery`,
+/// `Naval`, `Aircraft`) - `build()` zips this 1:1 against
 /// `interior_regions_available`'s own fixed `RegionId` order, so which
 /// specific region gets which good is arbitrary; only the totals need to
 /// come out proportional, and the block order keeps this deterministic
@@ -3709,24 +3737,25 @@ fn apportion_growth_goods(faction: FactionId, obs: &Observation, n: usize) -> Ve
     }
 
     let buffers = growth_buffer_days(faction, obs);
-    let mut weights: [f32; 4] =
+    let mut weights: [f32; 9] =
         buffers.map(|(_, days)| if days.is_finite() { 1.0 / days.max(APPORTION_FLOOR_DAYS) } else { 0.0 });
     if weights.iter().all(|&w| w == 0.0) {
-        weights = [1.0; 4];
+        weights = [1.0; 9];
     }
     let total: f32 = weights.iter().sum();
 
-    let quotas: [f32; 4] = weights.map(|w| n as f32 * w / total);
-    let mut counts: [usize; 4] = quotas.map(|q| q.floor() as usize);
+    let quotas: [f32; 9] = weights.map(|w| n as f32 * w / total);
+    let mut counts: [usize; 9] = quotas.map(|q| q.floor() as usize);
     let assigned: usize = counts.iter().sum();
     let mut remaining = n.saturating_sub(assigned);
 
-    // Largest-remainder seats: rank the four goods by fractional quota
+    // Largest-remainder seats: rank the nine goods by fractional quota
     // remainder, descending; `sort_by` is stable, so a tie (equal
     // remainder) keeps the goods in their original `Energy < Steel <
-    // Machinery < Munitions` array order, the same fixed tie-break this
-    // function's own doc names.
-    let mut remainders: [(usize, f32); 4] = std::array::from_fn(|i| (i, quotas[i] - counts[i] as f32));
+    // Machinery < Munitions < Infantry < Armour < Artillery < Naval <
+    // Aircraft` array order, the same fixed tie-break this function's own
+    // doc names.
+    let mut remainders: [(usize, f32); 9] = std::array::from_fn(|i| (i, quotas[i] - counts[i] as f32));
     remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("quotas are finite: n and weights are finite/nonnegative"));
     for &(i, _) in remainders.iter() {
         if remaining == 0 {

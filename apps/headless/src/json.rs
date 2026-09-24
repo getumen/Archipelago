@@ -258,7 +258,7 @@ fn serialize_factions(world: &World) -> String {
                 world.units.iter().filter(|u| u.alive && u.owner == f.id && u.branch == Some(Branch::Artillery)).count(),
             );
             format!(
-                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"branch_units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{},\"research_progress\":{},\"research_allocation\":{}}}",
+                "{{\"id\":{},\"name\":{},\"alive\":{},\"regions\":{},\"units\":{},\"fleets\":{},\"squadrons\":{},\"branch_units\":{},\"manpower\":{},\"stock\":{},\"conscription\":{},\"industry_priority\":{},\"civilian_ration\":{},\"war_support\":{},\"stability\":{},\"shortage\":{},\"casualties\":{},\"supply_ratio\":{},\"import_plan\":{},\"logistics_priority\":{},\"group_support\":{},\"group_influence\":{},\"strike_days\":{},\"regime_change_days\":{},\"protest_active\":{},\"mutiny_active\":{},\"capital_flight_active\":{},\"national_focus\":{},\"focus_transition_days\":{},\"focus_active\":{},\"research_progress\":{},\"research_allocation\":{},\"equipment_demand_ema\":{}}}",
                 f.id.0,
                 string(&f.name),
                 f.alive,
@@ -291,6 +291,7 @@ fn serialize_factions(world: &World) -> String {
                 focus::active(f).is_some(),
                 research_object(&f.research_progress),
                 research_object(&f.research_allocation.map(|w| w.get())),
+                good_object(&f.equipment_demand_ema),
             )
         })
         .collect();

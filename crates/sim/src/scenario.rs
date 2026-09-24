@@ -1114,6 +1114,8 @@ impl Scenario {
                 focus_transition_days: 0,
                 research_allocation: FACTION_RESEARCH_ALLOCATION_DEFAULT,
                 research_progress: [0.0; RESEARCH_AXIS_COUNT],
+                equipment_drawn_today: [0.0; GOOD_COUNT],
+                equipment_demand_ema: [0.0; GOOD_COUNT],
                 alive: true,
             })
             .collect();

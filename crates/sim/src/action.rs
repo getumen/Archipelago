@@ -931,6 +931,12 @@ fn apply_recruit(
 
     world.faction_mut(faction).manpower -= UNIT_MANPOWER;
     world.faction_mut(faction).stock[equipment_good.index()] -= equipment_cost;
+    // `Faction::equipment_demand_ema`'s own doc: the honest per-day draw this
+    // field's EMA is built from - `economy::tick_economy` folds this in and
+    // resets it once a day, so this just adds this recruit's real cost, the
+    // same way `stock` just above is really debited (never a re-derived
+    // estimate).
+    world.faction_mut(faction).equipment_drawn_today[equipment_good.index()] += equipment_cost;
     world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
 
     let id = UnitId(world.units.len() as u32);
@@ -1180,6 +1186,9 @@ fn apply_reinforce(
 
     world.faction_mut(faction).manpower -= fill_manpower;
     world.faction_mut(faction).stock[equipment_good.index()] -= fill_equipment;
+    // `Faction::equipment_demand_ema`'s own doc - the same real per-day draw
+    // `apply_recruit` records above, for reinforcement's own share of it.
+    world.faction_mut(faction).equipment_drawn_today[equipment_good.index()] += fill_equipment;
     if is_air {
         world.faction_mut(faction).stock[Good::Machinery.index()] -= machinery_cost;
     }
